@@ -2,41 +2,41 @@ name: Jarvis CI
 
 on:
   push:
-    branches:
-      - main
-
+    branches: [main]
   pull_request:
-    branches:
-      - main
-
+    branches: [main]
   workflow_dispatch:
 
 jobs:
   validate:
     runs-on: ubuntu-latest
 
+    defaults:
+      run:
+        working-directory: artmach_assistant
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          path: artmach_assistant
 
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: pip
+          cache-dependency-path: artmach_assistant/**/*.txt
 
-      - name: Upgrade pip
+      - name: Install test dependencies
         run: |
           python -m pip install --upgrade pip
+          python -m pip install pytest pytest-timeout
 
-      - name: Install pytest
+      - name: Verify package imports
         run: |
-          pip install pytest
-
-      - name: Show environment
-        run: |
-          python --version
-          pip --version
+          python -c "import artmach_assistant; import core; import indexing; print('imports OK')"
 
       - name: Collect tests
         run: |
-          pytest --collect-only
+          python -m pytest tests --collect-only -q
