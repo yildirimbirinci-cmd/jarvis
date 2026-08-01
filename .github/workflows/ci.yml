@@ -31,6 +31,19 @@ jobs:
 
       - name: Install test dependencies
         run: |
+          python -m pip install --upgrade pip
+          python -m pip install \
+            pytest \
+            pytest-timeout \
+            requests \
+            beautifulsoup4
+          
+      - name: Verify package imports
+        run: |
+          python -c "import artmach_assistant; print('package import OK')"
+
+      - name: Collect first test error
+        run: |
           python -m pytest tests --collect-only -x -vv \
             --ignore-glob="tests/*audio*" \
             --ignore-glob="tests/*voice*" \
@@ -40,11 +53,3 @@ jobs:
             --ignore-glob="tests/*tts*" \
             --ignore-glob="tests/*microphone*" \
             --ignore-glob="tests/*speaker*"
-          
-      - name: Verify package imports
-        run: |
-          python -c "import artmach_assistant; print('package import OK')"
-
-      - name: Collect first test error
-        run: |
-          python -m pytest tests --collect-only -x -vv
