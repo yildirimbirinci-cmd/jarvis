@@ -1127,6 +1127,13 @@ class AssistantEngine:
                 failures.append(f"deneme {attempt}: {duplicate_error}")
 
                 if is_anchor_error(previous_error):
+                    previous_error += (
+                        "\n\n"
+                        + duplicate_error
+                        + " Bir sonraki denemede aynı old/anchor değerlerini "
+                        "yeniden kullanma; doğrulayıcı raporundaki gerçek kaynak "
+                        "bloğundan farklı, tam ve benzersiz bir eşleşme seç."
+                    )
                     previous_response = ""
                 else:
                     previous_error = duplicate_error

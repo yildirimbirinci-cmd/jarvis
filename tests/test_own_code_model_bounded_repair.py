@@ -3,10 +3,12 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 
+import pytest
+
 from artmach_assistant.core.assistant import AssistantEngine
 from artmach_assistant.core.edit_manager import EditManager
 from artmach_assistant.core.model_roles import ModelRoleResolver
-from artmach_assistant.core.workspace import WorkspaceService
+from artmach_assistant.core.workspace import WorkspaceError, WorkspaceService
 
 
 class _Response:
@@ -145,3 +147,49 @@ def test_same_invalid_patch_is_not_repeated_forever(tmp_path, monkeypatch) -> No
     assert calls == 3
     assert "3 kontrollü denemede" in result
     assert engine.editor.pending is None
+
+
+def test_duplicate_missing_anchor_changes_next_retry_prompt(tmp_path) -> None:
+    engine = _engine(tmp_path)
+    (tmp_path / "app.py").write_text(
+        "class WakeWordWorker:\n"
+        "    def run(self):\n"
+        "        while self.running:\n"
+        "            self.listen_wake()\n",
+        encoding="utf-8",
+    )
+    invalid = json.dumps(
+        {
+            "summary": "dialogue helper",
+            "files": [
+                {
+                    "path": "app.py",
+                    "reason": "refactor",
+                    "operations": [
+                        {
+                            "op": "replace",
+                            "old": "        command = self.listen_dialogue()\n",
+                            "new": "        command = self._listen_dialogue_command()\n",
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+    prompts: list[str] = []
+
+    def repeat_invalid(prompt: str, **_kwargs) -> str:
+        prompts.append(prompt)
+        return invalid
+
+    engine._request_code_model_json = repeat_invalid
+
+    with pytest.raises(WorkspaceError, match="3 kontrollü denemede"):
+        engine._generate_validated_own_code_proposal(
+            "app.py dosyasındaki WakeWordWorker.run metodunu refaktör et"
+        )
+
+    assert len(prompts) == 3
+    assert prompts[1] != prompts[2]
+    assert "aynısını tekrar üretti" in prompts[2]
+    assert "aynı old/anchor değerlerini yeniden kullanma" in prompts[2]
