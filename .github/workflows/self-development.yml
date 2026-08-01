@@ -12,7 +12,11 @@ on:
         required: true
         default: plan
         type: choice
-        options: [plan, propose, apply, handoff]
+        options:
+          - plan
+          - propose
+          - apply
+          - handoff
 
 permissions:
   contents: read
@@ -24,7 +28,7 @@ concurrency:
 jobs:
   self-development:
     name: Guarded self-development
-    runs-on: [self-hosted, windows, x64, jarvis]
+    runs-on: [self-hosted, Windows, X64]
     timeout-minutes: 45
     env:
       PYTHONUTF8: "1"
@@ -80,9 +84,9 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path artifacts | Out-Null
           if ($env:JARVIS_SELF_DEVELOP_STAGE -eq "handoff") {
-            $arguments = @('-m','artmach_assistant','--self-develop-handoff',$env:JARVIS_SELF_DEVELOP_INSTRUCTION,'--acknowledge-self-modification','--self-develop-handoff-report','artifacts/self-development-handoff.json')
+            $arguments = @("-m", "artmach_assistant", "--self-develop-handoff", $env:JARVIS_SELF_DEVELOP_INSTRUCTION, "--acknowledge-self-modification", "--self-develop-handoff-report", "artifacts/self-development-handoff.json")
           } else {
-            $arguments = @('-m','artmach_assistant','--self-develop',$env:JARVIS_SELF_DEVELOP_INSTRUCTION,'--self-develop-stage',$env:JARVIS_SELF_DEVELOP_STAGE)
+            $arguments = @("-m", "artmach_assistant", "--self-develop", $env:JARVIS_SELF_DEVELOP_INSTRUCTION, "--self-develop-stage", $env:JARVIS_SELF_DEVELOP_STAGE)
           }
           & python @arguments 2>&1 | Tee-Object -FilePath artifacts/self-development.txt
           if ($LASTEXITCODE -ne 0) { throw "Jarvis self-development exit code: $LASTEXITCODE" }
