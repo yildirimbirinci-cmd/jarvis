@@ -986,70 +986,6 @@ class AssistantEngine:
                 )
         return payload
 
-    @staticmethod
-    def _unique_anchor_hints(prompt: str, *, limit: int = 8) -> str:
-        """Return exact source fragments that occur once in source context."""
-        try:
-            maximum = max(1, min(int(limit), 12))
-        except (TypeError, ValueError, OverflowError):
-            maximum = 8
-
-        prompt_text = str(prompt or "")
-        source_marker = "KAYNAK BA?LAMI:\n"
-        source_start = prompt_text.find(source_marker)
-
-        source_text = (
-            prompt_text[source_start + len(source_marker):]
-            if source_start >= 0
-            else prompt_text
-        )
-
-        lines = source_text.splitlines()
-        hints: list[str] = []
-
-        for window_size in (5, 4, 3, 2):
-            for index in range(len(lines) - window_size + 1):
-                window = lines[index:index + window_size]
-
-                if any(not line.strip() for line in window):
-                    continue
-
-                if any(line.startswith("--- DOSYA:") for line in window):
-                    continue
-
-                anchor = "\n".join(window)
-
-                if len(anchor) < 40 or len(anchor) > 1200:
-                    continue
-
-                if source_text.count(anchor) != 1:
-                    continue
-
-                if anchor in hints:
-                    continue
-
-                hints.append(anchor)
-
-                if len(hints) >= maximum:
-                    break
-
-            if len(hints) >= maximum:
-                break
-
-        if not hints:
-            return ""
-
-        rows = [
-            "CALISAN KAYNAKTAN BENZERSIZ ANCHOR ORNEKLERI:",
-            "Asagidaki parcalar kaynak baglaminda tam olarak bir kez bulunur.",
-            "old veya anchor alanini tahmin etme; uygun parcayi birebir kopyala.",
-        ]
-
-        for number, anchor in enumerate(hints, start=1):
-            rows.append(f"\nANCHOR {number}:\n{anchor}")
-
-        return "\n".join(rows)
-
     def _generate_validated_own_code_proposal(
         self,
         prompt: str,
@@ -1078,14 +1014,6 @@ class AssistantEngine:
                     + "\nAynı cevabı tekrarlama. Yalnızca bu rapordaki hatayı, "
                     "aynı dosya ve sembol kapsamında küçük operations kullanarak düzelt."
                 )
-            if (
-                previous_error
-                and "Patch anchor tam olarak bir kez bulunmal?" in previous_error
-            ):
-                anchor_hints = self._unique_anchor_hints(prompt)
-                if anchor_hints:
-                    current_prompt += "\n\n" + anchor_hints
-
             if previous_response:
                 current_prompt += (
                     "\n\nÖNCEKİ REDDEDİLEN JSON:\n"
