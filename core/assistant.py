@@ -7597,6 +7597,15 @@ class AssistantEngine:
             "uctan uca kabul raporu",
         }:
             return self.latest_end_to_end_acceptance_report()
+        # A pending own-code plan owns short, generic approval phrases such as
+        # "Onaylıyorum".  The generic agent-tool bridge also accepts those
+        # phrases, but when no tool task exists it would consume the command
+        # with "Takip edilen bir araç görevi yok" before the plan can resume.
+        # Tool-specific approvals (for example "araç işlemini onayla") are not
+        # accepted by the own-code handler and therefore still fall through.
+        plan_follow_up = self._handle_own_code_plan_follow_up(text)
+        if plan_follow_up is not None:
+            return plan_follow_up
         tool_follow_up = self.agent_tool_commands.handle(text)
         if tool_follow_up.handled:
             return tool_follow_up.response
@@ -7629,13 +7638,6 @@ class AssistantEngine:
         explicit_own_code_plan = self._explicit_new_own_code_plan_request(text)
         if explicit_own_code_plan is not None:
             return explicit_own_code_plan
-        # Kayıtlı kendi-kod planı, açık kalmış genel problem çözme
-        # oturumundan önce işlenmelidir. Aksi halde kısa ve deterministik
-        # 'planı onayla' komutu sohbet/problem çözme katmanı tarafından
-        # yakalanır ve gerçek patch üretimi başlamaz.
-        plan_follow_up = self._handle_own_code_plan_follow_up(text)
-        if plan_follow_up is not None:
-            return plan_follow_up
         collaborative_problem = self._collaborative_problem_request(text)
         if collaborative_problem is not None:
             return collaborative_problem
