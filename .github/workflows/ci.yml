@@ -3,57 +3,61 @@ name: Jarvis CI
 on:
   push:
     branches: [main]
-
   pull_request:
     branches: [main]
-
   workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: jarvis-ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   validate:
+    name: Python 3.11 validation
     runs-on: ubuntu-latest
-
+    timeout-minutes: 30
     env:
-      PYTHONPATH: ${{ github.workspace }}
-
-    defaults:
-      run:
-        working-directory: artmach_assistant
-
+      PYTHONUTF8: "1"
+      PYTHONIOENCODING: utf-8
+      PYTHONDONTWRITEBYTECODE: "1"
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          path: artmach_assistant
 
-      - name: Setup Python
+      - name: Setup Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            requirements*.txt
+            pyproject.toml
+            setup.cfg
 
       - name: Install test dependencies
+        shell: bash
         run: |
           python -m pip install --upgrade pip
-          python -m pip install \
-            pytest \
-            pytest-timeout \
-            requests \
-            beautifulsoup4
+          if [[ -f requirements.txt ]]; then python -m pip install -r requirements.txt; fi
+          if [[ -f requirements-dev.txt ]]; then python -m pip install -r requirements-dev.txt; fi
+          python -m pip install pytest
 
-      - name: Verify package imports
-        run: |
-          python -c "import artmach_assistant; print('package import OK')"
+      - name: Compile Python sources
+        run: python -m compileall -q config.py core indexing tests tools app.py start_jarvis.py
 
-      - name: Run self development tests
-        run: |
-          python -m pytest -x -vv \
-            tests/test_own_code_readiness.py \
-            tests/test_own_code_closed_loop.py \
-            tests/test_own_code_repair_retry.py \
-            tests/test_own_code_scope.py \
-            tests/test_own_code_dependency_guard.py \
-            tests/test_own_code_security_guard.py \
-            tests/test_own_code_semantic_guard.py \
-            tests/test_own_code_symbol_guard.py \
-            tests/test_self_repair_state_machine.py \
-            tests/test_git_workspace_service.py
+      - name: Run platform-neutral acceptance tests
+        run: >-
+          python -m pytest -q
+          tests/test_application_entrypoint.py
+          tests/test_code_model_acceptance.py
+          tests/test_end_to_end_acceptance.py
+          tests/test_edit_build_safety_group.py
+          tests/test_edit_checkpoint_transaction_group.py
+          tests/test_git_change_service.py
+          tests/test_git_workspace_service.py
+
+      - name: Run complete repository suite
+        run: python -m pytest -q
