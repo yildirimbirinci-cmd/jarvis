@@ -3,8 +3,10 @@ name: Jarvis CI
 on:
   push:
     branches: [main]
+
   pull_request:
     branches: [main]
+
   workflow_dispatch:
 
 jobs:
@@ -37,12 +39,12 @@ jobs:
             pytest-timeout \
             requests \
             beautifulsoup4
-          
+
       - name: Verify package imports
         run: |
           python -c "import artmach_assistant; print('package import OK')"
 
-      - name: Collect first test error
+      - name: Collect non-voice tests
         run: |
           python -m pytest tests --collect-only -x -vv \
             --ignore-glob="tests/*audio*" \
