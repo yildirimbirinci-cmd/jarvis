@@ -6,7 +6,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
-from artmach_assistant.core.project_index import IGNORED_DIRS
 from artmach_assistant.core.workspace import WorkspaceError
 
 _MAX_FILES = 12_000
@@ -224,8 +223,7 @@ class ComplexityAnalyzer:
                             continue
                     except OSError:
                         continue
-                    relative_parts = path.relative_to(root).parts
-                    if any(part in IGNORED_DIRS for part in relative_parts):
+                    if any(part in {".git", "venv", ".venv", "__pycache__"} for part in path.parts):
                         continue
                     found.append(path.relative_to(root).as_posix())
             except OSError:
@@ -263,12 +261,7 @@ class ComplexityAnalyzer:
                         if len(result) >= _MAX_FILES:
                             break
                         try:
-                            relative_parts = child.relative_to(root).parts
-                            if (
-                                child.is_symlink()
-                                or not child.is_file()
-                                or any(part in IGNORED_DIRS for part in relative_parts)
-                            ):
+                            if child.is_symlink() or not child.is_file() or "__pycache__" in child.parts:
                                 continue
                         except OSError:
                             continue

@@ -130,6 +130,34 @@ class ComplexityAnalyzerTests(unittest.TestCase):
         self.assertEqual(len(report.items), 1)
         self.assertEqual(report.items[0].path, "pkg/a.py")
 
+
+    def test_workspace_scan_excludes_project_ignored_directories(self) -> None:
+        self.write(
+            "real.py",
+            "def real(value):\n"
+            "    if value:\n"
+            "        return 1\n"
+            "    return 0\n",
+        )
+        self.write(
+            ".jarvis_fix_backup/stale.py",
+            "def stale(value):\n"
+            "    if value:\n"
+            "        return 1\n"
+            "    return 0\n",
+        )
+
+        analyzer = ComplexityAnalyzer(
+            self.workspace,
+            ComplexityThresholds(cyclomatic_warning=2),
+        )
+        report = analyzer.analyze()
+
+        paths = {item.path for item in report.items}
+        self.assertIn("real.py", paths)
+        self.assertNotIn(".jarvis_fix_backup/stale.py", paths)
+        self.assertEqual(report.files_scanned, 1)
+
     def test_invalid_limit_is_rejected(self) -> None:
         with self.assertRaisesRegex(WorkspaceError, "en az 1"):
             ComplexityAnalyzer(self.workspace).analyze(limit=0)
