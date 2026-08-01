@@ -125,3 +125,40 @@ def test_rollback_removes_rejected_untracked_file(tmp_path: Path) -> None:
         stdout=subprocess.PIPE,
     )
     assert completed.stdout == ""
+
+def test_normalise_paths_discards_git_warning_lines() -> None:
+    from artmach_assistant.core.self_development_audit import _normalise_paths
+
+    output = (
+        "warning: in the working copy of 'core/sample.py', "
+        "LF will be replaced by CRLF\n"
+        "core/sample.py\n"
+    )
+
+    assert _normalise_paths(output) == ("core/sample.py",)
+
+
+def test_audit_ignores_internal_checkpoint_artifacts(tmp_path: Path) -> None:
+    root = _repo(tmp_path)
+
+    source = root / "core" / "sample.py"
+    source.write_text("value = 2\n", encoding="utf-8")
+
+    checkpoint = (
+        root
+        / ".artmach_assistant"
+        / "checkpoints"
+        / "probe"
+        / "proposal.diff"
+    )
+    checkpoint.parent.mkdir(parents=True)
+    checkpoint.write_text("internal audit evidence\n", encoding="utf-8")
+
+    result = audit_self_development_change(root)
+
+    assert result.ok
+    assert result.changed_paths == ("core/sample.py",)
+    assert result.untracked_paths == ()
+    assert result.additions == 1
+    assert result.deletions == 1
+
