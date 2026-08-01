@@ -56,6 +56,7 @@ from artmach_assistant.core.own_code_authority import (
 from artmach_assistant.core.own_code_risk import assess_own_code_proposal
 from artmach_assistant.core.own_code_anchor_repair import (
     build_ambiguous_anchor_guidance,
+    build_missing_anchor_guidance,
     merge_duplicate_operation_rows,
     repair_ambiguous_replace_anchors,
     repair_unique_whitespace_anchors,
@@ -1169,6 +1170,13 @@ class AssistantEngine:
                         project_root=self.own_project_root(),
                         instruction=prompt,
                     )
+
+                    if not guidance:
+                        guidance = build_missing_anchor_guidance(
+                            payload,
+                            project_root=self.own_project_root(),
+                            instruction=prompt,
+                        )
                     if guidance:
                         previous_error += "\n\n" + guidance
 

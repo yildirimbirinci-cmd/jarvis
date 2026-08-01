@@ -1,6 +1,7 @@
 from pathlib import Path
 import ast
 import copy
+import difflib
 import re
 from typing import Any
 
@@ -561,4 +562,163 @@ def repair_unique_whitespace_anchors(
             operation[anchor_field] = exact_source_anchor
 
     return repaired
+
+
+def _normalised_similarity_text(value: str) -> str:
+    rows = _normalise_anchor_lines(value)
+    return "\n".join(rows)
+
+
+def _closest_unique_source_window(
+    scoped_source: str,
+    requested: str,
+) -> tuple[str, float]:
+    requested_rows = _normalise_anchor_lines(requested)
+    if not requested_rows:
+        return "", 0.0
+
+    source_lines = scoped_source.splitlines(keepends=True)
+    window_size = len(requested_rows)
+    requested_text = "\n".join(requested_rows)
+
+    scored: list[tuple[float, str]] = []
+
+    for index in range(0, len(source_lines) - window_size + 1):
+        window = "".join(source_lines[index:index + window_size])
+        candidate_text = _normalised_similarity_text(window)
+
+        score = difflib.SequenceMatcher(
+            None,
+            requested_text,
+            candidate_text,
+        ).ratio()
+
+        scored.append((score, window))
+
+    if not scored:
+        return "", 0.0
+
+    scored.sort(key=lambda item: item[0], reverse=True)
+    best_score, best_window = scored[0]
+    second_score = scored[1][0] if len(scored) > 1 else 0.0
+
+    # Do not offer a speculative candidate. The best match must be strong and
+    # clearly better than the next possible source block.
+    if best_score < 0.78:
+        return "", best_score
+
+    if second_score >= best_score - 0.04:
+        return "", best_score
+
+    return best_window, best_score
+
+
+def build_missing_anchor_guidance(
+    payload: dict[str, Any],
+    *,
+    project_root: Path,
+    instruction: str,
+) -> str:
+    """Return exact source candidates for zero-match operations.
+
+    This function only provides retry guidance. It never changes the proposal.
+    """
+
+    requested_symbol = _requested_symbol(instruction)
+    if requested_symbol is None:
+        return ""
+
+    class_name, method_name = requested_symbol
+    root = Path(project_root).resolve(strict=False)
+    rows: list[str] = []
+
+    files = payload.get("files")
+    if not isinstance(files, list):
+        return ""
+
+    for file_row in files:
+        if not isinstance(file_row, dict):
+            continue
+
+        raw_path = str(file_row.get("path", "")).strip().replace("\\", "/")
+        if not raw_path:
+            continue
+
+        candidate = (root / raw_path).resolve(strict=False)
+
+        try:
+            candidate.relative_to(root)
+        except ValueError:
+            continue
+
+        if not candidate.is_file():
+            continue
+
+        try:
+            source = candidate.read_text(encoding="utf-8")
+        except (OSError, UnicodeError):
+            continue
+
+        scoped_source = _symbol_source(
+            source,
+            class_name=class_name,
+            method_name=method_name,
+        )
+        if not scoped_source:
+            continue
+
+        operations = file_row.get("operations")
+        if not isinstance(operations, list):
+            continue
+
+        for operation_index, operation in enumerate(operations, start=1):
+            if not isinstance(operation, dict):
+                continue
+
+            operation_name = str(
+                operation.get("op", "")
+            ).strip().casefold()
+
+            field = (
+                "anchor"
+                if operation_name in {"insert_before", "insert_after"}
+                else "old"
+                if operation_name in {"replace", "delete"}
+                else ""
+            )
+
+            if not field:
+                continue
+
+            requested_anchor = operation.get(field)
+            if not isinstance(requested_anchor, str) or not requested_anchor:
+                continue
+
+            if source.count(requested_anchor) != 0:
+                continue
+
+            closest, score = _closest_unique_source_window(
+                scoped_source,
+                requested_anchor,
+            )
+            if not closest:
+                continue
+
+            rows.extend(
+                (
+                    "",
+                    (
+                        f"EKS?K ANCHOR REHBER?: {raw_path} "
+                        f"i?lem {operation_index}"
+                    ),
+                    (
+                        f"Model anchor? kaynakta bulunmad?. En yak?n benzersiz "
+                        f"ger?ek kaynak blo?u (benzerlik %{int(score * 100)}):"
+                    ),
+                    "Bu blo?u birebir kullan veya i?lemi yeniden tasarla.",
+                    f"\nGER?EK KAYNAK BLO?U:\n{closest}",
+                )
+            )
+
+    return "\n".join(rows).strip()
 
