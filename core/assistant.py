@@ -56,6 +56,7 @@ from artmach_assistant.core.own_code_authority import (
 from artmach_assistant.core.own_code_risk import assess_own_code_proposal
 from artmach_assistant.core.own_code_anchor_repair import (
     build_ambiguous_anchor_guidance,
+    merge_duplicate_operation_rows,
     repair_ambiguous_replace_anchors,
 )
 from artmach_assistant.core.own_code_scope import validate_proposal_scope
@@ -1131,6 +1132,7 @@ class AssistantEngine:
             previous_response = raw
             try:
                 payload = self._validate_own_code_payload_shape(raw)
+                payload = merge_duplicate_operation_rows(payload)
                 payload = repair_ambiguous_replace_anchors(
                     payload,
                     project_root=self.own_project_root(),

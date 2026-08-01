@@ -2,6 +2,7 @@ from pathlib import Path
 
 from artmach_assistant.core.own_code_anchor_repair import (
     build_ambiguous_anchor_guidance,
+    merge_duplicate_operation_rows,
     repair_ambiguous_replace_anchors,
 )
 
@@ -200,3 +201,68 @@ def test_guidance_lists_unique_candidates_for_multiple_symbol_occurrences(
     assert "self.listen_wake()" in guidance
     assert "self.listen_dialogue()" in guidance
     assert "self.recover_audio()" in guidance
+
+
+
+def test_duplicate_operation_rows_for_same_file_are_merged() -> None:
+    payload = {
+        "summary": "refactor",
+        "files": [
+            {
+                "path": "app.py",
+                "reason": "helper ekle",
+                "operations": [
+                    {
+                        "op": "insert_before",
+                        "anchor": "    def run(self):\n",
+                        "content": "    def helper(self):\n        pass\n\n",
+                    }
+                ],
+            },
+            {
+                "path": "./app.py",
+                "reason": "run ?a?r?s?n? de?i?tir",
+                "operations": [
+                    {
+                        "op": "replace",
+                        "old": "        command = self.listen()\n",
+                        "new": "        command = self.helper()\n",
+                    }
+                ],
+            },
+        ],
+    }
+
+    merged = merge_duplicate_operation_rows(payload)
+
+    assert len(merged["files"]) == 1
+    row = merged["files"][0]
+    assert row["path"] == "app.py"
+    assert len(row["operations"]) == 2
+    assert "helper ekle" in row["reason"]
+    assert "run ?a?r?s?n? de?i?tir" in row["reason"]
+
+
+def test_content_rows_are_not_silently_merged() -> None:
+    payload = {
+        "files": [
+            {
+                "path": "app.py",
+                "content": "first",
+            },
+            {
+                "path": "app.py",
+                "operations": [
+                    {
+                        "op": "replace",
+                        "old": "first",
+                        "new": "second",
+                    }
+                ],
+            },
+        ],
+    }
+
+    merged = merge_duplicate_operation_rows(payload)
+
+    assert len(merged["files"]) == 2

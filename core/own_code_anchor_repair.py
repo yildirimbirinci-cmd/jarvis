@@ -352,3 +352,72 @@ def build_ambiguous_anchor_guidance(
 
     return "\n".join(rows).strip()
 
+
+def merge_duplicate_operation_rows(
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    """Merge repeated operation-only rows that target the same file.
+
+    Full-content records and mixed content/operations records are left intact
+    so EditManager can reject unsafe or ambiguous payloads normally.
+    """
+
+    repaired = copy.deepcopy(payload)
+    files = repaired.get("files")
+
+    if not isinstance(files, list):
+        return repaired
+
+    merged: list[Any] = []
+    operation_rows: dict[str, dict[str, Any]] = {}
+
+    for row in files:
+        if not isinstance(row, dict):
+            merged.append(row)
+            continue
+
+        raw_path = str(row.get("path", "")).strip().replace("\\", "/")
+        while raw_path.startswith("./"):
+            raw_path = raw_path[2:]
+
+        operations = row.get("operations")
+        content = row.get("content")
+
+        if (
+            not raw_path
+            or not isinstance(operations, list)
+            or isinstance(content, str)
+        ):
+            merged.append(row)
+            continue
+
+        key = raw_path.casefold()
+        existing = operation_rows.get(key)
+
+        if existing is None:
+            copied = copy.deepcopy(row)
+            copied["path"] = raw_path
+            operation_rows[key] = copied
+            merged.append(copied)
+            continue
+
+        existing_operations = existing.get("operations")
+        if not isinstance(existing_operations, list):
+            merged.append(row)
+            continue
+
+        existing_operations.extend(copy.deepcopy(operations))
+
+        old_reason = str(existing.get("reason", "")).strip()
+        new_reason = str(row.get("reason", "")).strip()
+
+        reasons = [
+            value
+            for value in (old_reason, new_reason)
+            if value
+        ]
+        existing["reason"] = " | ".join(dict.fromkeys(reasons))
+
+    repaired["files"] = merged
+    return repaired
+
