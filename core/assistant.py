@@ -54,7 +54,10 @@ from artmach_assistant.core.own_code_authority import (
     set_authority,
 )
 from artmach_assistant.core.own_code_risk import assess_own_code_proposal
-from artmach_assistant.core.own_code_anchor_repair import repair_ambiguous_replace_anchors
+from artmach_assistant.core.own_code_anchor_repair import (
+    build_ambiguous_anchor_guidance,
+    repair_ambiguous_replace_anchors,
+)
 from artmach_assistant.core.own_code_scope import validate_proposal_scope
 from artmach_assistant.core.own_code_symbol_guard import validate_approved_symbol_scope
 from artmach_assistant.core.own_code_semantic_guard import (
@@ -1137,6 +1140,16 @@ class AssistantEngine:
                 proposal = self.editor.create_proposal(canonical)
             except WorkspaceError as exc:
                 previous_error = str(exc)
+
+                if "Patch anchor tam olarak bir kez bulunmal?" in previous_error:
+                    previous_response = ""
+                    guidance = build_ambiguous_anchor_guidance(
+                        payload,
+                        project_root=self.own_project_root(),
+                        instruction=prompt,
+                    )
+                    if guidance:
+                        previous_error += "\n\n" + guidance
 
                 if "Patch anchor tam olarak bir kez bulunmal?" in previous_error:
                     previous_response = ""
