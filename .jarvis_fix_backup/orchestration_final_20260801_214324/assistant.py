@@ -4839,26 +4839,10 @@ class AssistantEngine:
         )
 
     def _collaborative_problem_request(self, text: str) -> str | None:
-        normalized = normalize_text(str(text or ""))
-        words = normalized.split()
-        own_intent = classify_own_code_intent(
-            text,
-            active_own_editor=str((getattr(self, "last_action_context", None) or {}).get("kind", ""))
-            in {"editor_opened", "own_code_review", "own_code_summary"},
-        )
-        explicit_own_plan = (
-            own_intent.kind is OwnCodeIntentKind.CHANGE
-            and any(word.startswith(("kod", "kaynak", "kendi", "jarvis")) for word in words)
-            and any(word.startswith(("plan", "pilan", "taslak")) for word in words)
-        )
-        # Acik bir kendi-kod gelistirme/plani talebi genel ortak problem
-        # oturumuna dusmemeli. None donerek deterministik own-code planlayicisinin
-        # ve ardindan kod modelinin calismasina izin veriyoruz.
-        if explicit_own_plan:
-            return None
         store = getattr(self, "collaborative_problems", None)
         if store is None:
             return None
+        normalized = normalize_text(str(text or ""))
         session = store.load()
         last_kind = str((self.last_action_context or {}).get("kind", ""))
         focused_review_followup = (
