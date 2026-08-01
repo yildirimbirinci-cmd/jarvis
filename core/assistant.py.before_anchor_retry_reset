@@ -1113,13 +1113,6 @@ class AssistantEngine:
                 proposal = self.editor.create_proposal(canonical)
             except WorkspaceError as exc:
                 previous_error = str(exc)
-
-                # Invalid anchors must be regenerated from the live source.
-                # Repeating the rejected JSON encourages small local models to
-                # copy the same nonexistent or ambiguous anchor again.
-                if "Patch anchor tam olarak bir kez bulunmal?" in previous_error:
-                    previous_response = ""
-
                 failures.append(f"deneme {attempt}: {previous_error}")
                 try:
                     self.own_code_history.record(
