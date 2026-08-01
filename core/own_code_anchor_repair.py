@@ -573,45 +573,96 @@ def _closest_unique_source_window(
     scoped_source: str,
     requested: str,
 ) -> tuple[str, float]:
+    """Find one strong source excerpt even when line counts differ.
+
+    Overlapping candidates around the same source block are treated as one
+    region. A similarly strong candidate from another region makes the result
+    ambiguous and therefore unusable as retry guidance.
+    """
+
     requested_rows = _normalise_anchor_lines(requested)
     if not requested_rows:
         return "", 0.0
 
     source_lines = scoped_source.splitlines(keepends=True)
-    window_size = len(requested_rows)
+    if not source_lines:
+        return "", 0.0
+
     requested_text = "\n".join(requested_rows)
+    requested_size = len(requested_rows)
 
-    scored: list[tuple[float, str]] = []
+    size_delta = max(6, requested_size // 2)
+    minimum_size = max(1, requested_size - size_delta)
+    maximum_size = min(
+        len(source_lines),
+        requested_size + size_delta,
+    )
 
-    for index in range(0, len(source_lines) - window_size + 1):
-        window = "".join(source_lines[index:index + window_size])
-        candidate_text = _normalised_similarity_text(window)
+    scored: list[tuple[float, int, int, str]] = []
 
-        score = difflib.SequenceMatcher(
-            None,
-            requested_text,
-            candidate_text,
-        ).ratio()
+    for window_size in range(minimum_size, maximum_size + 1):
+        for index in range(
+            0,
+            len(source_lines) - window_size + 1,
+        ):
+            end_index = index + window_size
+            window = "".join(source_lines[index:end_index])
+            candidate_text = _normalised_similarity_text(window)
 
-        scored.append((score, window))
+            similarity = difflib.SequenceMatcher(
+                None,
+                requested_text,
+                candidate_text,
+            ).ratio()
+
+            length_ratio = (
+                min(requested_size, window_size)
+                / max(requested_size, window_size)
+            )
+
+            # Prefer textually similar windows whose size is also reasonably
+            # close to the rejected anchor, without requiring equal lengths.
+            score = (similarity * 0.90) + (length_ratio * 0.10)
+
+            scored.append(
+                (
+                    score,
+                    index,
+                    end_index,
+                    window,
+                )
+            )
 
     if not scored:
         return "", 0.0
 
     scored.sort(key=lambda item: item[0], reverse=True)
-    best_score, best_window = scored[0]
-    second_score = scored[1][0] if len(scored) > 1 else 0.0
 
-    # Do not offer a speculative candidate. The best match must be strong and
-    # clearly better than the next possible source block.
-    if best_score < 0.78:
+    best_score, best_start, best_end, best_window = scored[0]
+
+    # This is guidance, not an automatic edit, but still require a meaningful
+    # structural resemblance before exposing a source block to the next retry.
+    if best_score < 0.62:
         return "", best_score
 
-    if second_score >= best_score - 0.04:
-        return "", best_score
+    for challenger_score, challenger_start, challenger_end, _ in scored[1:]:
+        overlaps_best = not (
+            challenger_end <= best_start
+            or challenger_start >= best_end
+        )
+
+        if overlaps_best:
+            continue
+
+        # A similarly strong candidate in another source region means the
+        # proposed anchor cannot be mapped safely to one exact block.
+        if challenger_score >= best_score - 0.035:
+            return "", best_score
+
+        # Remaining candidates are sorted lower and cannot become ambiguous.
+        break
 
     return best_window, best_score
-
 
 def build_missing_anchor_guidance(
     payload: dict[str, Any],
