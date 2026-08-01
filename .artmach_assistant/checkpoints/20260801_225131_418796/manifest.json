@@ -1,0 +1,8 @@
+[
+  {
+    "path": "core/project_index.py",
+    "existed": true,
+    "after_sha256": "84f4ba42c00230cfbbddd763dda73683f7392b7ec4816a6bfefbc1f1e2d3462c",
+    "before_sha256": "d1e4ca3d1b42b989c27ccdf373dfd729a2231465e54214f5121c425231ffabd4"
+  }
+]

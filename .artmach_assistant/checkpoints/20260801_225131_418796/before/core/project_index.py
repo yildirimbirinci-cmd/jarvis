@@ -14,7 +14,7 @@ TEXT_EXTENSIONS = {
     ".cfg", ".bat", ".cmd", ".ps1", ".sh", ".html", ".css", ".scss", ".sql",
 }
 
-IGNORED_DIRS = {".jarvis_e2e_probe",
+IGNORED_DIRS = {
     ".git", ".svn", ".hg", ".idea", ".vs", ".vscode", ".venv", "venv", "env",
     "node_modules", "__pycache__", "build", "dist", "out", "target", ".pytest_cache",
     ".mypy_cache", ".ruff_cache", "coverage", ".next", ".nuxt",
