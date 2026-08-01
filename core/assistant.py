@@ -5180,6 +5180,15 @@ class AssistantEngine:
             raw_path = match.group(1).strip().replace("\\", "/")
             if not raw_path:
                 continue
+
+            raw_parts = tuple(
+                part.casefold()
+                for part in raw_path.split("/")
+                if part not in {"", "."}
+            )
+            if ".jarvis_fix_backup" in raw_parts:
+                continue
+
             if root_resolved is not None:
                 try:
                     path = EditManager._normalize_proposal_path(
