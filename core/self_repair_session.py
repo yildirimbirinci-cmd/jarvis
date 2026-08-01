@@ -1,0 +1,262 @@
+from __future__ import annotations
+
+import re
+import uuid
+from dataclasses import asdict, dataclass, replace
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Iterable
+
+from artmach_assistant.core.store_validation import atomic_write_json, read_json_object
+
+_SCHEMA_VERSION = 1
+_MAX_BYTES = 256 * 1024
+_ACTIVE_STATES = {
+    "planned",
+    "generating",
+    "proposal_ready",
+    "applying",
+    "proposal_failed",
+}
+_RUN_PATTERN = re.compile(r"\bRUN(?:[\s:_-]*)(([A-F0-9][\s_-]*){10})\b", re.IGNORECASE)
+_RPR_PATTERN = re.compile(r"\bRPR(?:[\s:_-]*)(([A-F0-9][\s_-]*){10})\b", re.IGNORECASE)
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _clean_paths(values: Iterable[object]) -> tuple[str, ...]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        item = str(value or "").strip().replace("\\", "/")
+        key = item.casefold()
+        if not item or key in seen:
+            continue
+        seen.add(key)
+        result.append(item[:1000])
+        if len(result) >= 8:
+            break
+    return tuple(result)
+
+
+def _clean_symbols(values: Iterable[object]) -> tuple[str, ...]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        item = str(value or "").strip()
+        key = item.casefold()
+        if not item or key in seen:
+            continue
+        seen.add(key)
+        result.append(item[:500])
+        if len(result) >= 16:
+            break
+    return tuple(result)
+
+
+def extract_run_id(text: object) -> str | None:
+    match = _RUN_PATTERN.search(str(text or "").upper())
+    if match is None:
+        return None
+    digest = re.sub(r"[^A-F0-9]", "", match.group(1).upper())
+    return f"RUN-{digest}" if len(digest) == 10 else None
+
+
+def extract_plan_id(text: object) -> str | None:
+    match = _RPR_PATTERN.search(str(text or "").upper())
+    if match is None:
+        return None
+    digest = re.sub(r"[^A-F0-9]", "", match.group(1).upper())
+    return f"RPR-{digest}" if len(digest) == 10 else None
+
+
+@dataclass(frozen=True, slots=True)
+class SelfRepairSession:
+    session_id: str
+    state: str
+    plan_id: str
+    finding_id: str
+    instruction: str
+    approved_paths: tuple[str, ...]
+    approved_symbols: tuple[str, ...]
+    evidence: str
+    acceptance: tuple[str, ...]
+    source_fingerprint: str
+    created_at: str
+    updated_at: str
+    proposal_fingerprint: str = ""
+    attempts: int = 0
+    last_error: str = ""
+
+    @property
+    def active(self) -> bool:
+        return self.state in _ACTIVE_STATES
+
+    def to_dict(self) -> dict[str, object]:
+        payload = asdict(self)
+        payload["approved_paths"] = list(self.approved_paths)
+        payload["approved_symbols"] = list(self.approved_symbols)
+        payload["acceptance"] = list(self.acceptance)
+        return payload
+
+
+class SelfRepairSessionStore:
+    """Durable finite-state store for one targeted self-repair operation.
+
+    Runtime repair state is intentionally independent from generic development
+    plans.  A short voice command such as ``başla`` can therefore never lose the
+    RUN identity, file scope or approved symbols by falling into general chat.
+    """
+
+    def __init__(self, path: str | Path) -> None:
+        self.path = Path(path).expanduser().resolve(strict=False)
+
+    def load(self) -> SelfRepairSession | None:
+        if not self.path.is_file():
+            return None
+        try:
+            payload = read_json_object(self.path, max_bytes=_MAX_BYTES)
+            if payload.get("schema_version") != _SCHEMA_VERSION:
+                return None
+            row = payload.get("session")
+            if not isinstance(row, dict):
+                return None
+            state = str(row.get("state", "")).strip()
+            plan_id = extract_plan_id(row.get("plan_id", ""))
+            finding_id = extract_run_id(row.get("finding_id", ""))
+            if state not in _ACTIVE_STATES | {"completed", "cancelled", "stale"}:
+                return None
+            if not plan_id or not finding_id:
+                return None
+            return SelfRepairSession(
+                session_id=str(row.get("session_id", ""))[:64] or uuid.uuid4().hex,
+                state=state,
+                plan_id=plan_id,
+                finding_id=finding_id,
+                instruction=str(row.get("instruction", ""))[:20000],
+                approved_paths=_clean_paths(row.get("approved_paths", ())),
+                approved_symbols=_clean_symbols(row.get("approved_symbols", ())),
+                evidence=str(row.get("evidence", ""))[:30000],
+                acceptance=tuple(
+                    str(item)[:1000]
+                    for item in row.get("acceptance", ())
+                    if str(item).strip()
+                )[:16],
+                source_fingerprint=str(row.get("source_fingerprint", ""))[:128],
+                created_at=str(row.get("created_at", ""))[:64] or _now_iso(),
+                updated_at=str(row.get("updated_at", ""))[:64] or _now_iso(),
+                proposal_fingerprint=str(row.get("proposal_fingerprint", ""))[:128],
+                attempts=max(0, min(int(row.get("attempts", 0) or 0), 3)),
+                last_error=str(row.get("last_error", ""))[-12000:],
+            )
+        except (OSError, TypeError, ValueError, UnicodeError):
+            return None
+
+    def save(self, session: SelfRepairSession) -> SelfRepairSession:
+        updated = replace(session, updated_at=_now_iso())
+        atomic_write_json(
+            self.path,
+            {"schema_version": _SCHEMA_VERSION, "session": updated.to_dict()},
+            max_bytes=_MAX_BYTES,
+        )
+        return updated
+
+    def create(
+        self,
+        *,
+        finding_id: str,
+        instruction: str,
+        approved_paths: Iterable[object],
+        approved_symbols: Iterable[object] = (),
+        evidence: str = "",
+        acceptance: Iterable[object] = (),
+        source_fingerprint: str = "",
+    ) -> SelfRepairSession:
+        run_id = extract_run_id(finding_id)
+        if run_id is None:
+            raise ValueError("Geçerli RUN bulgu kimliği gerekli.")
+        paths = _clean_paths(approved_paths)
+        if not paths:
+            raise ValueError("Hedefli onarım için en az bir üretim dosyası gerekli.")
+        digest = run_id.removeprefix("RUN-")
+        now = _now_iso()
+        session = SelfRepairSession(
+            session_id=uuid.uuid4().hex,
+            state="planned",
+            plan_id=f"RPR-{digest}",
+            finding_id=run_id,
+            instruction=str(instruction or "").strip()[:20000],
+            approved_paths=paths,
+            approved_symbols=_clean_symbols(approved_symbols),
+            evidence=str(evidence or "")[:30000],
+            acceptance=tuple(
+                str(item)[:1000]
+                for item in acceptance
+                if str(item).strip()
+            )[:16],
+            source_fingerprint=str(source_fingerprint or "")[:128],
+            created_at=now,
+            updated_at=now,
+        )
+        return self.save(session)
+
+    def transition(
+        self,
+        state: str,
+        *,
+        expected: Iterable[str] | None = None,
+        proposal_fingerprint: str | None = None,
+        last_error: str | None = None,
+        increment_attempt: bool = False,
+    ) -> SelfRepairSession:
+        current = self.load()
+        if current is None:
+            raise ValueError("Etkin hedefli onarım oturumu yok.")
+        if expected is not None and current.state not in set(expected):
+            raise ValueError(
+                f"Onarım durumu bu işlem için uygun değil: {current.state}"
+            )
+        attempts = current.attempts + (1 if increment_attempt else 0)
+        updated = replace(
+            current,
+            state=str(state),
+            proposal_fingerprint=(
+                current.proposal_fingerprint
+                if proposal_fingerprint is None
+                else str(proposal_fingerprint)[:128]
+            ),
+            attempts=max(0, min(attempts, 3)),
+            last_error=(
+                current.last_error
+                if last_error is None
+                else str(last_error)[-12000:]
+            ),
+        )
+        return self.save(updated)
+
+    def cancel(self, reason: str = "Kullanıcı iptal etti.") -> SelfRepairSession | None:
+        current = self.load()
+        if current is None:
+            return None
+        return self.save(replace(current, state="cancelled", last_error=str(reason)[-12000:]))
+
+    def invalidate_if_source_changed(self, current_fingerprint: str) -> SelfRepairSession | None:
+        session = self.load()
+        if session is None or not session.active:
+            return session
+        expected = str(session.source_fingerprint or "")
+        actual = str(current_fingerprint or "")
+        if expected and actual and expected != actual:
+            return self.save(
+                replace(
+                    session,
+                    state="stale",
+                    last_error=(
+                        "Kaynak ağacı onarım planı hazırlandıktan sonra değişti; "
+                        "eski kapsam uygulanmadı."
+                    ),
+                )
+            )
+        return session

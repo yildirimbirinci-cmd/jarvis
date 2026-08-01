@@ -1,0 +1,68 @@
+{
+  "schema_version": "1.0.0",
+  "default_behavior": "deny",
+  "risk_levels": ["low", "medium", "high", "critical"],
+  "plan_states": ["draft", "ready", "awaiting_approval", "approved", "running", "completed", "failed", "cancelled"],
+  "step_states": ["pending", "blocked", "ready", "running", "completed", "failed", "cancelled"],
+  "principles": {
+    "single_active_step": true,
+    "dependency_order_required": true,
+    "root_cause_required_for_changes": true,
+    "risk_assessment_required": true,
+    "rollback_required_for_high_risk": true,
+    "automatic_execution_forbidden": true,
+    "production_changes_require_approval": true,
+    "ambiguous_scope_requires_review": true,
+    "completed_steps_are_immutable": true
+  },
+  "operations": {
+    "plan.create": {
+      "decision": "allow",
+      "reason": "Salt okunur bir geliştirme planı hazırlanabilir."
+    },
+    "plan.read": {
+      "decision": "allow",
+      "reason": "Planlar ve adımları okunabilir."
+    },
+    "plan.update_draft": {
+      "decision": "allow",
+      "reason": "Taslak plan yürütülmeden önce güncellenebilir."
+    },
+    "plan.assess_risk": {
+      "decision": "allow",
+      "reason": "Risk değerlendirmesi salt okunur analizdir."
+    },
+    "plan.request_approval": {
+      "decision": "allow",
+      "reason": "Jarvis kullanıcıdan açık onay isteyebilir."
+    },
+    "plan.approve": {
+      "decision": "approval_required",
+      "reason": "Plan yalnızca açık kullanıcı onayıyla onaylanabilir."
+    },
+    "plan.start_execution": {
+      "decision": "approval_required",
+      "reason": "Bir planın yürütülmesi açık kullanıcı onayı gerektirir."
+    },
+    "plan.execute_automatically": {
+      "decision": "deny",
+      "reason": "Jarvis planları bağımsız olarak yürütemez."
+    },
+    "plan.skip_dependency": {
+      "decision": "deny",
+      "reason": "Tamamlanmamış bağımlılıklar atlanamaz."
+    },
+    "plan.modify_completed_step": {
+      "decision": "deny",
+      "reason": "Tamamlanmış adımlar değiştirilemez; yeni bir düzeltme adımı oluşturulmalıdır."
+    },
+    "plan.cancel": {
+      "decision": "approval_required",
+      "reason": "Onaylanmış veya çalışan planın iptali kullanıcı onayı gerektirir."
+    },
+    "plan.delete_history": {
+      "decision": "deny",
+      "reason": "Plan geçmişi Jarvis tarafından silinemez."
+    }
+  }
+}

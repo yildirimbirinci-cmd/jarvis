@@ -1,0 +1,30 @@
+{
+  "schema_version": "1.0.0",
+  "default_behavior": "deny",
+  "risk_levels": ["low", "medium", "high", "critical"],
+  "run_states": ["created", "authorized", "running", "completed", "failed", "cancelled"],
+  "principles": {
+    "identity_required": true,
+    "declared_capabilities_only": true,
+    "least_privilege_required": true,
+    "tool_allowlist_required": true,
+    "audit_required": true,
+    "self_spawn_forbidden": true,
+    "authority_delegation_forbidden": true,
+    "autonomous_source_modification_forbidden": true,
+    "recursive_depth_limit": 1
+  },
+  "operations": {
+    "agent.register": {"decision": "allow", "reason": "Ajan kimliği ve yetenekleri salt okunur biçimde kaydedilebilir."},
+    "agent.read": {"decision": "allow", "reason": "Ajan kayıtları ve çalışma geçmişi okunabilir."},
+    "agent.authorize_run": {"decision": "approval_required", "reason": "Ajan çalışması açık kullanıcı onayı gerektirir."},
+    "agent.use_tool": {"decision": "allow", "reason": "Yalnızca kayıtlı izin listesindeki araç kullanılabilir."},
+    "agent.modify_source": {"decision": "approval_required", "reason": "Kaynak kod değişikliği açık kullanıcı onayı ve onaylı plan gerektirir."},
+    "agent.delete_data": {"decision": "approval_required", "reason": "Veri silme işlemi açık kullanıcı onayı gerektirir."},
+    "agent.spawn_agent": {"decision": "deny", "reason": "Ajanlar kendiliğinden yeni ajan oluşturamaz."},
+    "agent.delegate_authority": {"decision": "deny", "reason": "Ajanlar sahip oldukları yetkiyi başka bir ajana devredemez."},
+    "agent.expand_capabilities": {"decision": "deny", "reason": "Ajanlar çalışma sırasında kendi yeteneklerini genişletemez."},
+    "agent.bypass_audit": {"decision": "deny", "reason": "Ajan çalışmaları denetim kaydı olmadan yürütülemez."},
+    "agent.delete_history": {"decision": "deny", "reason": "Ajan çalışma geçmişi Jarvis tarafından silinemez."}
+  }
+}

@@ -1,0 +1,81 @@
+{
+  "schema_version": "1.0",
+  "runtime_rules_version": "1.0.0",
+  "title": "Jarvis Constitution - SAE Runtime Rules",
+  "default_policy": "deny",
+  "operations": {
+    "sae.boot_scan": {
+      "effect": "allow",
+      "mode": "read_only",
+      "approval_required": false,
+      "description": "Uygulama acilisinda kaynak kodu envanterini salt okunur tarar."
+    },
+    "sae.live_watch": {
+      "effect": "allow",
+      "mode": "read_only",
+      "approval_required": false,
+      "description": "Degisen kaynak dosyalarini izler ve yalnizca ilgili indeks kayitlarini gunceller."
+    },
+    "sae.incremental_scan": {
+      "effect": "allow",
+      "mode": "read_only",
+      "approval_required": false,
+      "description": "Yalnizca degisen veya silinen kaynak dosyalarinin indeks kayitlarini yeniler."
+    },
+    "sae.manual_scan": {
+      "effect": "allow",
+      "mode": "read_only",
+      "approval_required": false,
+      "description": "Kullanici istegiyle tam kaynak kodu envanteri olusturur."
+    },
+    "sae.deep_analysis": {
+      "effect": "allow",
+      "mode": "read_only",
+      "approval_required": false,
+      "idle_only_when_automatic": true,
+      "description": "Otomatik calistiginda yalnizca sistem bosken derin analiz yapar."
+    },
+    "sae.prepare_patch": {
+      "effect": "allow",
+      "mode": "proposal_only",
+      "approval_required": false,
+      "description": "Kaynak kodunu degistirmeden inceleme veya patch onerisi hazirlayabilir."
+    },
+    "source.apply_patch": {
+      "effect": "conditional",
+      "mode": "write",
+      "approval_required": true,
+      "approval_scope": "single_operation",
+      "description": "Hazirlanan patch yalnizca birincil kullanicinin acik onayiyla uygulanabilir."
+    },
+    "source.delete": {
+      "effect": "conditional",
+      "mode": "destructive_write",
+      "approval_required": true,
+      "approval_scope": "single_operation",
+      "description": "Kaynak dosyasi silme islemi acik kullanici onayi gerektirir."
+    },
+    "source.autonomous_modify": {
+      "effect": "deny",
+      "mode": "write",
+      "approval_required": true,
+      "description": "Jarvis veya SAE uretim kaynak kodunu bagimsiz olarak degistiremez."
+    },
+    "constitution.modify": {
+      "effect": "deny",
+      "mode": "protected_write",
+      "approval_required": true,
+      "description": "Jarvis Constitution dosyalarini kendi calisma akisi icinden degistiremez."
+    }
+  },
+  "audit": {
+    "log_allowed_operations": false,
+    "log_denied_operations": true,
+    "log_approval_required_operations": true
+  },
+  "metadata": {
+    "editable_by_jarvis": false,
+    "owner_approval_required_for_changes": true,
+    "source_of_truth": true
+  }
+}

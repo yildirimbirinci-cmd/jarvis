@@ -1,0 +1,67 @@
+{
+  "version": "2026.08.01-self-repair-final-1",
+  "installed_at": "2026-08-01T11:45:48+03:00",
+  "files": [
+    {
+      "path": "core/assistant.py",
+      "sha256": "5438fc1958d1bb8238e9a1aabdf84daef5d9270fdef8e32b79ed76110bee8609"
+    },
+    {
+      "path": "core/edit_manager.py",
+      "sha256": "4c07fd3ce36f6ec24f643cee893a99432dcd65d9ac7e16df932a6f7ae11ef2af"
+    },
+    {
+      "path": "core/maintenance_advisor.py",
+      "sha256": "cad6b6f43ecd375d2255da324289cce1be0e9459c421804196079f70d39c2576"
+    },
+    {
+      "path": "core/own_code_repair_retry.py",
+      "sha256": "997d449ba90635dd96001bc74496248ea638dc7838f7a74b404b6446dd3e2735"
+    },
+    {
+      "path": "core/own_code_symbol_guard.py",
+      "sha256": "e0aa7a3fcfad951ed1d0684cabd712d782727c45042742ecedc3c4e202399826"
+    },
+    {
+      "path": "core/runtime_instrumentation.py",
+      "sha256": "5f263f44775d4c5ec2a6859a9abcabb4d9e7ef385544376827e7d165c7f265ff"
+    },
+    {
+      "path": "core/runtime_observability.py",
+      "sha256": "a6702e9025c4322fb93d3d6dacb8725e34cce57ec9bb55b2cefb2876a8d2a1fb"
+    },
+    {
+      "path": "core/self_repair_session.py",
+      "sha256": "eecbddf1969fded2d341f344b428d9598b7cfa3bc4c358639db6d2a77844e627"
+    },
+    {
+      "path": "tests/test_assistant_runtime_maintenance_memory.py",
+      "sha256": "8b8847dec082cc2073f91488dd66eb01d0e7f52386e77b6bf56a082ccf82e93a"
+    },
+    {
+      "path": "tests/test_edit_manager_package_prefix.py",
+      "sha256": "bbfa3a06122372e8d9a97cd69b91092ac6748034c393b85fa41ead435825a86a"
+    },
+    {
+      "path": "tests/test_own_code_closed_loop.py",
+      "sha256": "265e22d5ef8d1399b10261e58f618f8cd9584cd2f742140d167a060f0ead4a9c"
+    },
+    {
+      "path": "tests/test_own_code_repair_retry.py",
+      "sha256": "85bd83efde0166b02474ef559cef730d3de761e4cd3983c8f36e4d41e84da18a"
+    },
+    {
+      "path": "tests/test_own_code_symbol_guard.py",
+      "sha256": "e45a6f3c82aee50bdf46ad37c85e5a64e96529721b59b55563504556413f7166"
+    },
+    {
+      "path": "tests/test_runtime_repair_command_routing.py",
+      "sha256": "ca52a70b4d5fdf71e978117a5fe5dca7e192bf520943c10572c7ca4470dd7ea7"
+    },
+    {
+      "path": "tests/test_self_repair_state_machine.py",
+      "sha256": "b21ae4770524d74c84bfa38b5525b59c1283db803ecffa38b91f89bcb44b64c9"
+    }
+  ],
+  "backup": "C:\\Users\\yildi\\Desktop\\JARVIS_PROJECT\\Artmach_Asistant_Program\\JARVIS_BACKUPS\\SELF_REPAIR_FINAL_20260801_114548"
+}

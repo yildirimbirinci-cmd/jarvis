@@ -1,0 +1,50 @@
+{
+  "schema_version": "1.0",
+  "policy_name": "Jarvis Memory Constitution",
+  "policy_version": "1.0.0",
+  "default_behavior": "deny",
+  "layers": {
+    "working": {
+      "persistent": false,
+      "description": "Aktif işlem sırasında kullanılan geçici bağlam."
+    },
+    "conversation": {
+      "persistent": false,
+      "description": "Mevcut konuşma oturumunun geçici bağlamı."
+    },
+    "project": {
+      "persistent": true,
+      "description": "Belirli bir çalışma alanına veya projeye ait doğrulanmış kayıtlar."
+    },
+    "long_term": {
+      "persistent": true,
+      "description": "Kullanıcı tercihleri ve kalıcı mimari kararlar gibi uzun ömürlü kayıtlar."
+    }
+  },
+  "record_types": {
+    "temporary": {"allowed_layers": ["working", "conversation"], "verification_required": false},
+    "note": {"allowed_layers": ["conversation", "project"], "verification_required": false},
+    "user_preference": {"allowed_layers": ["long_term"], "verification_required": true},
+    "project_decision": {"allowed_layers": ["project", "long_term"], "verification_required": true},
+    "architecture_decision": {"allowed_layers": ["project", "long_term"], "verification_required": true},
+    "verified_fact": {"allowed_layers": ["project", "long_term"], "verification_required": true}
+  },
+  "verification_states": ["unverified", "verified", "conflicted", "superseded"],
+  "operations": {
+    "memory.read": {"decision": "allow", "reason": "Salt okunur hafıza erişimi güvenlidir."},
+    "memory.write_temporary": {"decision": "allow", "reason": "Geçici kayıt kalıcı bilgi değildir."},
+    "memory.write_persistent": {"decision": "allow", "reason": "Şemaya uygun, izlenebilir kalıcı kayıt oluşturulabilir."},
+    "memory.mark_conflict": {"decision": "allow", "reason": "Çelişkiler sessizce üzerine yazılmamalıdır."},
+    "memory.supersede": {"decision": "approval_required", "reason": "Doğrulanmış kalıcı bilginin değiştirilmesi kullanıcı onayı gerektirir."},
+    "memory.delete": {"decision": "approval_required", "reason": "Kalıcı hafıza silme işlemi kullanıcı onayı gerektirir."},
+    "memory.bulk_delete": {"decision": "deny", "reason": "Toplu otomatik hafıza silme yasaktır."},
+    "memory.silent_overwrite": {"decision": "deny", "reason": "Çelişen bilgi sessizce değiştirilemez."}
+  },
+  "invariants": [
+    "Kalıcı her kayıt benzersiz bir memory_id taşır.",
+    "Doğrulanmamış bilgi verified olarak kaydedilemez.",
+    "Çelişen kalıcı bilgi mevcut kaydın üzerine sessizce yazılamaz.",
+    "Otomatik toplu silme yapılamaz.",
+    "Eski kayıt biçimleri geriye dönük okunabilir kalır."
+  ]
+}

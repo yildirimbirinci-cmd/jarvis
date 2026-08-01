@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "delivery": "Jarvis Final Release Kit",
+  "acceptance_run_id": "E2E-F43CD654EFE1",
+  "acceptance_profile": "full",
+  "acceptance_ready": true,
+  "acceptance_report_sha256": "3fcb40eb24cfc8e0b342ea2761c79c40fc39217fb4cb4a62317dd39a76e03bb5",
+  "windows_repository_tests": "1255 passed, 7 skipped, 0 failed",
+  "new_final_release_tests": "6 passed",
+  "purpose": "Apply to the accepted local project, then generate exact clean source and rollback archives from that project."
+}
