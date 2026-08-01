@@ -1,0 +1,57 @@
+diff --git a/core/project_index.py b/core/project_index.py
+index 0000000..0000000 100644
+--- a/core/project_index.py
++++ b/core/project_index.py
+@@ -14,7 +14,7 @@ TEXT_EXTENSIONS = {
+ }
+ IGNORED_DIRS = {
+     ".git", ".svn", ".hg", ".idea", ".vs", ".vscode", ".venv", "venv", "env",
+-    "node_modules", "__pycache__", "build", "dist", "out", "target", ".pytest_cache",
++    "node_modules", "__pycache__", "build", "dist", "out", "target", ".pytest_cache", ".jarvis_fix_backup",
+     ".mypy_cache", ".ruff_cache", "coverage", ".next", ".nuxt",
+ }
+ 
+diff --git a/core/assistant.py b/core/assistant.py
+index 0000000..0000000 100644
+--- a/core/assistant.py
++++ b/core/assistant.py
+@@ -4923,7 +4923,30 @@ class AssistantEngine:
+             ).text
+         except Exception:
+             context = ""
++
+         candidates: list[str] = []
++
++        # Explicit project-indexing rules are stronger evidence than a generic
++        # call-graph match.  In particular, requests about excluding Jarvis's
++        # own rollback directory belong to the indexer's ignore policy, even if
++        # semantic retrieval happens to return an unrelated improvement module.
++        normalized_instruction = normalize_text(str(instruction or ""))
++        explicit_index_rule = (
++            ".jarvis_fix_backup" in str(instruction or "").casefold()
++            and any(
++                token in normalized_instruction
++                for token in (
++                    "tara",
++                    "tarama",
++                    "indeks",
++                    "haric",
++                    "yok say",
++                    "ignore",
++                    "exclude",
++                )
++            )
++        )
++        if explicit_index_rule:
++            explicit_path = "core/project_index.py"
++            explicit_file = (
++                (root_resolved / explicit_path).resolve(strict=False)
++                if root_resolved is not None
++                else None
++            )
++            if explicit_file is None or explicit_file.is_file():
++                candidates.append(explicit_path)
++
+         for match in re.finditer(
+             r"(?:^|\n)(?:---\s*)?(?:DOSYA|FILE)\s*:\s*([^|\r\n]+?)(?:\s*\||\s*---|$)",
+             context,

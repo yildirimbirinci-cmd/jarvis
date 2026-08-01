@@ -5164,14 +5164,6 @@ class AssistantEngine:
         except Exception:
             context = ""
         candidates: list[str] = []
-
-        # Explicit project-index rules must take priority over call-graph guesses.
-        lowered_instruction = str(instruction or "").casefold()
-        if (
-            ".jarvis_fix_backup" in lowered_instruction
-            or "ignored_dirs" in lowered_instruction
-        ):
-            candidates.append("core/project_index.py")
         for match in re.finditer(
             r"(?:^|\n)(?:---\s*)?(?:DOSYA|FILE)\s*:\s*([^|\r\n]+?)(?:\s*\||\s*---|$)",
             context,
