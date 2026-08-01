@@ -1063,52 +1063,63 @@ class AssistantEngine:
         *,
         max_attempts: int = 3,
     ) -> EditProposal:
-        """Generate a syntactically valid, bounded proposal with feedback retries.
+        """Generate a syntactically valid, bounded proposal with feedback retries."""
 
-        Every failed attempt is fed back with its exact validator report.  The
-        same response is never accepted twice and existing files must be edited
-        by exact anchors, so a small local model cannot corrupt a whole module by
-        truncating or re-indenting it.
-        """
+        def is_anchor_cardinality_error(value: str) -> bool:
+            # Deliberately omit the final Turkish character. This stays robust
+            # when a Windows console or an older source file contains mojibake.
+            return "Patch anchor tam olarak bir kez bulunmal" in str(value or "")
 
         attempts = max(1, min(int(max_attempts), 3))
         previous_response = ""
         previous_error = ""
         seen_responses: set[str] = set()
         failures: list[str] = []
+
         for attempt in range(1, attempts + 1):
             current_prompt = prompt
+            anchor_error_active = is_anchor_cardinality_error(previous_error)
+
             if previous_error:
                 current_prompt += (
-                    "\n\nÖNCEKİ TASLAK REDDEDİLDİ. DOĞRULAYICI RAPORU:\n"
+                    "\n\nONCEKI TASLAK REDDEDILDI. DOGRULAYICI RAPORU:\n"
                     + previous_error[-6_000:]
-                    + "\nAynı cevabı tekrarlama. Yalnızca bu rapordaki hatayı, "
-                    "aynı dosya ve sembol kapsamında küçük operations kullanarak düzelt."
+                    + "\nAyni cevabi tekrarlama. Yalnizca rapordaki hatayi, "
+                    "ayni dosya ve sembol kapsaminda kucuk operations "
+                    "kullanarak duzelt."
                 )
-            if (
-                previous_error
-                and "Patch anchor tam olarak bir kez bulunmal?" in previous_error
-            ):
+
+            if anchor_error_active:
                 anchor_hints = self._unique_anchor_hints(prompt)
                 if anchor_hints:
                     current_prompt += "\n\n" + anchor_hints
 
-            if (
-                previous_error
-                and "Patch anchor tam olarak bir kez bulunmal?" in previous_error
-            ):
                 current_prompt += (
-                    "\n\nHATALI ESKI JSON'U KOPYALAMA. "
-                    "old veya anchor degerini yaln?zca ?al??an kaynak "
-                    "ba?lam?ndan birebir se?. Kaynakta bulunmayan veya "
-                    "birden fazla bulunan metni kullanma."
+                    "\n\nZORUNLU ANCHOR KURALI:\n"
+                    "- Onceki JSON icindeki hatali old veya anchor degerini "
+                    "tekrar kullanma.\n"
+                    "- DOGRULAYICI RAPORUNDA GERCEK KAYNAK BLOGU verildiyse "
+                    "onu karakter karakter, girintisi ve tirnaklariyla aynen "
+                    "kullan.\n"
+                    "- Gercek kaynak blogu uygun degilse islemi daha kucuk ve "
+                    "benzersiz bir exact anchor ile yeniden tasarla.\n"
+                    "- Kaynakta tam olarak bir kez bulunmayan anchor yazma."
                 )
 
-            if previous_response:
+            if previous_response and not anchor_error_active:
                 current_prompt += (
-                    "\n\nÖNCEKİ REDDEDİLEN JSON:\n"
+                    "\n\nONCEKI REDDEDILEN JSON:\n"
                     + previous_response[-12_000:]
                 )
+
+            if attempt > 1:
+                try:
+                    retry_path = DATA_DIR / "own_code" / "last_retry_prompt.txt"
+                    retry_path.parent.mkdir(parents=True, exist_ok=True)
+                    retry_path.write_text(current_prompt, encoding="utf-8")
+                except Exception:
+                    pass
+
             raw = self._request_code_model_json(
                 current_prompt,
                 temperature=0.0 if attempt > 1 else 0.05,
@@ -1116,22 +1127,26 @@ class AssistantEngine:
             response_key = hashlib.sha256(
                 raw.encode("utf-8", errors="replace")
             ).hexdigest()
+
             if response_key in seen_responses:
                 duplicate_error = (
-                    "Kod modeli ?nceki reddedilen tasla??n ayn?s?n? tekrar ?retti."
+                    "Kod modeli onceki reddedilen taslagin aynisini tekrar uretti."
                 )
                 failures.append(f"deneme {attempt}: {duplicate_error}")
 
-                if "Patch anchor tam olarak bir kez bulunmal?" in previous_error:
-                    # As?l anchor hatas?n? koru ve reddedilen JSON'u sonraki
-                    # denemeye tekrar ?rnek olarak verme.
+                if is_anchor_cardinality_error(previous_error):
+                    # Preserve the exact anchor report and its source guidance.
+                    # The next retry must receive the same corrective evidence.
                     previous_response = ""
                 else:
                     previous_error = duplicate_error
                     previous_response = raw
                 continue
+
             seen_responses.add(response_key)
             previous_response = raw
+            payload: dict[str, object] | None = None
+
             try:
                 payload = self._validate_own_code_payload_shape(raw)
                 payload = merge_duplicate_operation_rows(payload)
@@ -1163,49 +1178,51 @@ class AssistantEngine:
                 except Exception:
                     pass
 
-                if "Patch anchor tam olarak bir kez bulunmal?" in previous_error:
+                if is_anchor_cardinality_error(previous_error):
                     previous_response = ""
-                    guidance = build_ambiguous_anchor_guidance(
-                        payload,
-                        project_root=self.own_project_root(),
-                        instruction=prompt,
-                    )
+                    guidance = ""
 
-                    if not guidance:
-                        guidance = build_missing_anchor_guidance(
+                    if isinstance(payload, dict):
+                        guidance = build_ambiguous_anchor_guidance(
                             payload,
                             project_root=self.own_project_root(),
                             instruction=prompt,
                         )
+
+                        if not guidance:
+                            guidance = build_missing_anchor_guidance(
+                                payload,
+                                project_root=self.own_project_root(),
+                                instruction=prompt,
+                            )
+
                     if guidance:
                         previous_error += "\n\n" + guidance
-
-                if "Patch anchor tam olarak bir kez bulunmal?" in previous_error:
-                    previous_response = ""
 
                 failures.append(f"deneme {attempt}: {previous_error}")
                 try:
                     self.own_code_history.record(
-                        "kod modeli taslağı doğrulamada reddedildi",
+                        "kod modeli taslagi dogrulamada reddedildi",
                         deneme=attempt,
                         hata=previous_error[:700],
                     )
                 except Exception:
                     pass
                 continue
+
             try:
                 self.own_code_history.record(
-                    "kod modeli doğrulanmış taslak üretti",
+                    "kod modeli dogrulanmis taslak uretti",
                     deneme=attempt,
-                    dosya_sayısı=len(proposal.files),
+                    dosya_sayisi=len(proposal.files),
                 )
             except Exception:
                 pass
             return proposal
 
-        detail = " | ".join(failures[-3:]) or "geçerli taslak üretilemedi"
+        detail = " | ".join(failures[-3:]) or "gecerli taslak uretilemedi"
         raise WorkspaceError(
-            f"Kod modeli {attempts} kontrollü denemede güvenli taslak üretemedi. "
+            f"Kod modeli {attempts} kontrollu denemede guvenli taslak uretemedi. "
             f"{detail}"
         )
 
