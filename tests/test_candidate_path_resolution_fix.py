@@ -28,3 +28,51 @@ def test_explicit_backup_rule_resolves_project_index() -> None:
     )
     assert paths
     assert paths[0] == "core/project_index.py"
+
+def test_backup_paths_are_not_returned_as_candidates(tmp_path) -> None:
+    engine = AssistantEngine.__new__(AssistantEngine)
+    package_root = Path(__file__).resolve().parents[1]
+    engine.own_project_root = lambda: package_root
+
+    backup_file = (
+        package_root
+        / ".jarvis_fix_backup"
+        / "candidate_resolution_test"
+        / "project_index.py"
+    )
+    backup_file.parent.mkdir(parents=True, exist_ok=True)
+    backup_file.write_text("# stale backup\n", encoding="utf-8")
+
+    class WorkspaceStub:
+        def set_workspace(self, _value: str) -> None:
+            pass
+
+        def call_graph_patch_context(self, *_args, **_kwargs):
+            class Result:
+                text = (
+                    "DOSYA: core/project_index.py | ger?ek kaynak\n"
+                    "DOSYA: .jarvis_fix_backup/candidate_resolution_test/"
+                    "project_index.py | eski yedek"
+                )
+            return Result()
+
+    engine.workspace = WorkspaceStub()
+
+    try:
+        paths = engine._resolve_own_code_candidate_paths(
+            "core/project_index.py dosyas?n? geli?tir",
+            max_files=6,
+        )
+    finally:
+        backup_file.unlink(missing_ok=True)
+        try:
+            backup_file.parent.rmdir()
+        except OSError:
+            pass
+
+    assert "core/project_index.py" in paths
+    assert not any(
+        item.startswith(".jarvis_fix_backup/")
+        for item in paths
+    )
+
