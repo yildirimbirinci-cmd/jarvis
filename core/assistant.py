@@ -5552,6 +5552,7 @@ class AssistantEngine:
         """
         normalized = self.command_key(text)
         words = normalized.split()
+        explicit_paths, explicit_symbols = self._explicit_own_code_scope(text)
         own_scope = (
             "kendi kod" in normalized
             or "kendi kaynak" in normalized
@@ -5559,10 +5560,21 @@ class AssistantEngine:
         )
         asks_plan = any(word.startswith(("plan", "taslak")) for word in words)
         asks_change = any(
-            word.startswith(("gelistir", "iyilestir", "duzelt", "onar", "degistir"))
+            word.startswith((
+                "gelistir", "iyilestir", "duzelt", "onar", "degistir",
+                "refaktor", "duzenle", "cikar", "ayir", "tasi",
+            ))
             for word in words
         )
-        if not (own_scope and asks_plan and asks_change):
+        # A concrete production path plus Class.method is already an explicit
+        # own-code scope. Requiring the user to additionally say "kendi kodum"
+        # and "plan" caused precise refactoring requests to fall through to
+        # the general chat model, where unrelated historical context could be
+        # turned into a fabricated plan.
+        concrete_source_scope = bool(explicit_paths and explicit_symbols)
+        if not asks_change or not (
+            (own_scope and asks_plan) or concrete_source_scope
+        ):
             return None
 
         # The user supplied a new concrete target. Old proposal/session state is
