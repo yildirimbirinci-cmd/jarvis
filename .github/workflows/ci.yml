@@ -32,8 +32,12 @@ jobs:
       - name: Install test dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install pytest pytest-timeout requests
-
+          python -m pip install \
+          pytest \
+          pytest-timeout \
+          requests \
+          beautifulsoup4
+          
       - name: Verify package imports
         run: |
           python -c "import artmach_assistant; print('package import OK')"
