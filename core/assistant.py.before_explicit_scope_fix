@@ -5323,45 +5323,6 @@ class AssistantEngine:
                 break
         return tuple(candidates)
 
-    @staticmethod
-    def _explicit_own_code_scope(
-        instruction: str,
-    ) -> tuple[tuple[str, ...], tuple[str, ...]]:
-        """Extract explicit Python paths and Class.method symbols."""
-        value = str(instruction or "")
-
-        raw_paths = re.findall(
-            r"(?<![A-Za-z0-9_])"
-            r"([A-Za-z0-9_.\-/\\]+\.py)"
-            r"(?![A-Za-z0-9_])",
-            value,
-            flags=re.IGNORECASE,
-        )
-
-        paths: list[str] = []
-        for raw_path in raw_paths:
-            raw_normalized = raw_path.strip().replace("\\", "/")
-            raw_parts = Path(raw_normalized).parts
-
-            # Reject traversal before removing harmless leading "./".
-            if ".." in raw_parts:
-                continue
-
-            normalized = raw_normalized
-            while normalized.startswith("./"):
-                normalized = normalized[2:]
-
-            if normalized and normalized not in paths:
-                paths.append(normalized)
-
-        raw_symbols = re.findall(
-            r"\b([A-Z][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*)\b",
-            value,
-        )
-
-        symbols = tuple(dict.fromkeys(raw_symbols))
-        return tuple(paths), symbols
-
     def prepare_own_code_plan(self, instruction: str) -> str:
         active_repair = self._active_self_repair_session()
         if active_repair is not None:
@@ -5404,37 +5365,14 @@ class AssistantEngine:
             except Exception as exc:
                 return f"Kendi-kod planlama sorusu kaydedilemedi: {exc}"
             return question
-        explicit_paths, explicit_symbols = self._explicit_own_code_scope(
-            instruction
+        candidates = list(
+            self._resolve_own_code_candidate_paths(instruction, max_files=6)
         )
-
-        candidates: list[str] = []
-        project_root = Path(self.own_project_root()).resolve(strict=False)
-
-        for relative in explicit_paths:
-            try:
-                candidate = (project_root / relative).resolve(strict=False)
-                candidate.relative_to(project_root)
-            except (OSError, ValueError):
-                continue
-
-            if candidate.is_file() and not self._is_test_path(relative):
-                candidates.append(relative)
-
-        if not candidates:
-            candidates = list(
-                self._resolve_own_code_candidate_paths(
-                    instruction,
-                    max_files=6,
-                )
-            )
-
         plan = {
             "version": 3,
             "status": "awaiting_approval" if candidates else "needs_scope",
             "instruction": instruction.strip(),
             "candidate_files": candidates[:6],
-            "approved_symbols": list(explicit_symbols),
             "acceptance": [
                 "Değişiklik yalnızca gerekli üretim dosyalarıyla sınırlı kalmalı.",
                 "Python derleme doğrulaması geçmeli.",
@@ -5600,11 +5538,6 @@ class AssistantEngine:
                     result = self.prepare_own_code_proposal(
                         instruction,
                         approved_paths=candidate_rows,
-                        approved_symbols=tuple(
-                            str(item).strip()
-                            for item in plan.get("approved_symbols", ())
-                            if str(item).strip()
-                        ),
                         plan_id=plan_id or "GENERIC-PLAN",
                     )
 
