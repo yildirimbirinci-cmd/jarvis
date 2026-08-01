@@ -4,6 +4,7 @@ from artmach_assistant.core.own_code_anchor_repair import (
     build_ambiguous_anchor_guidance,
     merge_duplicate_operation_rows,
     repair_ambiguous_replace_anchors,
+    repair_unique_whitespace_anchors,
 )
 
 
@@ -266,3 +267,91 @@ def test_content_rows_are_not_silently_merged() -> None:
     merged = merge_duplicate_operation_rows(payload)
 
     assert len(merged["files"]) == 2
+
+
+
+def test_missing_anchor_is_repaired_from_unique_whitespace_match(
+    tmp_path: Path,
+) -> None:
+    source = (
+        "class WakeWordWorker:\n"
+        "    def run(self):\n"
+        "        if self.dialogue_active:\n"
+        "            command = self.listen(\n"
+        "                timeout=self.command_timeout,\n"
+        "            )\n"
+        "            if command:\n"
+        "                self.command.emit(command)\n"
+    )
+
+    path = tmp_path / "app.py"
+    path.write_text(source, encoding="utf-8")
+
+    payload = {
+        "files": [
+            {
+                "path": "app.py",
+                "operations": [
+                    {
+                        "op": "replace",
+                        "old": (
+                            "if self.dialogue_active:\n"
+                            "    command = self.listen(\n"
+                            "        timeout=self.command_timeout,\n"
+                            "    )"
+                        ),
+                        "new": "command = self._listen_dialogue_command()",
+                    }
+                ],
+            }
+        ]
+    }
+
+    repaired = repair_unique_whitespace_anchors(
+        payload,
+        project_root=tmp_path,
+        instruction=(
+            "app.py dosyas?ndaki WakeWordWorker.run metodunu refakt?r et"
+        ),
+    )
+
+    operation = repaired["files"][0]["operations"][0]
+
+    assert source.count(operation["old"]) == 1
+    assert operation["old"].startswith("        if self.dialogue_active:")
+
+
+def test_whitespace_repair_refuses_multiple_matches(tmp_path: Path) -> None:
+    source = (
+        "class WakeWordWorker:\n"
+        "    def run(self):\n"
+        "        if self.running:\n"
+        "            self.wait()\n"
+        "        if self.running:\n"
+        "            self.wait()\n"
+    )
+
+    path = tmp_path / "app.py"
+    path.write_text(source, encoding="utf-8")
+
+    payload = {
+        "files": [
+            {
+                "path": "app.py",
+                "operations": [
+                    {
+                        "op": "delete",
+                        "old": "if self.running:\n    self.wait()",
+                    }
+                ],
+            }
+        ]
+    }
+
+    repaired = repair_unique_whitespace_anchors(
+        payload,
+        project_root=tmp_path,
+        instruction="WakeWordWorker.run metodunu d?zenle",
+    )
+
+    assert repaired == payload

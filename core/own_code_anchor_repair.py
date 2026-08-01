@@ -421,3 +421,144 @@ def merge_duplicate_operation_rows(
     repaired["files"] = merged
     return repaired
 
+
+def _normalise_anchor_lines(value: str) -> tuple[str, ...]:
+    """Normalize indentation without changing token or line ordering."""
+    rows = str(value or "").replace("\r\n", "\n").replace("\r", "\n").splitlines()
+
+    while rows and not rows[0].strip():
+        rows.pop(0)
+    while rows and not rows[-1].strip():
+        rows.pop()
+
+    return tuple(" ".join(row.strip().split()) for row in rows)
+
+
+def _unique_whitespace_match(
+    scoped_source: str,
+    requested: str,
+) -> str:
+    requested_rows = _normalise_anchor_lines(requested)
+
+    if not requested_rows:
+        return ""
+
+    source_lines = scoped_source.splitlines(keepends=True)
+    window_size = len(requested_rows)
+    matched_window = ""
+    match_count = 0
+
+    for index in range(0, len(source_lines) - window_size + 1):
+        window = "".join(source_lines[index:index + window_size])
+
+        if _normalise_anchor_lines(window) != requested_rows:
+            continue
+
+        match_count += 1
+
+        if match_count > 1:
+            return ""
+
+        matched_window = window
+
+    return matched_window if match_count == 1 else ""
+
+
+def repair_unique_whitespace_anchors(
+    payload: dict[str, Any],
+    *,
+    project_root: Path,
+    instruction: str,
+) -> dict[str, Any]:
+    """Replace whitespace-variant anchors with one exact source fragment.
+
+    The repair is applied only inside an explicitly requested Class.method.
+    Zero or multiple normalized matches are left untouched for EditManager to
+    reject normally.
+    """
+
+    requested_symbol = _requested_symbol(instruction)
+    if requested_symbol is None:
+        return payload
+
+    class_name, method_name = requested_symbol
+    root = Path(project_root).resolve(strict=False)
+    repaired = copy.deepcopy(payload)
+    files = repaired.get("files")
+
+    if not isinstance(files, list):
+        return repaired
+
+    for file_row in files:
+        if not isinstance(file_row, dict):
+            continue
+
+        raw_path = str(file_row.get("path", "")).strip().replace("\\", "/")
+        if not raw_path:
+            continue
+
+        candidate = (root / raw_path).resolve(strict=False)
+
+        try:
+            candidate.relative_to(root)
+        except ValueError:
+            continue
+
+        if not candidate.is_file():
+            continue
+
+        try:
+            source = candidate.read_text(encoding="utf-8")
+        except (OSError, UnicodeError):
+            continue
+
+        scoped_source = _symbol_source(
+            source,
+            class_name=class_name,
+            method_name=method_name,
+        )
+        if not scoped_source:
+            continue
+
+        operations = file_row.get("operations")
+        if not isinstance(operations, list):
+            continue
+
+        for operation in operations:
+            if not isinstance(operation, dict):
+                continue
+
+            operation_name = str(
+                operation.get("op", "")
+            ).strip().casefold()
+
+            anchor_field = (
+                "anchor"
+                if operation_name in {"insert_before", "insert_after"}
+                else "old"
+                if operation_name in {"replace", "delete"}
+                else ""
+            )
+
+            if not anchor_field:
+                continue
+
+            requested_anchor = operation.get(anchor_field)
+            if not isinstance(requested_anchor, str) or not requested_anchor:
+                continue
+
+            # Exact matches are already valid or handled by ambiguity repair.
+            if source.count(requested_anchor) != 0:
+                continue
+
+            exact_source_anchor = _unique_whitespace_match(
+                scoped_source,
+                requested_anchor,
+            )
+            if not exact_source_anchor:
+                continue
+
+            operation[anchor_field] = exact_source_anchor
+
+    return repaired
+

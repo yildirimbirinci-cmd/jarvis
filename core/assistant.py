@@ -58,6 +58,7 @@ from artmach_assistant.core.own_code_anchor_repair import (
     build_ambiguous_anchor_guidance,
     merge_duplicate_operation_rows,
     repair_ambiguous_replace_anchors,
+    repair_unique_whitespace_anchors,
 )
 from artmach_assistant.core.own_code_scope import validate_proposal_scope
 from artmach_assistant.core.own_code_symbol_guard import validate_approved_symbol_scope
@@ -1133,6 +1134,11 @@ class AssistantEngine:
             try:
                 payload = self._validate_own_code_payload_shape(raw)
                 payload = merge_duplicate_operation_rows(payload)
+                payload = repair_unique_whitespace_anchors(
+                    payload,
+                    project_root=self.own_project_root(),
+                    instruction=prompt,
+                )
                 payload = repair_ambiguous_replace_anchors(
                     payload,
                     project_root=self.own_project_root(),
