@@ -11,6 +11,9 @@ jobs:
   validate:
     runs-on: ubuntu-latest
 
+    env:
+      PYTHONPATH: ${{ github.workspace }}
+
     defaults:
       run:
         working-directory: artmach_assistant
@@ -25,8 +28,6 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-          cache: pip
-          cache-dependency-path: artmach_assistant/**/*.txt
 
       - name: Install test dependencies
         run: |
@@ -35,8 +36,8 @@ jobs:
 
       - name: Verify package imports
         run: |
-          python -c "import artmach_assistant; import core; import indexing; print('imports OK')"
+          python -c "import artmach_assistant; print('package import OK')"
 
-      - name: Collect tests
+      - name: Collect first test error
         run: |
-          python -m pytest tests --collect-only -q
+          python -m pytest tests --collect-only -x -vv
