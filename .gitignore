@@ -43,3 +43,6 @@ FINAL_RELEASE/
 # Generated release archives
 Artmach_Assistant_Final_Source_*.zip
 Artmach_Assistant_Rollback_*.zip
+
+# Jarvis runtime checkpoints
+.artmach_assistant/
