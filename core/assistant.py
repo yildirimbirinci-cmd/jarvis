@@ -1149,6 +1149,19 @@ class AssistantEngine:
             except WorkspaceError as exc:
                 previous_error = str(exc)
 
+                try:
+                    atomic_write_json(
+                        DATA_DIR / "own_code" / "last_rejected_proposal.json",
+                        {
+                            "attempt": attempt,
+                            "error": previous_error,
+                            "raw_model_response": raw,
+                        },
+                        max_bytes=256 * 1024,
+                    )
+                except Exception:
+                    pass
+
                 if "Patch anchor tam olarak bir kez bulunmal?" in previous_error:
                     previous_response = ""
                     guidance = build_ambiguous_anchor_guidance(
