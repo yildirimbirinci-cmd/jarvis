@@ -1,10 +1,9 @@
 @echo off
 setlocal
 chcp 65001 >nul
-title Jarvis Plan Onay Oncelik Fix
+title Jarvis Candidate Path Resolution Fix v2
 
 set "ROOT=%USERPROFILE%\Desktop\artmach_assistant"
-
 if not exist "%ROOT%\core\assistant.py" (
     echo HATA: Jarvis proje klasoru bulunamadi:
     echo %ROOT%
@@ -21,7 +20,7 @@ if %errorlevel%==0 (
 
 if errorlevel 1 (
     echo.
-    echo KURULUM BASARISIZ.
+    echo KURULUM BASARISIZ. Uretim dosyalari geri yuklendi.
     pause
     exit /b 1
 )
