@@ -7378,16 +7378,12 @@ class AssistantEngine:
         explicit_own_code_plan = self._explicit_new_own_code_plan_request(text)
         if explicit_own_code_plan is not None:
             return explicit_own_code_plan
-        # Kayıtlı kendi-kod planı, açık kalmış genel problem çözme
-        # oturumundan önce işlenmelidir. Aksi halde kısa ve deterministik
-        # 'planı onayla' komutu sohbet/problem çözme katmanı tarafından
-        # yakalanır ve gerçek patch üretimi başlamaz.
-        plan_follow_up = self._handle_own_code_plan_follow_up(text)
-        if plan_follow_up is not None:
-            return plan_follow_up
         collaborative_problem = self._collaborative_problem_request(text)
         if collaborative_problem is not None:
             return collaborative_problem
+        plan_follow_up = self._handle_own_code_plan_follow_up(text)
+        if plan_follow_up is not None:
+            return plan_follow_up
 
         conversation_context = self._conversation_context_request(text)
         if conversation_context is not None:
