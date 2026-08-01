@@ -1086,17 +1086,6 @@ class AssistantEngine:
                 if anchor_hints:
                     current_prompt += "\n\n" + anchor_hints
 
-            if (
-                previous_error
-                and "Patch anchor tam olarak bir kez bulunmal?" in previous_error
-            ):
-                current_prompt += (
-                    "\n\nHATALI ESKI JSON'U KOPYALAMA. "
-                    "old veya anchor degerini yaln?zca ?al??an kaynak "
-                    "ba?lam?ndan birebir se?. Kaynakta bulunmayan veya "
-                    "birden fazla bulunan metni kullanma."
-                )
-
             if previous_response:
                 current_prompt += (
                     "\n\nÖNCEKİ REDDEDİLEN JSON:\n"
@@ -1110,18 +1099,11 @@ class AssistantEngine:
                 raw.encode("utf-8", errors="replace")
             ).hexdigest()
             if response_key in seen_responses:
-                duplicate_error = (
-                    "Kod modeli ?nceki reddedilen tasla??n ayn?s?n? tekrar ?retti."
+                previous_error = (
+                    "Kod modeli önceki reddedilen taslağın aynısını tekrar üretti."
                 )
-                failures.append(f"deneme {attempt}: {duplicate_error}")
-
-                if "Patch anchor tam olarak bir kez bulunmal?" in previous_error:
-                    # As?l anchor hatas?n? koru ve reddedilen JSON'u sonraki
-                    # denemeye tekrar ?rnek olarak verme.
-                    previous_response = ""
-                else:
-                    previous_error = duplicate_error
-                    previous_response = raw
+                failures.append(f"deneme {attempt}: {previous_error}")
+                previous_response = raw
                 continue
             seen_responses.add(response_key)
             previous_response = raw
@@ -1132,6 +1114,9 @@ class AssistantEngine:
             except WorkspaceError as exc:
                 previous_error = str(exc)
 
+                # Invalid anchors must be regenerated from the live source.
+                # Repeating the rejected JSON encourages small local models to
+                # copy the same nonexistent or ambiguous anchor again.
                 if "Patch anchor tam olarak bir kez bulunmal?" in previous_error:
                     previous_response = ""
 
