@@ -5409,17 +5409,32 @@ class AssistantEngine:
         )
 
         candidates: list[str] = []
-        project_root = Path(self.own_project_root()).resolve(strict=False)
 
-        for relative in explicit_paths:
+        # Proje k?k?ne yaln?zca kullan?c? a??k bir dosya yolu verdiyse
+        # ihtiya? var. Genel planlarda do?rudan ?a?r? grafi?i adaylar?na ge?.
+        if explicit_paths:
             try:
-                candidate = (project_root / relative).resolve(strict=False)
-                candidate.relative_to(project_root)
-            except (OSError, ValueError):
-                continue
+                project_root = Path(
+                    self.own_project_root()
+                ).resolve(strict=False)
+            except (TypeError, ValueError, OSError):
+                project_root = None
 
-            if candidate.is_file() and not self._is_test_path(relative):
-                candidates.append(relative)
+            if project_root is not None:
+                for relative in explicit_paths:
+                    try:
+                        candidate = (
+                            project_root / relative
+                        ).resolve(strict=False)
+                        candidate.relative_to(project_root)
+                    except (OSError, ValueError):
+                        continue
+
+                    if (
+                        candidate.is_file()
+                        and not self._is_test_path(relative)
+                    ):
+                        candidates.append(relative)
 
         if not candidates:
             candidates = list(
