@@ -47,3 +47,33 @@ def test_network_access_expansion_is_critical() -> None:
 
     assert risk.level == "critical"
     assert "güvenlik yetkisi" in risk.report()
+
+def test_single_insertion_does_not_count_shifted_lines() -> None:
+    old = "\n".join(f"LINE_{index}" for index in range(300)) + "\n"
+    rows = old.splitlines()
+    rows.insert(2, "NEW_IGNORED_DIRECTORY")
+    new = "\n".join(rows) + "\n"
+
+    proposal = SimpleNamespace(
+        files=[_change("core/project_index.py", old, new)]
+    )
+
+    risk = assess_own_code_proposal(proposal)
+
+    assert risk.changed_lines == 1
+    assert risk.level == "low"
+    assert "orta b?y?kl?kte sat?r kapsam?" not in risk.report()
+
+
+def test_replacement_counts_the_actual_changed_block() -> None:
+    old = "A\nB\nC\nD\n"
+    new = "A\nX\nY\nD\n"
+
+    proposal = SimpleNamespace(
+        files=[_change("core/helper.py", old, new)]
+    )
+
+    risk = assess_own_code_proposal(proposal)
+
+    assert risk.changed_lines == 2
+

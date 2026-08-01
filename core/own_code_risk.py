@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from difflib import SequenceMatcher
 import re
 
 
@@ -59,10 +60,27 @@ def assess_own_code_proposal(proposal: object) -> OwnCodeRiskAssessment:
         old_lines = old.splitlines()
         new_lines = new.splitlines()
         old_line_set = set(old_lines)
-        changed_lines += abs(len(new_lines) - len(old_lines))
-        changed_lines += sum(
-            1 for before, after in zip(old_lines, new_lines) if before != after
+
+        # Count the actual edited line ranges. A single insertion near the
+        # beginning must not make every following shifted line look changed.
+        matcher = SequenceMatcher(
+            None,
+            old_lines,
+            new_lines,
+            autojunk=False,
         )
+        for tag, old_start, old_end, new_start, new_end in matcher.get_opcodes():
+            if tag == "equal":
+                continue
+            if tag == "replace":
+                changed_lines += max(
+                    old_end - old_start,
+                    new_end - new_start,
+                )
+            elif tag == "delete":
+                changed_lines += old_end - old_start
+            elif tag == "insert":
+                changed_lines += new_end - new_start
         if path in sensitive:
             score += 2
             reasons.append(f"çalışma çekirdeği değişiyor: {path}")
