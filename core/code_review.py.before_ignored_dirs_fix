@@ -9,12 +9,18 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
-from artmach_assistant.core.project_index import IGNORED_DIRS
 from artmach_assistant.core.workspace import WorkspaceService
 
 
-_IGNORED_PARTS = set(IGNORED_DIRS) | {
+_IGNORED_PARTS = {
+    ".git",
     ".artmach_assistant",
+    "venv",
+    ".venv",
+    "node_modules",
+    "build",
+    "dist",
+    "__pycache__",
 }
 _SUPPORTED_SUFFIXES = {".py", ".cpp", ".cc", ".c", ".h", ".hpp", ".qml", ".js", ".ts"}
 _MAX_FILES = 20_000
