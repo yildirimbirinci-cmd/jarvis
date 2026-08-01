@@ -132,68 +132,6 @@ def classify_own_code_intent(
             ))
             for word in words
         )
-
-    # JARVIS_READ_ONLY_INTENT_FIX
-    # Salt-okuma ifadeleri, kelimelerin icindeki degisiklik koklerinden
-    # once degerlendirilmelidir.
-    _jarvis_words = tuple(str(normalized).split())
-
-    if (
-        ("yapmiyoruz" in normalized or "yapmayacagiz" in normalized)
-        and any(
-            marker in normalized
-            for marker in (
-                "sadece incele",
-                "yalnizca incele",
-                "kodlarini incele",
-                "kodlarin incele",
-            )
-        )
-    ):
-        return OwnCodeIntent(
-            OwnCodeIntentKind.REVIEW,
-            normalized,
-            "explicit read-only review request",
-        )
-
-    if (
-        active_own_editor
-        and any(
-            word.startswith(("goster", "listele", "anlat", "acikla", "rapor"))
-            for word in _jarvis_words
-        )
-        and any(
-            word.startswith(
-                (
-                    "duzeltme",
-                    "gelistirme",
-                    "iyilestirme",
-                    "sorun",
-                    "hata",
-                    "eksik",
-                )
-            )
-            for word in _jarvis_words
-        )
-        and not any(
-            word.startswith(
-                (
-                    "uygula",
-                    "degistir",
-                    "onar",
-                    "kaydet",
-                    "duzenle",
-                )
-            )
-            for word in _jarvis_words
-        )
-    ):
-        return OwnCodeIntent(
-            OwnCodeIntentKind.REVIEW,
-            normalized,
-            "show active review findings",
-        )
-
     if not subject:
         return OwnCodeIntent(OwnCodeIntentKind.NONE, normalized)
 
