@@ -5225,7 +5225,7 @@ class AssistantEngine:
             )
             try:
                 self._save_own_code_plan({
-                    "version": 3,
+                    "version": 2,
                     "status": "needs_clarification",
                     "instruction": instruction.strip(),
                     "question": question,
@@ -5239,7 +5239,7 @@ class AssistantEngine:
             self._resolve_own_code_candidate_paths(instruction, max_files=6)
         )
         plan = {
-            "version": 3,
+            "version": 2,
             "status": "awaiting_approval" if candidates else "needs_scope",
             "instruction": instruction.strip(),
             "candidate_files": candidates[:6],
@@ -5297,40 +5297,6 @@ class AssistantEngine:
             for word in words
         )
         return explicit or (outcome and target)
-
-    def _explicit_new_own_code_plan_request(self, text: str) -> str | None:
-        """Start a new concrete own-code plan before stale repair/cycle state.
-
-        A new explicit target must not be shadowed by an old in-memory proposal or
-        persisted repair cycle.  Approval follow-ups do not match this method.
-        """
-        normalized = self.command_key(text)
-        words = normalized.split()
-        own_scope = (
-            "kendi kod" in normalized
-            or "kendi kaynak" in normalized
-            or "jarvis kod" in normalized
-        )
-        asks_plan = any(word.startswith(("plan", "taslak")) for word in words)
-        asks_change = any(
-            word.startswith(("gelistir", "iyilestir", "duzelt", "onar", "degistir"))
-            for word in words
-        )
-        if not (own_scope and asks_plan and asks_change):
-            return None
-
-        # The user supplied a new concrete target. Old proposal/session state is
-        # no longer authoritative and must not intercept the new plan.
-        for state_file in (SELF_REPAIR_SESSION_FILE, OWN_CODE_CYCLE_FILE):
-            try:
-                state_file.unlink(missing_ok=True)
-            except OSError:
-                pass
-        try:
-            self.editor.pending = None
-        except Exception:
-            pass
-        return self.prepare_own_code_plan(text)
 
     def _handle_own_code_plan_follow_up(self, text: str) -> str | None:
         # A RUN command always owns its own routing.  Never consume it as a
@@ -7373,11 +7339,6 @@ class AssistantEngine:
         maintenance = self._maintenance_request(text)
         if maintenance is not None:
             return maintenance
-        # A concrete new own-code plan outranks stale repair/cycle state and the
-        # generic collaborative problem solver.
-        explicit_own_code_plan = self._explicit_new_own_code_plan_request(text)
-        if explicit_own_code_plan is not None:
-            return explicit_own_code_plan
         collaborative_problem = self._collaborative_problem_request(text)
         if collaborative_problem is not None:
             return collaborative_problem
