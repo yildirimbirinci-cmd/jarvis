@@ -1131,7 +1131,7 @@ class AssistantEngine:
                 payload = repair_ambiguous_replace_anchors(
                     payload,
                     project_root=self.own_project_root(),
-                    instruction=instruction,
+                    instruction=prompt,
                 )
                 canonical = json.dumps(payload, ensure_ascii=False)
                 proposal = self.editor.create_proposal(canonical)

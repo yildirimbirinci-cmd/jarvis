@@ -1,4 +1,4 @@
-﻿from pathlib import Path
+from pathlib import Path
 
 from artmach_assistant.core.own_code_anchor_repair import (
     repair_ambiguous_replace_anchors,
@@ -57,7 +57,10 @@ def test_ambiguous_replace_is_expanded_inside_requested_symbol(
     operation = repaired["files"][0]["operations"][0]
 
     assert source.count(operation["old"]) == 1
-    assert "def run(self):" in operation["old"]
+    run_start = source.index("    def run(self):")
+    run_end = source.index("\ndef unrelated():")
+
+    assert operation["old"] in source[run_start:run_end]
     assert "if self._should_continue():" in operation["new"]
 
 
