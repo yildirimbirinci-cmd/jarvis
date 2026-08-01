@@ -1068,7 +1068,8 @@ class AssistantEngine:
         def is_anchor_cardinality_error(value: str) -> bool:
             # Deliberately omit the final Turkish character. This stays robust
             # when a Windows console or an older source file contains mojibake.
-            return "Patch anchor tam olarak bir kez bulunmal" in str(value or "")
+            text = str(value or "")
+        return "Patch anchor" in text and "bulunan=" in text
 
         attempts = max(1, min(int(max_attempts), 3))
         previous_response = ""
