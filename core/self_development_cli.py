@@ -40,6 +40,17 @@ def run_self_development(
         return SelfDevelopmentResult("invalid", 2, f"Bilinmeyen aşama: {stage}")
 
     engine = engine_factory()
+
+    read_only_handler = getattr(engine, "_own_code_read_only_request", None)
+    if callable(read_only_handler):
+        read_only_output = read_only_handler(target)
+        if read_only_output is not None:
+            return SelfDevelopmentResult(
+                "read_only",
+                0,
+                str(read_only_output),
+            )
+
     plan_output = str(engine.prepare_own_code_plan(target))
     if stage == "plan":
         return SelfDevelopmentResult("plan", 0, plan_output)
