@@ -32,49 +32,42 @@ jobs:
     runs-on: [self-hosted, windows, x64, jarvis]
     timeout-minutes: 120
     env:
+      PYTHONPATH: ${{ github.workspace }}
       PYTHONUTF8: "1"
       PYTHONIOENCODING: utf-8
       PYTHONDONTWRITEBYTECODE: "1"
       JARVIS_OLLAMA_URL: http://127.0.0.1:11434
       JARVIS_CHAT_MODEL: ${{ inputs.chat_model }}
       JARVIS_CODE_MODEL: ${{ inputs.code_model }}
+    defaults:
+      run:
+        shell: powershell
+        working-directory: artmach_assistant
     steps:
-      - name: Checkout repository
+      - name: Checkout repository as Python package
         uses: actions/checkout@v4
         with:
+          path: artmach_assistant
           clean: true
+          persist-credentials: false
 
-      - name: Resolve Python 3.11
-        id: python
-        shell: powershell
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install test dependencies
         run: |
           $ErrorActionPreference = 'Stop'
-          $candidates = @(
-            (Join-Path $env:GITHUB_WORKSPACE '.venv\Scripts\python.exe'),
-            'py -3.11',
-            'python'
-          )
-          foreach ($candidate in $candidates) {
-            try {
-              if ($candidate -eq 'py -3.11') {
-                & py -3.11 --version
-                "command=py -3.11" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-                exit 0
-              }
-              if (Test-Path $candidate) {
-                & $candidate --version
-                "command=$candidate" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-                exit 0
-              }
-              & $candidate --version
-              "command=$candidate" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-              exit 0
-            } catch {}
-          }
-          throw 'Python 3.11 could not be resolved on the self-hosted runner.'
+          python -m pip install --upgrade pip
+          if (Test-Path requirements.txt) { python -m pip install -r requirements.txt }
+          if (Test-Path requirements-dev.txt) { python -m pip install -r requirements-dev.txt }
+          python -m pip install pytest pytest-timeout requests beautifulsoup4
+
+      - name: Verify package import
+        run: python -c "import artmach_assistant; print('artmach_assistant import OK')"
 
       - name: Verify local Ollama service and models
-        shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
           $response = Invoke-RestMethod -Uri "$env:JARVIS_OLLAMA_URL/api/tags" -Method Get -TimeoutSec 15
@@ -85,52 +78,35 @@ jobs:
             if (-not $matched) { throw "Required Ollama model is missing: $required" }
           }
 
-      - name: Install test dependency
-        shell: powershell
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $python = '${{ steps.python.outputs.command }}'
-          if ($python -eq 'py -3.11') {
-            & py -3.11 -m pip install --upgrade pytest
-          } else {
-            & $python -m pip install --upgrade pytest
-          }
-
       - name: Compile repository
-        shell: powershell
+        run: python -m compileall -q config.py core indexing tests tools app.py start_jarvis.py
+
+      - name: Verify application self-development gate
         run: |
-          $ErrorActionPreference = 'Stop'
-          $python = '${{ steps.python.outputs.command }}'
-          $args = @('-m','compileall','-q','config.py','core','indexing','tests','tools','app.py','start_jarvis.py')
-          if ($python -eq 'py -3.11') { & py -3.11 @args } else { & $python @args }
+          New-Item -ItemType Directory -Force -Path artifacts | Out-Null
+          python -m artmach_assistant --self-develop-check --self-develop-report artifacts/self-development-gate.json
+          if ($LASTEXITCODE -ne 0) { throw "Self-development gate failed: $LASTEXITCODE" }
 
       - name: Run focused self-development safety suite
-        shell: powershell
         run: |
-          $ErrorActionPreference = 'Stop'
-          $python = '${{ steps.python.outputs.command }}'
-          $tests = @(
-            'tests/test_code_model_acceptance.py',
-            'tests/test_end_to_end_acceptance.py',
-            'tests/test_edit_build_safety_group.py',
-            'tests/test_edit_checkpoint_transaction_group.py',
-            'tests/test_git_change_service.py',
-            'tests/test_git_workspace_service.py',
-            'tests/test_cancellable_ollama.py'
-          )
-          $args = @('-m','pytest','-q') + $tests
-          if ($python -eq 'py -3.11') { & py -3.11 @args } else { & $python @args }
+          python -m pytest -q `
+            tests/test_code_model_acceptance.py `
+            tests/test_end_to_end_acceptance.py `
+            tests/test_edit_build_safety_group.py `
+            tests/test_edit_checkpoint_transaction_group.py `
+            tests/test_git_change_service.py `
+            tests/test_git_workspace_service.py `
+            tests/test_cancellable_ollama.py
 
       - name: Probe real chat and code models
-        shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
           $cases = @(
-            @{ model=$env:JARVIS_CHAT_MODEL; prompt='Respond with exactly: JARVIS_CHAT_OK' },
-            @{ model=$env:JARVIS_CODE_MODEL; prompt='Respond with exactly: JARVIS_CODE_OK' }
+            @{ model=$env:JARVIS_CHAT_MODEL; marker='JARVIS_CHAT_OK' },
+            @{ model=$env:JARVIS_CODE_MODEL; marker='JARVIS_CODE_OK' }
           )
           foreach ($case in $cases) {
-            $body = @{ model=$case.model; prompt=$case.prompt; stream=$false } | ConvertTo-Json
+            $body = @{ model=$case.model; prompt="Respond with exactly: $($case.marker)"; stream=$false } | ConvertTo-Json
             $result = Invoke-RestMethod -Uri "$env:JARVIS_OLLAMA_URL/api/generate" -Method Post -ContentType 'application/json' -Body $body -TimeoutSec 180
             if ([string]::IsNullOrWhiteSpace([string]$result.response)) {
               throw "Ollama returned an empty response for model $($case.model)"
@@ -140,11 +116,14 @@ jobs:
 
       - name: Run complete repository suite
         if: ${{ inputs.run_full_suite }}
-        shell: powershell
+        run: python -m pytest -q
+
+      - name: Record repository state
+        if: always()
         run: |
-          $ErrorActionPreference = 'Stop'
-          $python = '${{ steps.python.outputs.command }}'
-          if ($python -eq 'py -3.11') { & py -3.11 -m pytest -q } else { & $python -m pytest -q }
+          New-Item -ItemType Directory -Force -Path artifacts | Out-Null
+          git status --short | Out-File -Encoding utf8 artifacts/git-status.txt
+          git diff --binary | Out-File -Encoding utf8 artifacts/repository.diff
 
       - name: Upload acceptance evidence
         if: always()
@@ -154,7 +133,8 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
           path: |
-            **/e2e_latest.json
-            **/report.json
-            **/support_bundle.zip
-            .pytest_cache/**
+            artmach_assistant/artifacts/**
+            artmach_assistant/**/e2e_latest.json
+            artmach_assistant/**/report.json
+            artmach_assistant/**/support_bundle.zip
+            artmach_assistant/.pytest_cache/**
