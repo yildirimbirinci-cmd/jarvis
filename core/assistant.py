@@ -54,6 +54,7 @@ from artmach_assistant.core.own_code_authority import (
     set_authority,
 )
 from artmach_assistant.core.own_code_risk import assess_own_code_proposal
+from artmach_assistant.core.own_code_anchor_repair import repair_ambiguous_replace_anchors
 from artmach_assistant.core.own_code_scope import validate_proposal_scope
 from artmach_assistant.core.own_code_symbol_guard import validate_approved_symbol_scope
 from artmach_assistant.core.own_code_semantic_guard import (
@@ -1127,6 +1128,11 @@ class AssistantEngine:
             previous_response = raw
             try:
                 payload = self._validate_own_code_payload_shape(raw)
+                payload = repair_ambiguous_replace_anchors(
+                    payload,
+                    project_root=self.own_project_root(),
+                    instruction=instruction,
+                )
                 canonical = json.dumps(payload, ensure_ascii=False)
                 proposal = self.editor.create_proposal(canonical)
             except WorkspaceError as exc:
