@@ -246,6 +246,42 @@ def _parse_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
         help="Tanılama kayıtlarını güvenli bir destek ZIP'inde toplar.",
     )
     parser.add_argument(
+        "--self-develop",
+        metavar="HEDEF",
+        help="Jarvis kendi kodu için başsız güvenli geliştirme döngüsü çalıştırır.",
+    )
+    parser.add_argument(
+        "--self-develop-stage",
+        choices=("plan", "propose", "apply"),
+        default="plan",
+        help="plan yalnızca planlar; propose taslak üretir; apply açıkça uygular ve doğrular.",
+    )
+    parser.add_argument(
+        "--self-develop-check",
+        action="store_true",
+        help="Otonom geliştirme öncesi git, Ollama, güvenlik modülleri ve odak testlerini doğrular.",
+    )
+    parser.add_argument(
+        "--self-develop-report",
+        type=Path,
+        help="Otonom geliştirme hazırlık raporunun JSON olarak kaydedileceği yol.",
+    )
+    parser.add_argument(
+        "--self-develop-handoff",
+        metavar="HEDEF",
+        help="Hazırlık kapısı geçerse Jarvis'e tek bir kontrollü geliştirme görevi devreder.",
+    )
+    parser.add_argument(
+        "--acknowledge-self-modification",
+        action="store_true",
+        help="Jarvis'in kendi kaynak dosyalarını değiştirmesine bu çalıştırma için açık onay verir.",
+    )
+    parser.add_argument(
+        "--self-develop-handoff-report",
+        type=Path,
+        help="Kontrollü devir sonucunu JSON olarak kaydeder.",
+    )
+    parser.add_argument(
         "--support-bundle-path",
         type=Path,
         help="Destek ZIP dosyasının kaydedileceği özel yol.",
@@ -265,6 +301,9 @@ def main(argv: list[str] | None = None) -> int:
             args.acceptance_test,
             args.gui_smoke_test,
             args.support_bundle,
+            bool(args.self_develop),
+            args.self_develop_check,
+            bool(args.self_develop_handoff),
         )
     )
     if selected_modes > 1:
@@ -294,6 +333,76 @@ def main(argv: list[str] | None = None) -> int:
             ),
         )
 
+    if args.self_develop_check:
+        if remaining or args.quiet_tests or args.diagnostics_json or args.background:
+            print("Kendi-kod hazırlık denetimi ek argüman kabul etmez.", file=sys.stderr)
+            return 2
+        from artmach_assistant.core.self_development_gate import (
+            assess_self_development_gate,
+            write_gate_report,
+        )
+
+        result = assess_self_development_gate(package_dir)
+        print(result.report())
+        if args.self_develop_report:
+            saved = write_gate_report(result, args.self_develop_report)
+            print(f"Hazırlık raporu: {saved}")
+        return 0 if result.ready else 1
+
+
+    if args.self_develop_handoff:
+        if remaining or args.quiet_tests or args.diagnostics_json or args.background:
+            print("Kontrollü devir modu ek argüman kabul etmez.", file=sys.stderr)
+            return 2
+        from artmach_assistant.core.self_development_audit import (
+            audit_self_development_change,
+            rollback_audited_change,
+        )
+        from artmach_assistant.core.self_development_cli import (
+            build_engine,
+            run_self_development,
+        )
+        from artmach_assistant.core.self_development_gate import assess_self_development_gate
+        from artmach_assistant.core.self_development_handoff import (
+            run_handoff,
+            write_handoff_report,
+        )
+
+        result = run_handoff(
+            args.self_develop_handoff,
+            gate_factory=lambda: assess_self_development_gate(package_dir),
+            development_runner=lambda instruction: run_self_development(
+                instruction,
+                stage="apply",
+                engine_factory=build_engine,
+            ),
+            acknowledged=args.acknowledge_self_modification,
+            audit_factory=lambda: audit_self_development_change(package_dir),
+            rollback_runner=lambda paths: rollback_audited_change(package_dir, paths),
+        )
+        print(result.report())
+        if args.self_develop_handoff_report:
+            saved = write_handoff_report(result, args.self_develop_handoff_report)
+            print(f"Devir raporu: {saved}")
+        return result.exit_code
+
+    if args.self_develop:
+        if remaining or args.quiet_tests or args.diagnostics_json or args.background:
+            print("Kendi-kod geliştirme modu ek test argümanı kabul etmez.", file=sys.stderr)
+            return 2
+        from artmach_assistant.core.self_development_cli import (
+            build_engine,
+            run_self_development,
+        )
+
+        result = run_self_development(
+            args.self_develop,
+            stage=args.self_develop_stage,
+            engine_factory=build_engine,
+        )
+        print(result.output)
+        return result.exit_code
+
     if args.support_bundle:
         if remaining or args.quiet_tests or args.diagnostics_json or args.background:
             print("Destek paketi modu ek test argümanı kabul etmez.", file=sys.stderr)
@@ -317,6 +426,10 @@ def main(argv: list[str] | None = None) -> int:
         or args.diagnostics_json
         or args.acceptance_report
         or args.support_bundle_path
+        or args.self_develop_stage != "plan"
+        or args.self_develop_report
+        or args.self_develop_handoff_report
+        or args.acknowledge_self_modification
     ):
         print(
             "--quiet-tests ve --diagnostics-json yalnizca test modlariyla kullanilabilir.",

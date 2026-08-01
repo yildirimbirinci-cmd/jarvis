@@ -1,0 +1,120 @@
+name: Jarvis Self Development
+
+on:
+  workflow_dispatch:
+    inputs:
+      instruction:
+        description: "Jarvis'in kendi kodunda gerçekleştireceği somut ve sınanabilir hedef"
+        required: true
+        type: string
+      stage:
+        description: "plan: yalnızca planla, propose: taslak üret, apply: uygula/test et/başarısızsa geri al"
+        required: true
+        default: plan
+        type: choice
+        options:
+          - plan
+          - propose
+          - apply
+          - handoff
+
+permissions:
+  contents: read
+
+concurrency:
+  group: jarvis-self-development
+  cancel-in-progress: false
+
+jobs:
+  self-development:
+    name: Guarded self-development
+    runs-on: [self-hosted, Windows, X64]
+    timeout-minutes: 45
+
+    defaults:
+      run:
+        shell: powershell
+        working-directory: artmach_assistant
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          path: artmach_assistant
+          clean: true
+          persist-credentials: false
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install headless dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pytest pytest-timeout requests beautifulsoup4
+
+      - name: Verify Ollama service
+        run: |
+          $ErrorActionPreference = "Stop"
+          $response = Invoke-RestMethod -Method Get -Uri "http://127.0.0.1:11434/api/tags" -TimeoutSec 10
+          if ($null -eq $response.models -or $response.models.Count -lt 1) {
+            throw "Ollama çalışıyor ancak yüklü model bulunamadı."
+          }
+          Write-Host ("Ollama modelleri: " + (($response.models | ForEach-Object { $_.name }) -join ", "))
+
+      - name: Verify self-development handoff gate
+        run: |
+          New-Item -ItemType Directory -Force -Path artifacts | Out-Null
+          python -m artmach_assistant --self-develop-check --self-develop-report artifacts/self-development-gate.json 2>&1 | Tee-Object -FilePath artifacts/self-development-gate.txt
+          if ($LASTEXITCODE -ne 0) {
+            throw "Self-development handoff gate failed: $LASTEXITCODE"
+          }
+
+      - name: Run guarded self-development
+        id: self_develop
+        env:
+          JARVIS_SELF_DEVELOP_INSTRUCTION: ${{ inputs.instruction }}
+          JARVIS_SELF_DEVELOP_STAGE: ${{ inputs.stage }}
+        run: |
+          New-Item -ItemType Directory -Force -Path artifacts | Out-Null
+          if ($env:JARVIS_SELF_DEVELOP_STAGE -eq "handoff") {
+            $arguments = @(
+              "-m", "artmach_assistant",
+              "--self-develop-handoff", $env:JARVIS_SELF_DEVELOP_INSTRUCTION,
+              "--acknowledge-self-modification",
+              "--self-develop-handoff-report", "artifacts/self-development-handoff.json"
+            )
+          } else {
+            $arguments = @(
+              "-m", "artmach_assistant",
+              "--self-develop", $env:JARVIS_SELF_DEVELOP_INSTRUCTION,
+              "--self-develop-stage", $env:JARVIS_SELF_DEVELOP_STAGE
+            )
+          }
+          & python @arguments 2>&1 | Tee-Object -FilePath artifacts/self-development.txt
+          if ($LASTEXITCODE -ne 0) {
+            throw "Jarvis self-development exit code: $LASTEXITCODE"
+          }
+
+      - name: Record repository diff
+        if: always()
+        run: |
+          New-Item -ItemType Directory -Force -Path artifacts | Out-Null
+          git status --short | Out-File -Encoding utf8 artifacts/git-status.txt
+          git diff --binary | Out-File -Encoding utf8 artifacts/proposed-change.diff
+
+      - name: Upload self-development report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jarvis-self-development-${{ github.run_number }}
+          path: |
+            artmach_assistant/artifacts/self-development.txt
+            artmach_assistant/artifacts/self-development-gate.txt
+            artmach_assistant/artifacts/self-development-gate.json
+            artmach_assistant/artifacts/self-development-handoff.json
+            artmach_assistant/artifacts/git-status.txt
+            artmach_assistant/artifacts/proposed-change.diff
+          if-no-files-found: warn
+          retention-days: 14

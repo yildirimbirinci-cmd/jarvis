@@ -1,0 +1,238 @@
+"""Post-apply audit and rollback for Jarvis self-development changes.
+
+The audit is independent from the language model. It inspects tracked and
+untracked working-tree changes after an apply cycle and fails closed when no
+change was produced, a forbidden path was touched, or the patch is too large.
+"""
+from __future__ import annotations
+
+from dataclasses import asdict, dataclass
+import hashlib
+from pathlib import Path
+import subprocess
+
+
+FORBIDDEN_PREFIXES = (
+    ".git/",
+    ".github/workflows/",
+    "models/",
+    "tools/piper/",
+)
+ALLOWED_SUFFIXES = (
+    ".py",
+    ".json",
+    ".md",
+    ".txt",
+    ".yml",
+    ".yaml",
+)
+
+
+@dataclass(frozen=True, slots=True)
+class ChangeAudit:
+    ok: bool
+    changed_paths: tuple[str, ...]
+    additions: int
+    deletions: int
+    patch_sha256: str
+    detail: str
+    untracked_paths: tuple[str, ...] = ()
+
+    def to_dict(self) -> dict[str, object]:
+        return asdict(self)
+
+
+def _run_git(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["git", *args],
+        cwd=root,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        check=False,
+    )
+
+
+def _normalise_paths(output: str) -> tuple[str, ...]:
+    return tuple(
+        dict.fromkeys(
+            line.replace("\\", "/").strip()
+            for line in output.splitlines()
+            if line.strip()
+        )
+    )
+
+
+def _is_forbidden(path: str) -> bool:
+    return path.startswith(FORBIDDEN_PREFIXES) or Path(path).suffix.casefold() not in ALLOWED_SUFFIXES
+
+
+def audit_self_development_change(
+    root: Path,
+    *,
+    max_changed_files: int = 8,
+    max_changed_lines: int = 500,
+) -> ChangeAudit:
+    """Validate tracked and untracked changes from one development cycle."""
+    root = Path(root).resolve()
+    names = _run_git(root, "diff", "--name-only", "--diff-filter=ACMRTUXB")
+    if names.returncode != 0:
+        return ChangeAudit(False, (), 0, 0, "", names.stdout.strip() or "git diff failed")
+
+    untracked_result = _run_git(root, "ls-files", "--others", "--exclude-standard")
+    if untracked_result.returncode != 0:
+        return ChangeAudit(False, (), 0, 0, "", untracked_result.stdout.strip() or "git untracked scan failed")
+
+    tracked = _normalise_paths(names.stdout)
+    untracked = _normalise_paths(untracked_result.stdout)
+    changed = tuple(dict.fromkeys((*tracked, *untracked)))
+    if not changed:
+        return ChangeAudit(False, (), 0, 0, "", "no source change was produced")
+
+    forbidden = [path for path in changed if _is_forbidden(path)]
+    if forbidden:
+        return ChangeAudit(
+            False,
+            changed,
+            0,
+            0,
+            "",
+            "forbidden path(s): " + ", ".join(forbidden),
+            untracked,
+        )
+    if len(changed) > max_changed_files:
+        return ChangeAudit(
+            False,
+            changed,
+            0,
+            0,
+            "",
+            f"change touches {len(changed)} files; limit is {max_changed_files}",
+            untracked,
+        )
+
+    numstat = _run_git(root, "diff", "--numstat")
+    if numstat.returncode != 0:
+        return ChangeAudit(False, changed, 0, 0, "", numstat.stdout.strip() or "git numstat failed", untracked)
+
+    additions = 0
+    deletions = 0
+    for line in numstat.stdout.splitlines():
+        parts = line.split("\t", 2)
+        if len(parts) < 3 or parts[0] == "-" or parts[1] == "-":
+            return ChangeAudit(False, changed, 0, 0, "", "binary change is not allowed", untracked)
+        try:
+            additions += int(parts[0])
+            deletions += int(parts[1])
+        except ValueError:
+            return ChangeAudit(False, changed, 0, 0, "", "invalid git numstat output", untracked)
+
+    untracked_payloads: list[tuple[str, bytes]] = []
+    for relative in untracked:
+        candidate = (root / relative).resolve()
+        try:
+            candidate.relative_to(root)
+        except ValueError:
+            return ChangeAudit(False, changed, additions, deletions, "", f"untracked path escaped root: {relative}", untracked)
+        if not candidate.is_file() or candidate.is_symlink():
+            return ChangeAudit(False, changed, additions, deletions, "", f"untracked non-regular file is not allowed: {relative}", untracked)
+        payload = candidate.read_bytes()
+        if b"\x00" in payload:
+            return ChangeAudit(False, changed, additions, deletions, "", "binary change is not allowed", untracked)
+        try:
+            text = payload.decode("utf-8")
+        except UnicodeDecodeError:
+            return ChangeAudit(False, changed, additions, deletions, "", f"non-UTF-8 file is not allowed: {relative}", untracked)
+        additions += len(text.splitlines())
+        untracked_payloads.append((relative, payload))
+
+    total = additions + deletions
+    if total > max_changed_lines:
+        return ChangeAudit(
+            False,
+            changed,
+            additions,
+            deletions,
+            "",
+            f"change contains {total} edited lines; limit is {max_changed_lines}",
+            untracked,
+        )
+
+    patch = _run_git(root, "diff", "--binary", "--no-ext-diff")
+    if patch.returncode != 0:
+        return ChangeAudit(False, changed, additions, deletions, "", patch.stdout.strip() or "git patch failed", untracked)
+    digest = hashlib.sha256()
+    digest.update(patch.stdout.encode("utf-8"))
+    for relative, payload in sorted(untracked_payloads):
+        digest.update(b"\0UNTRACKED\0")
+        digest.update(relative.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(payload)
+    return ChangeAudit(
+        True,
+        changed,
+        additions,
+        deletions,
+        digest.hexdigest(),
+        f"{len(changed)} file(s), +{additions}/-{deletions}",
+        untracked,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class RollbackAudit:
+    ok: bool
+    restored_paths: tuple[str, ...]
+    detail: str
+
+    def to_dict(self) -> dict[str, object]:
+        return asdict(self)
+
+
+def rollback_audited_change(root: Path, changed_paths: tuple[str, ...]) -> RollbackAudit:
+    """Restore tracked changes and delete untracked files rejected by audit."""
+    root = Path(root).resolve()
+    paths = tuple(dict.fromkeys(path.replace("\\", "/") for path in changed_paths if path))
+    if not paths:
+        return RollbackAudit(False, (), "no audited paths were available for rollback")
+
+    tracked: list[str] = []
+    untracked: list[str] = []
+    for relative in paths:
+        candidate = (root / relative).resolve()
+        try:
+            candidate.relative_to(root)
+        except ValueError:
+            return RollbackAudit(False, paths, f"rollback path escaped root: {relative}")
+        probe = _run_git(root, "ls-files", "--error-unmatch", "--", relative)
+        if probe.returncode == 0:
+            tracked.append(relative)
+        else:
+            untracked.append(relative)
+
+    if tracked:
+        restored = _run_git(root, "restore", "--staged", "--worktree", "--", *tracked)
+        if restored.returncode != 0:
+            return RollbackAudit(False, paths, restored.stdout.strip() or "git restore failed")
+
+    for relative in untracked:
+        candidate = root / relative
+        if candidate.is_symlink() or candidate.is_file():
+            candidate.unlink(missing_ok=True)
+        elif candidate.exists():
+            return RollbackAudit(False, paths, f"refusing to remove non-file path: {relative}")
+        parent = candidate.parent
+        while parent != root:
+            try:
+                parent.rmdir()
+            except OSError:
+                break
+            parent = parent.parent
+
+    remaining = _run_git(root, "status", "--porcelain", "--", *paths)
+    if remaining.returncode != 0:
+        return RollbackAudit(False, paths, remaining.stdout.strip() or "rollback verification failed")
+    leftovers = tuple(line.strip() for line in remaining.stdout.splitlines() if line.strip())
+    if leftovers:
+        return RollbackAudit(False, paths, "rollback left modified path(s): " + ", ".join(leftovers))
+    return RollbackAudit(True, paths, f"restored {len(paths)} audited path(s)")
