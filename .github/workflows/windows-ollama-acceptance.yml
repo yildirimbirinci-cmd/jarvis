@@ -35,71 +35,119 @@ jobs:
       PYTHONUTF8: "1"
       PYTHONIOENCODING: utf-8
       PYTHONDONTWRITEBYTECODE: "1"
-      PYTHONPATH: ${{ github.workspace }}
       JARVIS_OLLAMA_URL: http://127.0.0.1:11434
       JARVIS_CHAT_MODEL: ${{ inputs.chat_model }}
       JARVIS_CODE_MODEL: ${{ inputs.code_model }}
+      PYTHONPATH: ${{ github.workspace }}
+
     defaults:
       run:
         shell: powershell
         working-directory: artmach_assistant
 
     steps:
-      - name: Checkout repository as Python package
+      - name: Checkout repository
         uses: actions/checkout@v4
         with:
           path: artmach_assistant
           clean: true
           persist-credentials: false
 
-      - name: Setup Python 3.11
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Install headless dependencies
+      - name: Resolve Python 3.11
+        id: python
+        working-directory: ${{ github.workspace }}
         run: |
           $ErrorActionPreference = 'Stop'
-          python -m pip install --upgrade pip
-          if (Test-Path requirements.txt) { python -m pip install -r requirements.txt }
-          if (Test-Path requirements-dev.txt) { python -m pip install -r requirements-dev.txt }
-          python -m pip install pytest pytest-timeout requests beautifulsoup4
+          $venvPython = Join-Path $env:GITHUB_WORKSPACE 'artmach_assistant\.venv\Scripts\python.exe'
+          if (Test-Path $venvPython) {
+            & $venvPython --version
+            "kind=exe" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+            "command=$venvPython" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+            exit 0
+          }
+          try {
+            & py -3.11 --version
+            if ($LASTEXITCODE -eq 0) {
+              "kind=py" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+              "command=py" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+              exit 0
+            }
+          } catch {}
+          try {
+            & python --version
+            if ($LASTEXITCODE -eq 0) {
+              "kind=exe" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+              "command=python" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+              exit 0
+            }
+          } catch {}
+          throw 'Python 3.11 could not be resolved on the self-hosted runner.'
 
       - name: Verify package import
-        run: python -c "import artmach_assistant; print(artmach_assistant.__file__)"
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ('${{ steps.python.outputs.kind }}' -eq 'py') {
+            & py -3.11 -c "import artmach_assistant; print(artmach_assistant.__file__)"
+          } else {
+            & '${{ steps.python.outputs.command }}' -c "import artmach_assistant; print(artmach_assistant.__file__)"
+          }
+          if ($LASTEXITCODE -ne 0) { throw "Package import failed: $LASTEXITCODE" }
 
       - name: Verify local Ollama service and models
         run: |
           $ErrorActionPreference = 'Stop'
           $response = Invoke-RestMethod -Uri "$env:JARVIS_OLLAMA_URL/api/tags" -Method Get -TimeoutSec 15
-          $names = @($response.models | ForEach-Object { $_.name })
+          $names = @($response.models | ForEach-Object { [string]$_.name })
+          if ($names.Count -lt 1) { throw 'Ollama is running but no model is installed.' }
           Write-Host "Installed Ollama models: $($names -join ', ')"
           foreach ($required in @($env:JARVIS_CHAT_MODEL, $env:JARVIS_CODE_MODEL)) {
-            $matched = $names | Where-Object { $_ -eq $required -or $_ -like "$required:*" }
-            if (-not $matched) { throw "Required Ollama model is missing: $required" }
+            $matched = @($names | Where-Object { $_ -eq $required -or $_ -like "${required}:*" })
+            if ($matched.Count -eq 0) { throw "Required Ollama model is missing: $required" }
           }
 
-      - name: Compile repository
-        run: python -m compileall -q .
+      - name: Install test dependencies
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ('${{ steps.python.outputs.kind }}' -eq 'py') {
+            & py -3.11 -m pip install --upgrade pytest pytest-timeout requests beautifulsoup4
+          } else {
+            & '${{ steps.python.outputs.command }}' -m pip install --upgrade pytest pytest-timeout requests beautifulsoup4
+          }
+          if ($LASTEXITCODE -ne 0) { throw "Dependency installation failed: $LASTEXITCODE" }
 
-      - name: Run self-development readiness gate
+      - name: Compile repository
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $arguments = @('-m','compileall','-q','config.py','core','indexing','tests','tools','app.py','start_jarvis.py')
+          if ('${{ steps.python.outputs.kind }}' -eq 'py') { & py -3.11 @arguments }
+          else { & '${{ steps.python.outputs.command }}' @arguments }
+          if ($LASTEXITCODE -ne 0) { throw "Compilation failed: $LASTEXITCODE" }
+
+      - name: Verify self-development handoff gate
         run: |
           $ErrorActionPreference = 'Stop'
           New-Item -ItemType Directory -Force -Path artifacts | Out-Null
-          python -m artmach_assistant --self-develop-check --self-develop-report artifacts/self-development-gate.json 2>&1 | Tee-Object -FilePath artifacts/self-development-gate.txt
-          if ($LASTEXITCODE -ne 0) { throw "Self-development readiness gate failed: $LASTEXITCODE" }
+          $arguments = @('-m','artmach_assistant','--self-develop-check','--self-develop-report','artifacts/windows-self-development-gate.json')
+          if ('${{ steps.python.outputs.kind }}' -eq 'py') { & py -3.11 @arguments 2>&1 | Tee-Object artifacts/windows-self-development-gate.txt }
+          else { & '${{ steps.python.outputs.command }}' @arguments 2>&1 | Tee-Object artifacts/windows-self-development-gate.txt }
+          if ($LASTEXITCODE -ne 0) { throw "Self-development gate failed: $LASTEXITCODE" }
 
       - name: Run focused self-development safety suite
         run: |
           $ErrorActionPreference = 'Stop'
-          python -m pytest -q `
-            tests/test_code_model_acceptance.py `
-            tests/test_end_to_end_acceptance.py `
-            tests/test_edit_build_safety_group.py `
-            tests/test_edit_checkpoint_transaction_group.py `
-            tests/test_git_change_service.py `
-            tests/test_git_workspace_service.py `
-            tests/test_cancellable_ollama.py
+          $tests = @(
+            'tests/test_code_model_acceptance.py',
+            'tests/test_end_to_end_acceptance.py',
+            'tests/test_edit_build_safety_group.py',
+            'tests/test_edit_checkpoint_transaction_group.py',
+            'tests/test_git_change_service.py',
+            'tests/test_git_workspace_service.py',
+            'tests/test_cancellable_ollama.py'
+          )
+          $arguments = @('-m','pytest','-q') + $tests
+          if ('${{ steps.python.outputs.kind }}' -eq 'py') { & py -3.11 @arguments }
+          else { & '${{ steps.python.outputs.command }}' @arguments }
+          if ($LASTEXITCODE -ne 0) { throw "Focused acceptance failed: $LASTEXITCODE" }
 
       - name: Probe real chat and code models
         run: |
@@ -119,7 +167,11 @@ jobs:
 
       - name: Run complete repository suite
         if: ${{ inputs.run_full_suite }}
-        run: python -m pytest -q
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ('${{ steps.python.outputs.kind }}' -eq 'py') { & py -3.11 -m pytest -q }
+          else { & '${{ steps.python.outputs.command }}' -m pytest -q }
+          if ($LASTEXITCODE -ne 0) { throw "Complete repository suite failed: $LASTEXITCODE" }
 
       - name: Upload acceptance evidence
         if: always()

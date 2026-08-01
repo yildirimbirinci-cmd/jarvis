@@ -12,11 +12,7 @@ on:
         required: true
         default: plan
         type: choice
-        options:
-          - plan
-          - propose
-          - apply
-          - handoff
+        options: [plan, propose, apply, handoff]
 
 permissions:
   contents: read
@@ -29,26 +25,27 @@ jobs:
   self-development:
     name: Guarded self-development
     runs-on: [self-hosted, windows, x64, jarvis]
-    timeout-minutes: 90
+    timeout-minutes: 45
     env:
       PYTHONUTF8: "1"
       PYTHONIOENCODING: utf-8
       PYTHONDONTWRITEBYTECODE: "1"
       PYTHONPATH: ${{ github.workspace }}
+
     defaults:
       run:
         shell: powershell
         working-directory: artmach_assistant
 
     steps:
-      - name: Checkout repository as Python package
+      - name: Checkout repository
         uses: actions/checkout@v4
         with:
           path: artmach_assistant
           clean: true
           persist-credentials: false
 
-      - name: Setup Python 3.11
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -56,8 +53,6 @@ jobs:
       - name: Install headless dependencies
         run: |
           python -m pip install --upgrade pip
-          if (Test-Path requirements.txt) { python -m pip install -r requirements.txt }
-          if (Test-Path requirements-dev.txt) { python -m pip install -r requirements-dev.txt }
           python -m pip install pytest pytest-timeout requests beautifulsoup4
 
       - name: Verify package import
@@ -85,18 +80,9 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path artifacts | Out-Null
           if ($env:JARVIS_SELF_DEVELOP_STAGE -eq "handoff") {
-            $arguments = @(
-              "-m", "artmach_assistant",
-              "--self-develop-handoff", $env:JARVIS_SELF_DEVELOP_INSTRUCTION,
-              "--acknowledge-self-modification",
-              "--self-develop-handoff-report", "artifacts/self-development-handoff.json"
-            )
+            $arguments = @('-m','artmach_assistant','--self-develop-handoff',$env:JARVIS_SELF_DEVELOP_INSTRUCTION,'--acknowledge-self-modification','--self-develop-handoff-report','artifacts/self-development-handoff.json')
           } else {
-            $arguments = @(
-              "-m", "artmach_assistant",
-              "--self-develop", $env:JARVIS_SELF_DEVELOP_INSTRUCTION,
-              "--self-develop-stage", $env:JARVIS_SELF_DEVELOP_STAGE
-            )
+            $arguments = @('-m','artmach_assistant','--self-develop',$env:JARVIS_SELF_DEVELOP_INSTRUCTION,'--self-develop-stage',$env:JARVIS_SELF_DEVELOP_STAGE)
           }
           & python @arguments 2>&1 | Tee-Object -FilePath artifacts/self-development.txt
           if ($LASTEXITCODE -ne 0) { throw "Jarvis self-development exit code: $LASTEXITCODE" }
@@ -113,7 +99,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: jarvis-self-development-${{ github.run_number }}
-          path: |
-            artmach_assistant/artifacts/**
+          path: artmach_assistant/artifacts/**
           if-no-files-found: warn
           retention-days: 14
