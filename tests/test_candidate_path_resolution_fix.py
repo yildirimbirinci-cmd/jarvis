@@ -75,4 +75,3 @@ def test_backup_paths_are_not_returned_as_candidates(tmp_path) -> None:
         item.startswith(".jarvis_fix_backup/")
         for item in paths
     )
-
