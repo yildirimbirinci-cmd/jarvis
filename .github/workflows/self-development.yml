@@ -28,23 +28,27 @@ concurrency:
 jobs:
   self-development:
     name: Guarded self-development
-    runs-on: [self-hosted, Windows, X64]
-    timeout-minutes: 45
-
+    runs-on: [self-hosted, windows, x64, jarvis]
+    timeout-minutes: 90
+    env:
+      PYTHONUTF8: "1"
+      PYTHONIOENCODING: utf-8
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONPATH: ${{ github.workspace }}
     defaults:
       run:
         shell: powershell
         working-directory: artmach_assistant
 
     steps:
-      - name: Checkout repository
+      - name: Checkout repository as Python package
         uses: actions/checkout@v4
         with:
           path: artmach_assistant
           clean: true
           persist-credentials: false
 
-      - name: Setup Python
+      - name: Setup Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -52,7 +56,12 @@ jobs:
       - name: Install headless dependencies
         run: |
           python -m pip install --upgrade pip
+          if (Test-Path requirements.txt) { python -m pip install -r requirements.txt }
+          if (Test-Path requirements-dev.txt) { python -m pip install -r requirements-dev.txt }
           python -m pip install pytest pytest-timeout requests beautifulsoup4
+
+      - name: Verify package import
+        run: python -c "import artmach_assistant; print(artmach_assistant.__file__)"
 
       - name: Verify Ollama service
         run: |
@@ -67,12 +76,9 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path artifacts | Out-Null
           python -m artmach_assistant --self-develop-check --self-develop-report artifacts/self-development-gate.json 2>&1 | Tee-Object -FilePath artifacts/self-development-gate.txt
-          if ($LASTEXITCODE -ne 0) {
-            throw "Self-development handoff gate failed: $LASTEXITCODE"
-          }
+          if ($LASTEXITCODE -ne 0) { throw "Self-development handoff gate failed: $LASTEXITCODE" }
 
       - name: Run guarded self-development
-        id: self_develop
         env:
           JARVIS_SELF_DEVELOP_INSTRUCTION: ${{ inputs.instruction }}
           JARVIS_SELF_DEVELOP_STAGE: ${{ inputs.stage }}
@@ -93,9 +99,7 @@ jobs:
             )
           }
           & python @arguments 2>&1 | Tee-Object -FilePath artifacts/self-development.txt
-          if ($LASTEXITCODE -ne 0) {
-            throw "Jarvis self-development exit code: $LASTEXITCODE"
-          }
+          if ($LASTEXITCODE -ne 0) { throw "Jarvis self-development exit code: $LASTEXITCODE" }
 
       - name: Record repository diff
         if: always()
@@ -110,11 +114,6 @@ jobs:
         with:
           name: jarvis-self-development-${{ github.run_number }}
           path: |
-            artmach_assistant/artifacts/self-development.txt
-            artmach_assistant/artifacts/self-development-gate.txt
-            artmach_assistant/artifacts/self-development-gate.json
-            artmach_assistant/artifacts/self-development-handoff.json
-            artmach_assistant/artifacts/git-status.txt
-            artmach_assistant/artifacts/proposed-change.diff
+            artmach_assistant/artifacts/**
           if-no-files-found: warn
           retention-days: 14

@@ -32,10 +32,10 @@ jobs:
     runs-on: [self-hosted, windows, x64, jarvis]
     timeout-minutes: 120
     env:
-      PYTHONPATH: ${{ github.workspace }}
       PYTHONUTF8: "1"
       PYTHONIOENCODING: utf-8
       PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONPATH: ${{ github.workspace }}
       JARVIS_OLLAMA_URL: http://127.0.0.1:11434
       JARVIS_CHAT_MODEL: ${{ inputs.chat_model }}
       JARVIS_CODE_MODEL: ${{ inputs.code_model }}
@@ -43,6 +43,7 @@ jobs:
       run:
         shell: powershell
         working-directory: artmach_assistant
+
     steps:
       - name: Checkout repository as Python package
         uses: actions/checkout@v4
@@ -56,7 +57,7 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install test dependencies
+      - name: Install headless dependencies
         run: |
           $ErrorActionPreference = 'Stop'
           python -m pip install --upgrade pip
@@ -65,7 +66,7 @@ jobs:
           python -m pip install pytest pytest-timeout requests beautifulsoup4
 
       - name: Verify package import
-        run: python -c "import artmach_assistant; print('artmach_assistant import OK')"
+        run: python -c "import artmach_assistant; print(artmach_assistant.__file__)"
 
       - name: Verify local Ollama service and models
         run: |
@@ -79,16 +80,18 @@ jobs:
           }
 
       - name: Compile repository
-        run: python -m compileall -q config.py core indexing tests tools app.py start_jarvis.py
+        run: python -m compileall -q .
 
-      - name: Verify application self-development gate
+      - name: Run self-development readiness gate
         run: |
+          $ErrorActionPreference = 'Stop'
           New-Item -ItemType Directory -Force -Path artifacts | Out-Null
-          python -m artmach_assistant --self-develop-check --self-develop-report artifacts/self-development-gate.json
-          if ($LASTEXITCODE -ne 0) { throw "Self-development gate failed: $LASTEXITCODE" }
+          python -m artmach_assistant --self-develop-check --self-develop-report artifacts/self-development-gate.json 2>&1 | Tee-Object -FilePath artifacts/self-development-gate.txt
+          if ($LASTEXITCODE -ne 0) { throw "Self-development readiness gate failed: $LASTEXITCODE" }
 
       - name: Run focused self-development safety suite
         run: |
+          $ErrorActionPreference = 'Stop'
           python -m pytest -q `
             tests/test_code_model_acceptance.py `
             tests/test_end_to_end_acceptance.py `
@@ -102,11 +105,11 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $cases = @(
-            @{ model=$env:JARVIS_CHAT_MODEL; marker='JARVIS_CHAT_OK' },
-            @{ model=$env:JARVIS_CODE_MODEL; marker='JARVIS_CODE_OK' }
+            @{ model=$env:JARVIS_CHAT_MODEL; prompt='Respond with exactly: JARVIS_CHAT_OK' },
+            @{ model=$env:JARVIS_CODE_MODEL; prompt='Respond with exactly: JARVIS_CODE_OK' }
           )
           foreach ($case in $cases) {
-            $body = @{ model=$case.model; prompt="Respond with exactly: $($case.marker)"; stream=$false } | ConvertTo-Json
+            $body = @{ model=$case.model; prompt=$case.prompt; stream=$false } | ConvertTo-Json
             $result = Invoke-RestMethod -Uri "$env:JARVIS_OLLAMA_URL/api/generate" -Method Post -ContentType 'application/json' -Body $body -TimeoutSec 180
             if ([string]::IsNullOrWhiteSpace([string]$result.response)) {
               throw "Ollama returned an empty response for model $($case.model)"
@@ -117,13 +120,6 @@ jobs:
       - name: Run complete repository suite
         if: ${{ inputs.run_full_suite }}
         run: python -m pytest -q
-
-      - name: Record repository state
-        if: always()
-        run: |
-          New-Item -ItemType Directory -Force -Path artifacts | Out-Null
-          git status --short | Out-File -Encoding utf8 artifacts/git-status.txt
-          git diff --binary | Out-File -Encoding utf8 artifacts/repository.diff
 
       - name: Upload acceptance evidence
         if: always()
