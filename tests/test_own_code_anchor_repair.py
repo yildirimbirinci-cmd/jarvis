@@ -95,3 +95,57 @@ def test_missing_anchor_is_not_guessed(tmp_path: Path) -> None:
     )
 
     assert repaired == payload
+
+
+def test_file_name_before_symbol_does_not_hide_requested_method(
+    tmp_path: Path,
+) -> None:
+    source = (
+        "class WakeWordWorker:\n"
+        "    def helper(self):\n"
+        "        if self.running:\n"
+        "            return True\n"
+        "\n"
+        "    def run(self):\n"
+        "        while self.running:\n"
+        "            if self.running:\n"
+        "                self.wait()\n"
+        "\n"
+        "def unrelated():\n"
+        "    if self.running:\n"
+        "        return False\n"
+    )
+
+    path = tmp_path / "app.py"
+    path.write_text(source, encoding="utf-8")
+
+    payload = {
+        "files": [
+            {
+                "path": "app.py",
+                "operations": [
+                    {
+                        "op": "replace",
+                        "old": "if self.running:",
+                        "new": "if self._should_continue():",
+                    }
+                ],
+            }
+        ]
+    }
+
+    repaired = repair_ambiguous_replace_anchors(
+        payload,
+        project_root=tmp_path,
+        instruction=(
+            "app.py dosyas?ndaki WakeWordWorker.run metodunu "
+            "davran??? de?i?tirmeden refakt?r et"
+        ),
+    )
+
+    operation = repaired["files"][0]["operations"][0]
+
+    assert source.count(operation["old"]) == 1
+    run_start = source.index("    def run(self):")
+    run_end = source.index("\ndef unrelated():")
+    assert operation["old"] in source[run_start:run_end]

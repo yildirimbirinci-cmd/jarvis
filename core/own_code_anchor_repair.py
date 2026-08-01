@@ -1,4 +1,4 @@
-﻿from pathlib import Path
+from pathlib import Path
 import ast
 import copy
 import re
@@ -11,10 +11,34 @@ _SYMBOL_PATTERN = re.compile(
 
 
 def _requested_symbol(instruction: str) -> tuple[str, str] | None:
-    match = _SYMBOL_PATTERN.search(str(instruction or ""))
-    if not match:
-        return None
-    return match.group(1), match.group(2)
+    """Return an explicit Class.method reference, ignoring file names."""
+    text = str(instruction or "")
+    ignored_suffixes = {
+        "py", "pyw", "json", "toml", "yaml", "yml", "md", "txt",
+        "ini", "cfg", "bat", "cmd", "ps1", "sh", "html", "css",
+    }
+
+    matches = list(_SYMBOL_PATTERN.finditer(text))
+
+    # Prefer the conventional Class.method form.
+    for match in matches:
+        owner = match.group(1)
+        member = match.group(2)
+
+        if member.casefold() in ignored_suffixes:
+            continue
+        if owner[:1].isupper():
+            return owner, member
+
+    # Fall back to any non-file dotted symbol.
+    for match in matches:
+        owner = match.group(1)
+        member = match.group(2)
+
+        if member.casefold() not in ignored_suffixes:
+            return owner, member
+
+    return None
 
 
 def _symbol_source(
