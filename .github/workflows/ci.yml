@@ -44,14 +44,18 @@ jobs:
         run: |
           python -c "import artmach_assistant; print('package import OK')"
 
-      - name: Collect non-voice tests
+      - name: Run self-development safety tests
         run: |
-          python -m pytest tests --collect-only -x -vv \
+          python -m pytest -x -vv \
+            tests/test_own_code*.py \
+            tests/test_self_repair*.py \
+            tests/test_patch*.py \
+            tests/test_checkpoint*.py \
+            tests/test_rollback*.py \
+            tests/test_workspace*.py \
             --ignore-glob="tests/*audio*" \
             --ignore-glob="tests/*voice*" \
             --ignore-glob="tests/*wake*" \
             --ignore-glob="tests/*whisper*" \
             --ignore-glob="tests/*piper*" \
-            --ignore-glob="tests/*tts*" \
-            --ignore-glob="tests/*microphone*" \
-            --ignore-glob="tests/*speaker*"
+            --ignore-glob="tests/*tts*"
