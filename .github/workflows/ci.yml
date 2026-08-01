@@ -32,7 +32,7 @@ jobs:
       - name: Install test dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install pytest pytest-timeout
+          python -m pip install pytest pytest-timeout requests
 
       - name: Verify package imports
         run: |
