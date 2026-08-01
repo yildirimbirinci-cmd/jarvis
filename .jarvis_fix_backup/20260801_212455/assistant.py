@@ -5067,19 +5067,8 @@ class AssistantEngine:
             any(word.startswith(("hizli", "hiz", "gecik", "akici")) for word in words)
             and any(word.startswith(("daha", "cekelim", "yapalim", "istiyor", "olsun")) for word in words)
         )
-        approval_preview = (
-            any(phrase in normalized for phrase in (
-                "degistirmeden once",
-                "uygulamadan once",
-                "duzeltmeden once",
-                "patch uygulamadan once",
-                "taslagi uygulamadan once",
-            ))
-            and any(word.startswith(("goster", "hazirla", "oner", "sun", "onay")) for word in words)
-        )
         asks_for_findings = (
-            not approval_preview
-            and any(word.startswith(("incele", "kontrol", "analiz", "gozden")) for word in words)
+            any(word.startswith(("incele", "kontrol", "analiz", "gozden")) for word in words)
             and any(
                 word.startswith(("soyle", "belirt", "rapor", "listele", "goster", "nereler", "neler", "ozet"))
                 for word in words
