@@ -53,7 +53,6 @@ _STRICT_READ_ONLY_PHRASES = (
     "sadece incele", "yalnizca incele", "sadece analiz", "yalnizca analiz",
     "sadece kontrol et", "yalnizca kontrol et", "hicbir plan hazirlama",
     "patch hazirlama", "taslak hazirlama", "oneride bulunma",
-    "gelistirm yapmiyoruz", "gelistirme yapmiyoruz",
 )
 
 _NEGATED_CHANGE_PHRASES = (
@@ -255,7 +254,7 @@ def classify_own_code_intent(
     if has_report and any(
         word.startswith(("duzeltme", "gelistirme", "iyilestirme", "sorun", "hata", "eksik"))
         for word in words
-    ) and (active_own_editor or not has_change):
+    ) and not has_change:
         return OwnCodeIntent(OwnCodeIntentKind.REVIEW, normalized, "show findings request")
     if any(word.startswith(("nerede", "konum", "dizin", "klasor")) for word in words):
         return OwnCodeIntent(OwnCodeIntentKind.LOCATE, normalized, "source location request")
