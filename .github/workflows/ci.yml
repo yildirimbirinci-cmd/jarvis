@@ -44,6 +44,16 @@ jobs:
         run: |
           python -c "import artmach_assistant; print('package import OK')"
 
-      - name: List repository tests
+      - name: Run self development tests
         run: |
-          find tests -name "*.py" | sort
+          python -m pytest -x -vv \
+            tests/test_own_code_readiness.py \
+            tests/test_own_code_closed_loop.py \
+            tests/test_own_code_repair_retry.py \
+            tests/test_own_code_scope.py \
+            tests/test_own_code_dependency_guard.py \
+            tests/test_own_code_security_guard.py \
+            tests/test_own_code_semantic_guard.py \
+            tests/test_own_code_symbol_guard.py \
+            tests/test_self_repair_state_machine.py \
+            tests/test_git_workspace_service.py
