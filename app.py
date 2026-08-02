@@ -328,6 +328,84 @@ class WakeWordWorker(QThread):
     def _cancelled(self) -> bool:
         return self.isInterruptionRequested()
 
+    def _listen_active_dialogue(self):
+        if self._next_mode != "sleep":
+            mode = self._next_mode
+            self._next_mode = "sleep"
+            labels = {
+                "command": "Diyalog komutu",
+                "command_retry": "Komut tekrarı",
+                "confirmation": "Onay cevabı",
+                "learning_phrase": "Öğretilecek ifade",
+                "learning_target": "Hedef komut",
+                "learning_observe": "Öğrenme gözlem onayı",
+            }
+            hotwords = {
+                "command": "",
+                "command_retry": "hesap makinesi aç kapat program uygulama not defteri dosya gezgini Visual Studio Code 3ds Max",
+                "confirmation": "evet hayır iptal tekrar et onayla kaydet",
+                "learning_phrase": "",
+                "learning_target": "hesap makinesi aç kapat program uygulama çalıştır",
+                "learning_observe": "yaptım tamam iptal vazgeç",
+            }
+            # Short everyday commands should answer promptly; teaching
+            # sentences keep a longer pause allowance so they are not
+            # cut in half.
+            silence_after_speech = 1.10 if mode in {"learning_phrase", "learning_target"} else (0.38 if mode == "confirmation" else 0.48)
+            self.status.emit(f"Durum={mode}. {labels.get(mode, 'Yanıt')} dinleniyor.")
+            try:
+                command = self.voice.listen_utterance(
+                    self.device_index, self.command_seconds, self.language,
+                    self.level.emit, self.status.emit, self.command_model,
+                    self._cancelled, False, hotwords.get(mode, "evet hayır"), silence_after_speech,
+                ).strip()
+            except InterruptedError:
+                return "break"
+            except Exception as exc:
+                if mode in {"command", "command_retry"} and self._owner_session_active():
+                    # Silence is not a new command and must not make
+                    # Jarvis react to ambient sound. Keep the owner-
+                    # verified session alive until its idle deadline.
+                    self.status.emit("Sahip sesli konuşma oturumu beklemede; yalnızca sesin kabul edilecek.")
+                    self._next_mode = "command"
+                elif mode in {"command", "command_retry"}:
+                    self.failed.emit(f"{labels.get(mode, 'Yanıt')} alınamadı: {exc}")
+                    # A rejected audio packet must not open another
+                    # unprompted recording. That was the path through
+                    # which electrical noise could become a fabricated
+                    # command after a genuine wake word.
+                    self.status.emit("Geçerli insan konuşması alınamadı; Jarvis yeniden wake word bekliyor.")
+                    self._command_retry_count = 0
+                    self.engine_end_dialogue.emit()
+                    self._next_mode = "sleep"
+                else:
+                    self.failed.emit(f"{labels.get(mode, 'Yanıt')} alınamadı: {exc}")
+                    self._next_mode = mode
+                self.msleep(250)
+                return "continue"
+            self._command_retry_count = 0
+            self.status.emit(f"{labels.get(mode, 'Yanıt')} Whisper çıktısı: {command!r}")
+            if self.voice.has_owner_voice_profile():
+                accepted, score = self.voice.verify_owner_voice(threshold=max(0.82, self.owner_threshold))
+                if not accepted:
+                    self.status.emit(f"{labels.get(mode, 'Yanıt')}: sahip ses profili eşleşmedi; komut reddedildi (%{int(max(0.0, score) * 100)}).")
+                    # A rejected normal command never opens another
+                    # microphone turn without a fresh wake word.
+                    if mode in {"command", "command_retry"} and self._owner_session_active():
+                        self.status.emit("Sahip ses profili eşleşmedi; ses yok sayıldı, konuşma oturumu sürüyor.")
+                        self._next_mode = "command"
+                    elif mode in {"command", "command_retry"}:
+                        self.engine_end_dialogue.emit()
+                        self._next_mode = "sleep"
+                    else:
+                        self._next_mode = mode
+                    return "continue"
+            self.pause_listening()
+            self._renew_owner_session()
+            self.command_recognized.emit(command)
+            return "continue"
+        return "continue"
+
     def run(self) -> None:
         self.status.emit(
             f"Wake word döngüsü başladı: '{self.wake_word}', varyasyonlar={', '.join(self.wake_aliases)}, "
@@ -339,81 +417,10 @@ class WakeWordWorker(QThread):
                     self.msleep(100)
                     continue
 
-                if self._next_mode != "sleep":
-                    mode = self._next_mode
-                    self._next_mode = "sleep"
-                    labels = {
-                        "command": "Diyalog komutu",
-                        "command_retry": "Komut tekrarı",
-                        "confirmation": "Onay cevabı",
-                        "learning_phrase": "Öğretilecek ifade",
-                        "learning_target": "Hedef komut",
-                        "learning_observe": "Öğrenme gözlem onayı",
-                    }
-                    hotwords = {
-                        "command": "",
-                        "command_retry": "hesap makinesi aç kapat program uygulama not defteri dosya gezgini Visual Studio Code 3ds Max",
-                        "confirmation": "evet hayır iptal tekrar et onayla kaydet",
-                        "learning_phrase": "",
-                        "learning_target": "hesap makinesi aç kapat program uygulama çalıştır",
-                        "learning_observe": "yaptım tamam iptal vazgeç",
-                    }
-                    # Short everyday commands should answer promptly; teaching
-                    # sentences keep a longer pause allowance so they are not
-                    # cut in half.
-                    silence_after_speech = 1.10 if mode in {"learning_phrase", "learning_target"} else (0.38 if mode == "confirmation" else 0.48)
-                    self.status.emit(f"Durum={mode}. {labels.get(mode, 'Yanıt')} dinleniyor.")
-                    try:
-                        command = self.voice.listen_utterance(
-                            self.device_index, self.command_seconds, self.language,
-                            self.level.emit, self.status.emit, self.command_model,
-                            self._cancelled, False, hotwords.get(mode, "evet hayır"), silence_after_speech,
-                        ).strip()
-                    except InterruptedError:
-                        break
-                    except Exception as exc:
-                        if mode in {"command", "command_retry"} and self._owner_session_active():
-                            # Silence is not a new command and must not make
-                            # Jarvis react to ambient sound. Keep the owner-
-                            # verified session alive until its idle deadline.
-                            self.status.emit("Sahip sesli konuşma oturumu beklemede; yalnızca sesin kabul edilecek.")
-                            self._next_mode = "command"
-                        elif mode in {"command", "command_retry"}:
-                            self.failed.emit(f"{labels.get(mode, 'Yanıt')} alınamadı: {exc}")
-                            # A rejected audio packet must not open another
-                            # unprompted recording. That was the path through
-                            # which electrical noise could become a fabricated
-                            # command after a genuine wake word.
-                            self.status.emit("Geçerli insan konuşması alınamadı; Jarvis yeniden wake word bekliyor.")
-                            self._command_retry_count = 0
-                            self.engine_end_dialogue.emit()
-                            self._next_mode = "sleep"
-                        else:
-                            self.failed.emit(f"{labels.get(mode, 'Yanıt')} alınamadı: {exc}")
-                            self._next_mode = mode
-                        self.msleep(250)
-                        continue
-                    self._command_retry_count = 0
-                    self.status.emit(f"{labels.get(mode, 'Yanıt')} Whisper çıktısı: {command!r}")
-                    if self.voice.has_owner_voice_profile():
-                        accepted, score = self.voice.verify_owner_voice(threshold=max(0.82, self.owner_threshold))
-                        if not accepted:
-                            self.status.emit(f"{labels.get(mode, 'Yanıt')}: sahip ses profili eşleşmedi; komut reddedildi (%{int(max(0.0, score) * 100)}).")
-                            # A rejected normal command never opens another
-                            # microphone turn without a fresh wake word.
-                            if mode in {"command", "command_retry"} and self._owner_session_active():
-                                self.status.emit("Sahip ses profili eşleşmedi; ses yok sayıldı, konuşma oturumu sürüyor.")
-                                self._next_mode = "command"
-                            elif mode in {"command", "command_retry"}:
-                                self.engine_end_dialogue.emit()
-                                self._next_mode = "sleep"
-                            else:
-                                self._next_mode = mode
-                            continue
-                    self.pause_listening()
-                    self._renew_owner_session()
-                    self.command_recognized.emit(command)
-                    continue
+                extract_action = self._listen_active_dialogue()
+                if extract_action == "break":
+                    break
+                continue
 
                 self._cycle += 1
                 cycle = self._cycle
