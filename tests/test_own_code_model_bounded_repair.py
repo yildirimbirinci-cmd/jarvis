@@ -149,6 +149,46 @@ def test_same_invalid_patch_is_not_repeated_forever(tmp_path, monkeypatch) -> No
     assert engine.editor.pending is None
 
 
+def test_real_edit_survives_redundant_noop_on_second_attempt(tmp_path) -> None:
+    engine = _engine(tmp_path)
+    responses = iter((
+        json.dumps({
+            "summary": "ambiguous first draft",
+            "files": [{
+                "path": "core/example.py",
+                "operations": [
+                    {"op": "replace", "old": "VALUE", "new": "CURRENT_VALUE"}
+                ],
+            }],
+        }),
+        json.dumps({
+            "summary": "valid draft with redundant no-op",
+            "files": [{
+                "path": "core/example.py",
+                "operations": [
+                    {"op": "replace", "old": "VALUE = 1", "new": "VALUE = 1"},
+                    {"op": "replace", "old": "VALUE = 1", "new": "VALUE = 2"},
+                ],
+            }],
+        }),
+    ))
+    calls = 0
+
+    def respond(_prompt: str, **_kwargs) -> str:
+        nonlocal calls
+        calls += 1
+        return next(responses)
+
+    engine._request_code_model_json = respond
+
+    proposal = engine._generate_validated_own_code_proposal(
+        "core/example.py içindeki VALUE değerini değiştir"
+    )
+
+    assert calls == 2
+    assert proposal.files[0].new_content.startswith("VALUE = 2")
+
+
 def test_duplicate_missing_anchor_changes_next_retry_prompt(tmp_path) -> None:
     engine = _engine(tmp_path)
     (tmp_path / "app.py").write_text(
@@ -193,3 +233,52 @@ def test_duplicate_missing_anchor_changes_next_retry_prompt(tmp_path) -> None:
     assert prompts[1] != prompts[2]
     assert "aynısını tekrar üretti" in prompts[2]
     assert "aynı old/anchor değerlerini yeniden kullanma" in prompts[2]
+
+
+def test_duplicate_after_noop_keeps_actionable_validator_error(tmp_path) -> None:
+    engine = _engine(tmp_path)
+    first = json.dumps(
+        {
+            "summary": "ambiguous draft",
+            "files": [
+                {
+                    "path": "core/example.py",
+                    "reason": "refactor",
+                    "operations": [
+                        {"op": "replace", "old": "VALUE", "new": "CURRENT_VALUE"}
+                    ],
+                }
+            ],
+        }
+    )
+    noop = json.dumps(
+        {
+            "summary": "no-op draft",
+            "files": [
+                {
+                    "path": "core/example.py",
+                    "reason": "refactor",
+                    "operations": [
+                        {"op": "replace", "old": "VALUE = 1", "new": "VALUE = 1"}
+                    ],
+                }
+            ],
+        }
+    )
+    responses = iter((first, noop, first))
+    prompts: list[str] = []
+
+    def respond(prompt: str, **_kwargs) -> str:
+        prompts.append(prompt)
+        return next(responses)
+
+    engine._request_code_model_json = respond
+
+    with pytest.raises(WorkspaceError, match="3 kontrollü denemede"):
+        engine._generate_validated_own_code_proposal(
+            "core/example.py içindeki değeri refaktör et"
+        )
+
+    assert len(prompts) == 3
+    assert "Patch işlemi gerçek değişiklik üretmedi" in prompts[2]
+    assert "NO-OP OPERASYONU TEKRARLAMA" in prompts[2]

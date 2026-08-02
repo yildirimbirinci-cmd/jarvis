@@ -423,6 +423,47 @@ def merge_duplicate_operation_rows(
     return repaired
 
 
+def remove_redundant_noop_replaces(payload: dict[str, Any]) -> dict[str, Any]:
+    """Drop literal ``old == new`` rows when real operations remain.
+
+    Removing such a row cannot alter the rendered file. If a file contains
+    only no-ops, preserve them so the normal validator still rejects the
+    proposal instead of silently accepting an empty change.
+    """
+
+    repaired = copy.deepcopy(payload)
+    files = repaired.get("files")
+    if not isinstance(files, list):
+        return repaired
+
+    for file_row in files:
+        if not isinstance(file_row, dict):
+            continue
+        operations = file_row.get("operations")
+        if not isinstance(operations, list) or len(operations) < 2:
+            continue
+
+        retained: list[Any] = []
+        removed = False
+        for operation in operations:
+            is_literal_noop = (
+                isinstance(operation, dict)
+                and str(operation.get("op", "replace")).strip().casefold()
+                in {"replace", "replace_exact"}
+                and isinstance(operation.get("old"), str)
+                and operation.get("old") == operation.get("new")
+            )
+            if is_literal_noop:
+                removed = True
+                continue
+            retained.append(operation)
+
+        if removed and retained:
+            file_row["operations"] = retained
+
+    return repaired
+
+
 def _normalise_anchor_lines(value: str) -> tuple[str, ...]:
     """Normalize indentation without changing token or line ordering."""
     rows = str(value or "").replace("\r\n", "\n").replace("\r", "\n").splitlines()
@@ -772,4 +813,3 @@ def build_missing_anchor_guidance(
             )
 
     return "\n".join(rows).strip()
-

@@ -58,6 +58,7 @@ from artmach_assistant.core.own_code_anchor_repair import (
     build_ambiguous_anchor_guidance,
     build_missing_anchor_guidance,
     merge_duplicate_operation_rows,
+    remove_redundant_noop_replaces,
     repair_ambiguous_replace_anchors,
     repair_unique_whitespace_anchors,
 )
@@ -1075,6 +1076,9 @@ class AssistantEngine:
             error_text = str(value or "")
             return "Patch anchor" in error_text and "bulunan=" in error_text
 
+        def is_noop_error(value: object) -> bool:
+            return "Patch işlemi gerçek değişiklik üretmedi" in str(value or "")
+
         attempts = max(1, min(int(max_attempts), 3))
         previous_response = ""
         previous_error = ""
@@ -1106,6 +1110,15 @@ class AssistantEngine:
                     "karakterine aynen kullan."
                 )
 
+            if is_noop_error(previous_error):
+                current_prompt += (
+                    "\n\nNO-OP OPERASYONU TEKRARLAMA. replace işleminde new, old "
+                    "metninden gerçekten farklı olmalı; insert içeriği de hedef "
+                    "konumda zaten bulunmamalı. İstenen refaktörü üreten en küçük "
+                    "gerçek değişikliği, çalışan kaynaktan alınmış benzersiz bir "
+                    "anchor ile gönder."
+                )
+
             if previous_response:
                 current_prompt += (
                     "\n\nÖNCEKİ REDDEDİLEN JSON:\n"
@@ -1126,18 +1139,24 @@ class AssistantEngine:
                 )
                 failures.append(f"deneme {attempt}: {duplicate_error}")
 
+                # Keep the most recent validator report.  Replacing it with a
+                # generic duplicate warning loses the only actionable reason
+                # why the immediately preceding draft failed (for example a
+                # no-op operation) and makes the next retry regress to an older
+                # rejected shape.
+                if previous_error:
+                    previous_error += "\n\n" + duplicate_error
+                else:
+                    previous_error = duplicate_error
+
                 if is_anchor_error(previous_error):
                     previous_error += (
-                        "\n\n"
-                        + duplicate_error
-                        + " Bir sonraki denemede aynı old/anchor değerlerini "
+                        " Bir sonraki denemede aynı old/anchor değerlerini "
                         "yeniden kullanma; doğrulayıcı raporundaki gerçek kaynak "
                         "bloğundan farklı, tam ve benzersiz bir eşleşme seç."
                     )
-                    previous_response = ""
-                else:
-                    previous_error = duplicate_error
-                    previous_response = raw
+
+                previous_response = ""
                 continue
 
             seen_responses.add(response_key)
@@ -1146,6 +1165,7 @@ class AssistantEngine:
             try:
                 payload = self._validate_own_code_payload_shape(raw)
                 payload = merge_duplicate_operation_rows(payload)
+                payload = remove_redundant_noop_replaces(payload)
                 payload = repair_unique_whitespace_anchors(
                     payload,
                     project_root=self.own_project_root(),

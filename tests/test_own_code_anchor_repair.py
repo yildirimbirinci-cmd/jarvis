@@ -3,9 +3,42 @@ from pathlib import Path
 from artmach_assistant.core.own_code_anchor_repair import (
     build_ambiguous_anchor_guidance,
     merge_duplicate_operation_rows,
+    remove_redundant_noop_replaces,
     repair_ambiguous_replace_anchors,
     repair_unique_whitespace_anchors,
 )
+
+
+def test_literal_noop_is_removed_when_real_operation_remains() -> None:
+    payload = {
+        "files": [{
+            "path": "app.py",
+            "operations": [
+                {"op": "replace", "old": "same", "new": "same"},
+                {"op": "replace", "old": "before", "new": "after"},
+            ],
+        }],
+    }
+
+    repaired = remove_redundant_noop_replaces(payload)
+
+    assert repaired["files"][0]["operations"] == [
+        {"op": "replace", "old": "before", "new": "after"}
+    ]
+    assert len(payload["files"][0]["operations"]) == 2
+
+
+def test_only_noop_operation_is_preserved_for_validator_rejection() -> None:
+    payload = {
+        "files": [{
+            "path": "app.py",
+            "operations": [
+                {"op": "replace", "old": "same", "new": "same"},
+            ],
+        }],
+    }
+
+    assert remove_redundant_noop_replaces(payload) == payload
 
 
 def test_ambiguous_replace_is_expanded_inside_requested_symbol(
