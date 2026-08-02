@@ -167,20 +167,58 @@ class BargeInWorker(QThread):
                 self.msleep(200)
                 continue
             try:
-                heard = self.voice.listen_utterance(
-                    self.device_index,
-                    self.CAPTURE_SECONDS,
-                    "tr-TR",
-                    model_size=self.MODEL_SIZE,
-                    cancel_check=self.isInterruptionRequested,
-                    wake_mode=False,
-                    silence_stop_seconds=self.SILENCE_STOP_SECONDS,
-                    wait_for_speech_seconds=self.WAIT_FOR_SPEECH_SECONDS,
-                    min_capture_seconds=0.30,
-                ).strip()
+                # A four-sample local "dur" profile already exists for this
+                # exact job.  Use it before Whisper so a one-syllable stop is
+                # acted on before loudspeaker audio contaminates the capture.
+                # The lexical path remains the fallback for installations
+                # where that optional profile has not been enrolled.
+                has_stop_profile = bool(
+                    getattr(self.voice, "has_stop_word_profile", lambda: False)()
+                )
+                if has_stop_profile:
+                    matched_stop, stop_score = self.voice.listen_for_local_stop(
+                        self.device_index,
+                        max_seconds=0.90,
+                        cancel_check=self.isInterruptionRequested,
+                    )
+                    if matched_stop:
+                        accepted, _score = self.voice.verify_owner_voice(
+                            threshold=max(0.60, min(0.95, self.owner_threshold))
+                        )
+                        if accepted:
+                            self.status.emit(
+                                "DUR ses kalıbı sahip sesiyle doğrulandı; "
+                                f"güven %{int(max(0.0, stop_score) * 100)}."
+                            )
+                            self.interrupted.emit(f"profile:{self.source}")
+                            return
+                    # Reuse the audio just captured by the profile check.  A
+                    # second microphone recording would force the owner to say
+                    # "dur" twice, which was the observed runtime failure.
+                    path = getattr(self.voice, "last_utterance_path", None)
+                    heard = self.voice.recognize_wav(
+                        path,
+                        "tr-TR",
+                        model_size=self.MODEL_SIZE,
+                        wake_mode=False,
+                        hotwords=" ".join(self.phrases),
+                    ).strip()
+                else:
+                    heard = self.voice.listen_utterance(
+                        self.device_index,
+                        self.CAPTURE_SECONDS,
+                        "tr-TR",
+                        model_size=self.MODEL_SIZE,
+                        cancel_check=self.isInterruptionRequested,
+                        wake_mode=False,
+                        silence_stop_seconds=self.SILENCE_STOP_SECONDS,
+                        wait_for_speech_seconds=self.WAIT_FOR_SPEECH_SECONDS,
+                        min_capture_seconds=0.30,
+                    ).strip()
             except InterruptedError:
                 return
-            except Exception:
+            except Exception as exc:
+                self.status.emit(f"Kesme sesi alınamadı: {exc}")
                 self.msleep(80)
                 continue
             # Use the threshold that was calibrated for this owner's saved
