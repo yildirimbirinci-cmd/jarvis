@@ -1,8 +1,0 @@
-Traceback (most recent call last):
-  File "C:\Users\yildi\Desktop\artmach_assistant\start_jarvis.py", line 38, in <module>
-    main()
-  File "C:\Users\yildi\Desktop\artmach_assistant\start_jarvis.py", line 30, in main
-    from artmach_assistant.app import main as application_main
-  File "C:\Users\yildi\Desktop\artmach_assistant\app.py", line 15, in <module>
-    from PySide6.QtCore import QByteArray, QThread, Signal, QTimer
-ModuleNotFoundError: No module named 'PySide6'
