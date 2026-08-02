@@ -286,6 +286,96 @@ def repair_ambiguous_replace_anchors(
     return repaired
 
 
+def reorder_insertions_after_exact_edits(
+    payload: dict[str, Any],
+    *,
+    project_root: Path,
+) -> dict[str, Any]:
+    """Move insert operations behind exact edits only when proven independent.
+
+    Small code models sometimes insert an extracted helper first.  The inserted
+    helper can contain the short anchor used by the following replace/delete,
+    turning a source-unique anchor into an ambiguous one during sequential
+    application.  Reordering is allowed only when every exact edit is unique in
+    the original source, every insertion anchor remains unique after those
+    edits, and the reordered sequence can be simulated without error.
+    """
+    repaired = copy.deepcopy(payload)
+    files = repaired.get("files")
+    if not isinstance(files, list):
+        return repaired
+
+    root = Path(project_root).resolve(strict=False)
+    for file_row in files:
+        if not isinstance(file_row, dict):
+            continue
+        operations = file_row.get("operations")
+        if not isinstance(operations, list) or len(operations) < 2:
+            continue
+
+        insertions = [
+            row for row in operations
+            if isinstance(row, dict)
+            and str(row.get("op", "")).strip().casefold()
+            in {"insert_before", "insert_after"}
+        ]
+        exact_edits = [
+            row for row in operations
+            if isinstance(row, dict)
+            and str(row.get("op", "replace")).strip().casefold()
+            in {"replace", "replace_exact", "delete"}
+        ]
+        if not insertions or not exact_edits:
+            continue
+        reordered = exact_edits + insertions
+        if reordered == operations:
+            continue
+        # Do not reinterpret payloads containing unknown/mixed operation rows.
+        if len(reordered) != len(operations):
+            continue
+
+        raw_path = str(file_row.get("path", "")).strip()
+        candidate = (root / raw_path).resolve(strict=False)
+        try:
+            candidate.relative_to(root)
+            source = candidate.read_text(encoding="utf-8")
+        except (ValueError, OSError, UnicodeError):
+            continue
+
+        working = source
+        safe = True
+        for operation in reordered:
+            kind = str(operation.get("op", "replace")).strip().casefold()
+            anchor_field = "anchor" if kind.startswith("insert_") else "old"
+            anchor = operation.get(anchor_field)
+            if not isinstance(anchor, str) or not anchor or working.count(anchor) != 1:
+                safe = False
+                break
+            if kind in {"replace", "replace_exact"}:
+                rendered = operation.get("new")
+            elif kind == "delete":
+                rendered = ""
+            else:
+                content = operation.get("content")
+                if not isinstance(content, str) or not content:
+                    safe = False
+                    break
+                rendered = content + anchor if kind == "insert_before" else anchor + content
+            if not isinstance(rendered, str):
+                safe = False
+                break
+            updated = working.replace(anchor, rendered, 1)
+            if updated == working:
+                safe = False
+                break
+            working = updated
+
+        if safe:
+            file_row["operations"] = reordered
+
+    return repaired
+
+
 def _occurrence_positions(text: str, fragment: str) -> tuple[int, ...]:
     if not fragment:
         return ()

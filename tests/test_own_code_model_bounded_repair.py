@@ -189,6 +189,58 @@ def test_real_edit_survives_redundant_noop_on_second_attempt(tmp_path) -> None:
     assert proposal.files[0].new_content.startswith("VALUE = 2")
 
 
+def test_helper_insertion_cannot_make_following_exact_edit_ambiguous(tmp_path) -> None:
+    engine = _engine(tmp_path)
+    (tmp_path / "app.py").write_text(
+        "class WakeWordWorker:\n"
+        "    def run(self):\n"
+        "        command = self.listen_dialogue()\n"
+        "        return command\n"
+        "\n"
+        "class NextWorker:\n"
+        "    pass\n",
+        encoding="utf-8",
+    )
+    raw = json.dumps({
+        "summary": "extract dialogue helper",
+        "files": [{
+            "path": "app.py",
+            "operations": [
+                {
+                    "op": "insert_before",
+                    "anchor": "class NextWorker:\n",
+                    "content": (
+                        "    def _listen_dialogue_command(self):\n"
+                        "        command = self.listen_dialogue()\n"
+                        "        return command\n\n"
+                    ),
+                },
+                {
+                    "op": "replace",
+                    "old": "        command = self.listen_dialogue()\n",
+                    "new": "        command = self._listen_dialogue_command()\n",
+                },
+            ],
+        }],
+    })
+    calls = 0
+
+    def respond(_prompt: str, **_kwargs) -> str:
+        nonlocal calls
+        calls += 1
+        return raw
+
+    engine._request_code_model_json = respond
+    proposal = engine._generate_validated_own_code_proposal(
+        "app.py içindeki WakeWordWorker.run metodunu refaktör et"
+    )
+
+    assert calls == 1
+    rendered = proposal.files[0].new_content
+    assert "command = self._listen_dialogue_command()" in rendered
+    assert "def _listen_dialogue_command" in rendered
+
+
 def test_duplicate_missing_anchor_changes_next_retry_prompt(tmp_path) -> None:
     engine = _engine(tmp_path)
     (tmp_path / "app.py").write_text(

@@ -6,8 +6,72 @@ from artmach_assistant.core.own_code_anchor_repair import (
     merge_duplicate_operation_rows,
     remove_redundant_noop_replaces,
     repair_ambiguous_replace_anchors,
+    reorder_insertions_after_exact_edits,
     repair_unique_whitespace_anchors,
 )
+
+
+def test_helper_insertion_is_moved_after_edit_when_insert_creates_ambiguity(
+    tmp_path: Path,
+) -> None:
+    source = (
+        "class WakeWordWorker:\n"
+        "    def run(self):\n"
+        "        command = self.listen_dialogue()\n"
+        "        return command\n"
+        "\n"
+        "class NextWorker:\n"
+    )
+    (tmp_path / "app.py").write_text(source, encoding="utf-8")
+    payload = {
+        "files": [{
+            "path": "app.py",
+            "operations": [
+                {
+                    "op": "insert_before",
+                    "anchor": "class NextWorker:\n",
+                    "content": (
+                        "    def _listen_dialogue_command(self):\n"
+                        "        command = self.listen_dialogue()\n"
+                        "        return command\n\n"
+                    ),
+                },
+                {
+                    "op": "replace",
+                    "old": "        command = self.listen_dialogue()\n",
+                    "new": "        command = self._listen_dialogue_command()\n",
+                },
+            ],
+        }],
+    }
+
+    repaired = reorder_insertions_after_exact_edits(
+        payload, project_root=tmp_path
+    )
+
+    operations = repaired["files"][0]["operations"]
+    assert [row["op"] for row in operations] == ["replace", "insert_before"]
+
+
+def test_helper_insertion_order_is_not_changed_when_edit_is_not_unique(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "app.py").write_text("VALUE = 1\nVALUE = 1\nEND\n", encoding="utf-8")
+    payload = {
+        "files": [{
+            "path": "app.py",
+            "operations": [
+                {"op": "insert_before", "anchor": "END\n", "content": "VALUE = 1\n"},
+                {"op": "replace", "old": "VALUE = 1\n", "new": "VALUE = 2\n"},
+            ],
+        }],
+    }
+
+    repaired = reorder_insertions_after_exact_edits(
+        payload, project_root=tmp_path
+    )
+
+    assert repaired["files"][0]["operations"] == payload["files"][0]["operations"]
 
 
 def test_literal_noop_is_removed_when_real_operation_remains() -> None:

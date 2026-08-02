@@ -59,6 +59,7 @@ from artmach_assistant.core.own_code_anchor_repair import (
     build_missing_anchor_guidance,
     merge_duplicate_operation_rows,
     remove_redundant_noop_replaces,
+    reorder_insertions_after_exact_edits,
     repair_ambiguous_replace_anchors,
     repair_unique_whitespace_anchors,
 )
@@ -1175,6 +1176,10 @@ class AssistantEngine:
                     payload,
                     project_root=self.own_project_root(),
                     instruction=prompt,
+                )
+                payload = reorder_insertions_after_exact_edits(
+                    payload,
+                    project_root=self.own_project_root(),
                 )
                 canonical = json.dumps(payload, ensure_ascii=False)
                 proposal = self.editor.create_proposal(canonical)
