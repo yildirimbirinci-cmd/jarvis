@@ -2590,7 +2590,12 @@ $s.Dispose()
                 f"Piper model yapılandırması bulunamadı: {model_config.name}. "
                 "Bu .json dosyasını .onnx dosyasıyla aynı klasöre koy."
             )
-        chunks = [text]
+        # Do not make the user wait for Piper to render a whole long answer
+        # before the first audio frame can be played.  Each bounded sentence
+        # is synthesized and played immediately; cancellation is checked
+        # before synthesis, after synthesis and during playback for every
+        # chunk.
+        chunks = self._sentence_chunks(text)
         requested_rate = max(-10, min(10, int(rate)))
         length_scale = max(0.52, min(1.00, 0.64 - requested_rate * 0.018))
         length_scale_text = f"{length_scale:.3f}"

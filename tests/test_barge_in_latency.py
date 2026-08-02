@@ -28,7 +28,7 @@ class _FastStopVoice:
         return "dur"
 
     def verify_owner_voice(self, *, threshold: float):
-        assert threshold >= 0.82
+        self.owner_threshold = threshold
         return True, 0.99
 
 
@@ -52,6 +52,22 @@ def test_barge_in_uses_short_dedicated_capture_profile() -> None:
     assert voice.listen_kwargs["wait_for_speech_seconds"] == 0.35
     assert voice.listen_kwargs["silence_stop_seconds"] == 0.30
     assert voice.listen_kwargs["wake_mode"] is False
+    assert voice.owner_threshold == 0.82
+
+
+def test_barge_in_preserves_calibrated_owner_threshold_below_082() -> None:
+    voice = _FastStopVoice()
+    worker = BargeInWorker(
+        voice,
+        None,
+        0.73,
+        ["dur", "sus", "kes", "iptal"],
+        "answer",
+    )
+
+    worker.run()
+
+    assert voice.owner_threshold == 0.73
 
 
 def test_answer_tts_worker_is_bound_to_the_armed_speech_session() -> None:

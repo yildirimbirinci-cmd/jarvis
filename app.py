@@ -182,8 +182,12 @@ class BargeInWorker(QThread):
             except Exception:
                 self.msleep(80)
                 continue
+            # Use the threshold that was calibrated for this owner's saved
+            # profile.  Forcing 0.82 here rejected the same owner whose wake
+            # samples are legitimately accepted around 0.73-0.74, making a
+            # spoken "dur" appear to be ignored during playback.
             accepted, _score = self.voice.verify_owner_voice(
-                threshold=max(0.82, self.owner_threshold)
+                threshold=max(0.60, min(0.95, self.owner_threshold))
             )
             if not accepted:
                 continue
@@ -2567,10 +2571,40 @@ class MainWindow(QMainWindow):
                     right_panel_visible=self.right_panel.isVisible(),
                 )
             )
-        self.cancel_active_task()
-        if self.wake_worker and self.wake_worker.isRunning():
-            self.wake_worker.requestInterruption()
-            self.wake_worker.wait(3500)
+        self.cancel_active_task("uygulama kapatılıyor")
+        # Closing the window must not destroy a live QThread.  This matters in
+        # particular while Piper is still synthesizing a reply: cancelling the
+        # speech session is asynchronous, so every GUI-owned worker must stay
+        # referenced until it has actually returned.
+        self.engine.voice.stop_speaking()
+        self._stop_barge_in()
+        for worker, timeout_ms in (
+            (self.tts_worker, 8000),
+            (self.worker, 8000),
+            (self.wake_worker, 8000),
+        ):
+            if worker is None or not worker.isRunning():
+                continue
+            worker.requestInterruption()
+            worker.wait(timeout_ms)
+        still_running = [
+            name
+            for name, worker in (
+                ("tts", self.tts_worker),
+                ("task", self.worker),
+                ("wake", self.wake_worker),
+                ("barge", self.barge_worker),
+            )
+            if worker is not None and worker.isRunning()
+        ]
+        if still_running:
+            self.voice_log(
+                "Kapatma bekliyor; çalışan iş parçacıkları: "
+                + ", ".join(still_running)
+            )
+            event.ignore()
+            QTimer.singleShot(250, self.close)
+            return
         super().closeEvent(event)
 
 
