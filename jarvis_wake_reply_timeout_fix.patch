@@ -1,0 +1,126 @@
+diff --git a/app.py b/app.py
+index 5b85f3e..43f6ce1 100644
+--- a/app.py
++++ b/app.py
+@@ -7,6 +7,7 @@ import os
+ import re
+ import unicodedata
+ import sys
++import threading
+ import time
+ import traceback
+ from pathlib import Path
+@@ -236,6 +237,42 @@ class WakeWordWorker(QThread):
+         self._skip_current_command = False
+         self._owner_session_until = 0.0
+ 
++    def _speak_wake_reply(self, wake_reply: str, tts_args: list) -> None:
++        """Play the acknowledgement without letting audio I/O stall wake flow."""
++        completed = threading.Event()
++        failure: list[BaseException] = []
++
++        def play() -> None:
++            try:
++                self.voice.speak(
++                    wake_reply,
++                    *tts_args,
++                    preserve_pending_cancel=True,
++                )
++            except BaseException as exc:
++                failure.append(exc)
++            finally:
++                completed.set()
++
++        worker = threading.Thread(
++            target=play,
++            name="jarvis-wake-reply",
++            daemon=True,
++        )
++        worker.start()
++        # "Evet" is shorter than a second.  This allowance covers slow audio
++        # device startup while preventing PortAudio write/stop hangs from
++        # blocking command capture indefinitely.
++        if not completed.wait(2.5):
++            self.voice.stop_speaking()
++            completed.wait(0.75)
++            self.status.emit(
++                "Kısa uyandırma yanıtı zaman aşımına uğradı; "
++                "ses çıkışı iptal edilerek komut dinlemeye geçiliyor."
++            )
++        if failure:
++            raise failure[0]
++
+     def begin_owner_session(self, seconds: float = 45.0) -> None:
+         """Keep accepting only verified owner speech for a short dialogue."""
+         self._owner_session_until = time.monotonic() + max(10.0, float(seconds))
+@@ -518,7 +557,7 @@ class WakeWordWorker(QThread):
+                     # until speak() sees it.
+                     self.voice.begin_speech_session()
+                     self.speech_started.emit("wake_reply")
+-                    self.voice.speak(wake_reply, *fast_tts_args, preserve_pending_cancel=True)
++                    self._speak_wake_reply(wake_reply, fast_tts_args)
+                 except Exception as exc:
+                     self.failed.emit(f"Uyandırma yanıtı seslendirilemedi: {exc}")
+                 finally:
+diff --git a/tests/test_wake_reply_timeout.py b/tests/test_wake_reply_timeout.py
+new file mode 100644
+index 0000000..0c29af1
+--- /dev/null
++++ b/tests/test_wake_reply_timeout.py
+@@ -0,0 +1,56 @@
++from __future__ import annotations
++
++import threading
++import time
++
++from artmach_assistant.app import WakeWordWorker
++
++
++class HangingVoice:
++    def __init__(self) -> None:
++        self.cancelled = threading.Event()
++        self.stop_calls = 0
++
++    def speak(self, *_args, **_kwargs) -> None:
++        self.cancelled.wait(10.0)
++
++    def stop_speaking(self) -> bool:
++        self.stop_calls += 1
++        self.cancelled.set()
++        return True
++
++
++def make_worker(voice) -> WakeWordWorker:
++    return WakeWordWorker(
++        voice,
++        None,
++        "tr",
++        "jarvis",
++        "base",
++        "small",
++        1.5,
++        20.0,
++        (),
++    )
++
++
++def test_wake_reply_timeout_cancels_stalled_audio(monkeypatch) -> None:
++    voice = HangingVoice()
++    worker = make_worker(voice)
++    messages: list[str] = []
++    worker.status.connect(messages.append)
++
++    original_wait = threading.Event.wait
++
++    def short_wait(event, timeout=None):
++        if event is voice.cancelled:
++            return original_wait(event, timeout)
++        return original_wait(event, min(float(timeout or 0), 0.02))
++
++    monkeypatch.setattr(threading.Event, "wait", short_wait)
++    started = time.monotonic()
++    worker._speak_wake_reply("Evet.", [])
++
++    assert time.monotonic() - started < 0.5
++    assert voice.stop_calls == 1
++    assert any("zaman aşımına uğradı" in message for message in messages)

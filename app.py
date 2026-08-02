@@ -8,6 +8,7 @@ import os
 import re
 import unicodedata
 import sys
+import threading
 import time
 import traceback
 from pathlib import Path
@@ -231,6 +232,42 @@ class WakeWordWorker(QThread):
         self._command_retry_count = 0
         self._skip_current_command = False
         self._owner_session_until = 0.0
+
+    def _speak_wake_reply(self, wake_reply: str, tts_args: list) -> None:
+        """Play the acknowledgement without letting audio I/O stall wake flow."""
+        completed = threading.Event()
+        failure: list[BaseException] = []
+
+        def play() -> None:
+            try:
+                self.voice.speak(
+                    wake_reply,
+                    *tts_args,
+                    preserve_pending_cancel=True,
+                )
+            except BaseException as exc:
+                failure.append(exc)
+            finally:
+                completed.set()
+
+        worker = threading.Thread(
+            target=play,
+            name="jarvis-wake-reply",
+            daemon=True,
+        )
+        worker.start()
+        # "Evet" is shorter than a second.  This allowance covers slow audio
+        # device startup while preventing PortAudio write/stop hangs from
+        # blocking command capture indefinitely.
+        if not completed.wait(2.5):
+            self.voice.stop_speaking()
+            completed.wait(0.75)
+            self.status.emit(
+                "Kısa uyandırma yanıtı zaman aşımına uğradı; "
+                "ses çıkışı iptal edilerek komut dinlemeye geçiliyor."
+            )
+        if failure:
+            raise failure[0]
 
     def begin_owner_session(self, seconds: float = 45.0) -> None:
         """Keep accepting only verified owner speech for a short dialogue."""
@@ -519,7 +556,7 @@ class WakeWordWorker(QThread):
                     # until speak() sees it.
                     self.voice.begin_speech_session()
                     self.speech_started.emit("wake_reply")
-                    self.voice.speak(wake_reply, *fast_tts_args, preserve_pending_cancel=True)
+                    self._speak_wake_reply(wake_reply, fast_tts_args)
                 except Exception as exc:
                     self.failed.emit(f"Uyandırma yanıtı seslendirilemedi: {exc}")
                 finally:
