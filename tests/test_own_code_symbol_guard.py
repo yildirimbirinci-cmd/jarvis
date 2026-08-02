@@ -22,3 +22,40 @@ def test_unapproved_method_change_is_rejected() -> None:
     result = validate_approved_symbol_scope([change], ["Worker.execute"])
     assert not result.valid
     assert "Worker.untouched" in result.report()
+
+
+def test_called_new_private_companion_may_be_scoped_for_extraction() -> None:
+    new = '''
+class Worker:
+    def execute(self):
+        return self._execute_impl()
+
+    def _execute_impl(self):
+        return 1
+
+    def untouched(self):
+        return 2
+'''
+    change = SimpleNamespace(path="core/worker.py", old_content=OLD, new_content=new)
+    result = validate_approved_symbol_scope(
+        [change],
+        ["Worker.execute"],
+        allow_called_private_companions=True,
+    )
+    assert result.valid
+
+
+def test_uncalled_or_unrelated_new_private_method_remains_out_of_scope() -> None:
+    new = OLD + '''
+class Other:
+    def _surprise(self):
+        return 9
+'''
+    change = SimpleNamespace(path="core/worker.py", old_content=OLD, new_content=new)
+    result = validate_approved_symbol_scope(
+        [change],
+        ["Worker.execute"],
+        allow_called_private_companions=True,
+    )
+    assert not result.valid
+    assert "Other" in result.report()

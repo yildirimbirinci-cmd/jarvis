@@ -43,6 +43,19 @@ def test_semantic_report_is_fed_back_to_repair_model() -> None:
     assert '"path": "app.py"' in prompt
 
 
+def test_semantic_prompt_explains_extraction_control_flow_preservation() -> None:
+    prompt = build_semantic_repair_prompt(
+        "Bloğu davranışı değiştirmeden yardımcı metoda çıkar.",
+        "app.py: gözlenebilir işlem kaybı (assign:self._next_mode, "
+        "call:self.msleep, control:break, control:continue)",
+        Proposal(),
+    )
+
+    assert "her `assign:`, `call:` ve `control:` öğesini koru" in prompt
+    assert "helper bir karar değeri döndürmeli" in prompt
+    assert "aynı `break`/`continue` kararını vermelidir" in prompt
+
+
 def test_target_extraction_limits_repair_to_reported_file_and_symbol() -> None:
     proposal = Proposal(files=(
         Change("core/a.py", new_content="def keep():\n    return 1\n"),
@@ -160,6 +173,50 @@ def test_policy_bounds_attempts() -> None:
     assert RepairRetryPolicy().max_attempts == 3
     with pytest.raises(ValueError):
         RepairRetryPolicy(max_attempts=4)
+
+
+def test_semantic_repair_retries_semantically_invalid_candidate(monkeypatch) -> None:
+    engine = object.__new__(AssistantEngine)
+    engine._own_code_repair_policy = RepairRetryPolicy(max_attempts=3)
+    history_rows: list[tuple[str, dict[str, object]]] = []
+    engine.own_code_history = SimpleNamespace(
+        record=lambda event, **fields: history_rows.append((event, fields))
+    )
+    engine.editor = SimpleNamespace(reject=lambda: None)
+    candidates = [
+        SimpleNamespace(marker="first", files=(SimpleNamespace(path="app.py"),)),
+        SimpleNamespace(marker="second", files=(SimpleNamespace(path="app.py"),)),
+    ]
+    repair_calls: list[tuple[object, str]] = []
+
+    def request(_instruction, rejected, report, **_kwargs):
+        repair_calls.append((rejected, report))
+        return candidates[len(repair_calls) - 1]
+
+    validations = iter((
+        SimpleNamespace(valid=False, report=lambda: "lost call:self.msleep"),
+        SimpleNamespace(valid=True, report=lambda: "ok"),
+    ))
+    monkeypatch.setattr(engine, "_request_targeted_validation_repair", request)
+    monkeypatch.setitem(
+        AssistantEngine._repair_semantic_proposal.__globals__,
+        "validate_semantic_replacement",
+        lambda *_args: next(validations),
+    )
+    original = SimpleNamespace(files=(SimpleNamespace(path="app.py"),))
+
+    repaired = engine._repair_semantic_proposal(
+        "davranışı değiştirmeden çıkar",
+        original,
+        "lost assign:self._next_mode",
+    )
+
+    assert repaired.marker == "second"
+    assert len(repair_calls) == 2
+    assert repair_calls[0] == (original, "lost assign:self._next_mode")
+    assert repair_calls[1] == (candidates[0], "lost call:self.msleep")
+    assert history_rows[-1][0] == "semantik patch otomatik onarıldı"
+    assert history_rows[-1][1]["deneme"] == 2
 
 
 

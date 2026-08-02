@@ -65,9 +65,65 @@ def _approved_keys(symbols: Iterable[str]) -> set[str]:
     return keys
 
 
+def _called_private_companion_keys(
+    old_tree: ast.Module,
+    new_tree: ast.Module,
+    approved: set[str],
+) -> set[str]:
+    """Authorize only new private sibling methods called by an approved method.
+
+    A method extraction necessarily creates one new symbol even though the plan
+    names only the method being refactored.  This exception is deliberately
+    derived from the rendered before/after trees: the companion must be new,
+    private, in the same class, and directly called through ``self`` by the
+    already-approved method.  Existing siblings and unrelated additions remain
+    outside scope.
+    """
+    old_classes = {
+        node.name: node for node in old_tree.body if isinstance(node, ast.ClassDef)
+    }
+    allowed: set[str] = set()
+    for owner in new_tree.body:
+        if not isinstance(owner, ast.ClassDef):
+            continue
+        old_owner = old_classes.get(owner.name)
+        if old_owner is None:
+            continue
+        old_methods = {
+            node.name for node in old_owner.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        }
+        new_private = {
+            node.name for node in owner.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name.startswith("_")
+            and node.name not in old_methods
+        }
+        if not new_private:
+            continue
+        for method in owner.body:
+            method_key = f"method:{owner.name}.{getattr(method, 'name', '')}"
+            if method_key not in approved:
+                continue
+            called = {
+                call.func.attr
+                for call in ast.walk(method)
+                if isinstance(call, ast.Call)
+                and isinstance(call.func, ast.Attribute)
+                and isinstance(call.func.value, ast.Name)
+                and call.func.value.id == "self"
+            }
+            allowed.update(
+                f"method:{owner.name}.{name}" for name in new_private & called
+            )
+    return allowed
+
+
 def validate_approved_symbol_scope(
     changes: Iterable[object],
     approved_symbols: Iterable[str],
+    *,
+    allow_called_private_companions: bool = False,
 ) -> SymbolScopeResult:
     approved = _approved_keys(approved_symbols)
     if not approved:
@@ -88,9 +144,14 @@ def validate_approved_symbol_scope(
             continue
         old_parts = _module_parts(old_tree)
         new_parts = _module_parts(new_tree)
+        locally_approved = set(approved)
+        if allow_called_private_companions:
+            locally_approved.update(
+                _called_private_companion_keys(old_tree, new_tree, approved)
+            )
         all_keys = sorted(set(old_parts) | set(new_parts))
         for key in all_keys:
-            if key in approved:
+            if key in locally_approved:
                 continue
             if old_parts.get(key) != new_parts.get(key):
                 human = key.split(":", 1)[-1]

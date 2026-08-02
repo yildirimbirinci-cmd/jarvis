@@ -170,6 +170,28 @@ def test_structural_method_block_rejects_copying_selected_block_into_replacement
     assert "eski bloğu yeniden kopyalama" in str(exc_info.value)
 
 
+def test_structural_method_block_rejects_helper_call_wrapped_in_if(tmp_path: Path) -> None:
+    (tmp_path / "app.py").write_text(_active_dialogue_source(), encoding="utf-8")
+    payload = {"files": [{"path": "app.py", "operations": [{
+        "op": "replace_method_block",
+        "class_name": "WakeWordWorker",
+        "method_name": "run",
+        "block_test": "self._next_mode != 'sleep'",
+        "replacement": "if self.ready:\n    self._listen_active_dialogue()",
+    }]}]}
+
+    import pytest
+    with pytest.raises(Exception) as exc_info:
+        normalize_structural_method_block_replacements(
+            payload,
+            project_root=tmp_path,
+            instruction=("WakeWordWorker.run aktif diyalog bloğunu davranışı "
+                         "değiştirmeden yardımcı metoda çıkar"),
+        )
+    assert "doğrudan `self.<yardımcı_metot>(...)`" in str(exc_info.value)
+    assert 'replacement": "self._listen_active_dialogue()"' in str(exc_info.value)
+
+
 def test_structural_method_block_rejects_oversized_replacement(tmp_path: Path) -> None:
     (tmp_path / "app.py").write_text(_active_dialogue_source(), encoding="utf-8")
     replacement = "\n".join(
@@ -223,6 +245,8 @@ def test_structural_retry_guidance_contains_complete_real_block(tmp_path: Path) 
     assert "continue" in guidance
     assert "replace_method_block" in guidance
     assert "replacement alanina bu blogu yeniden yazma" in guidance
+    assert "Cagriyi block_test kosuluyla yeniden if icine sarma" in guidance
+    assert "command/mode" in guidance
     assert "en fazla 12 satir" in guidance
 
 

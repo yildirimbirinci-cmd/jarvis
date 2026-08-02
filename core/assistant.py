@@ -902,29 +902,37 @@ class AssistantEngine:
         proposal: EditProposal,
         report: str,
     ) -> EditProposal | None:
-        """Feed semantic failures back once and preserve unrelated file changes."""
+        """Retry semantic repairs with fresh reports and preserve unrelated files."""
 
-        repaired = self._request_targeted_validation_repair(
-            instruction,
-            proposal,
-            report,
-            stage="semantik koruma",
-        )
-        if repaired is None:
-            return None
-        validation = validate_semantic_replacement(instruction, repaired.files)
-        if not validation.valid:
+        policy = getattr(self, "_own_code_repair_policy", RepairRetryPolicy())
+        rejected: EditProposal = proposal
+        current_report = report
+        for semantic_attempt in range(1, policy.max_attempts + 1):
+            repaired = self._request_targeted_validation_repair(
+                instruction,
+                rejected,
+                current_report,
+                stage="semantik koruma",
+            )
+            if repaired is None:
+                return None
+            validation = validate_semantic_replacement(instruction, repaired.files)
+            if validation.valid:
+                self.own_code_history.record(
+                    "semantik patch otomatik onarıldı",
+                    deneme=semantic_attempt,
+                    dosya_sayısı=len(repaired.files),
+                )
+                return repaired
             self.editor.reject()
+            current_report = validation.report()
+            rejected = repaired
             self.own_code_history.record(
                 "semantik patch onarımı yeniden reddedildi",
-                rapor=validation.report()[:700],
+                deneme=semantic_attempt,
+                rapor=current_report[:700],
             )
-            return None
-        self.own_code_history.record(
-            "semantik patch otomatik onarıldı",
-            dosya_sayısı=len(repaired.files),
-        )
-        return repaired
+        return None
 
     def _request_code_model_json(
         self,
@@ -1561,7 +1569,12 @@ class AssistantEngine:
                 "bloğu replacement alanına yeniden yazma; replacement en fazla 12 "
                 "satırda yalnız self.<yardımcı_metot>(...) çağrısını ve gerekiyorsa "
                 "run içindeki break/continue kararını içermeli. Taşınan davranışın "
-                "tamamı yardımcı metodun content alanında olmalı. Bunlardan biri "
+                "Çağrıyı block_test koşuluyla yeniden if içine sarma; replacement "
+                "ilk satırında doğrudan çağrı olmalı. Örnek: "
+                "\"replacement\":\"self._listen_active_dialogue()\". Kaldırılan "
+                "blok içinde üretilen command/mode gibi yerel değişkenleri çağrıya "
+                "argüman verme; bunları yardımcı metodun kendisi üretmeli. Taşınan "
+                "davranışın tamamı yardımcı metodun content alanında olmalı. Bunlardan biri "
                 "eksikse taslak reddedilir."
             )
         voice_domain = any(
@@ -1640,8 +1653,17 @@ class AssistantEngine:
                     + ". Hiçbir dosya değiştirilmedi."
                 )
         if approved_symbol_rows:
+            allow_extraction_companions = (
+                "davranisi degistirmeden" in self.command_key(raw_instruction)
+                and any(
+                    word in self.command_key(raw_instruction)
+                    for word in ("refaktor", "cikar", "ayir", "extract")
+                )
+            )
             symbol_scope = validate_approved_symbol_scope(
-                proposal.files, approved_symbol_rows
+                proposal.files,
+                approved_symbol_rows,
+                allow_called_private_companions=allow_extraction_companions,
             )
             if not symbol_scope.valid:
                 rejected_report = symbol_scope.report()
@@ -1665,7 +1687,9 @@ class AssistantEngine:
                     )
                 proposal = repaired
                 symbol_scope = validate_approved_symbol_scope(
-                    proposal.files, approved_symbol_rows
+                    proposal.files,
+                    approved_symbol_rows,
+                    allow_called_private_companions=allow_extraction_companions,
                 )
                 if not symbol_scope.valid:
                     self.editor.reject()

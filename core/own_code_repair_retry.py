@@ -222,6 +222,18 @@ def build_validation_repair_prompt(
             for path in selected.paths
         ],
     }
+    semantic_guidance = ""
+    if "semantik" in str(stage or "").casefold():
+        semantic_guidance = (
+            "\nSEMANTİK ONARIM KURALI:\n"
+            "Doğrulayıcı raporundaki her `assign:`, `call:` ve `control:` öğesini "
+            "koru. Bir blok yardımcı metoda çıkarılıyorsa kaynak durum başlangıçlarını "
+            "(örneğin `mode = self._next_mode` ve sonraki durum ataması) helper içine "
+            "eksiksiz taşı. `break` veya `continue` helper içinde doğrudan kullanılamaz; "
+            "helper bir karar değeri döndürmeli ve çağıran özgün metot bu değere göre "
+            "aynı `break`/`continue` kararını vermelidir. Kayıp öğeyi silerek, çağrıyı "
+            "atlayarak veya yalnız `return` ile değiştirerek raporu susturma.\n"
+        )
     return (
         f"Önceki patch {stage.strip() or 'kod'} doğrulamasında reddedildi. "
         "Aynı hatalı patch'i tekrarlama. Yalnızca aşağıdaki HEDEF DOSYALAR için "
@@ -241,6 +253,7 @@ def build_validation_repair_prompt(
         + f"\nHEDEF DOSYALAR:\n{target_files}\n"
         + f"\nHEDEF SEMBOLLER:\n{target_symbols}\n"
         + f"\nDOĞRULAYICI RAPORU:\n{str(report or '').strip()}\n"
+        + semantic_guidance
         + "\nYALNIZCA HEDEF DOSYALARIN REDDEDİLEN TASLAĞI:\n"
         + json.dumps(_target_payload(proposal, selected), ensure_ascii=False, sort_keys=True)
         + "\n\nBEKLENEN JSON ŞEMASI:\n"
