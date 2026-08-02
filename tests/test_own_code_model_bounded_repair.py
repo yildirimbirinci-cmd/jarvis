@@ -149,6 +149,61 @@ def test_same_invalid_patch_is_not_repeated_forever(tmp_path, monkeypatch) -> No
     assert engine.editor.pending is None
 
 
+def test_all_raw_ollama_attempts_are_preserved_for_diagnosis(
+    tmp_path, monkeypatch
+) -> None:
+    engine = _engine(tmp_path)
+    diagnostic_root = tmp_path / "user-data"
+    monkeypatch.setitem(
+        engine._generate_validated_own_code_proposal.__func__.__globals__,
+        "DATA_DIR",
+        diagnostic_root,
+    )
+    first = json.dumps({
+        "summary": "first raw",
+        "files": [{
+            "path": "core/example.py",
+            "content": "VALUE = 2\n",
+        }],
+    })
+    second = json.dumps({
+        "summary": "second raw",
+        "files": [{
+            "path": "core/example.py",
+            "operations": [{
+                "op": "replace",
+                "old": "MISSING = 1",
+                "new": "VALUE = 2",
+            }],
+        }],
+    })
+    responses = iter((first, second, second))
+    engine._request_code_model_json = lambda *_args, **_kwargs: next(responses)
+
+    with pytest.raises(WorkspaceError, match="3 kontrollü denemede"):
+        engine._generate_validated_own_code_proposal("tanılama testi")
+
+    log_path = (
+        diagnostic_root / "diagnostics" / "own_code_model_raw_attempts.json"
+    )
+    payload = json.loads(log_path.read_text(encoding="utf-8"))
+
+    assert payload["schema_version"] == 1
+    assert payload["attempt_limit"] == 3
+    assert [row["attempt"] for row in payload["attempts"]] == [1, 2, 3]
+    assert [row["raw_model_response"] for row in payload["attempts"]] == [
+        first,
+        second,
+        second,
+    ]
+    assert [row["outcome"] for row in payload["attempts"]] == [
+        "rejected_validation",
+        "rejected_validation",
+        "rejected_duplicate",
+    ]
+    assert all(row["validation_error"] for row in payload["attempts"])
+
+
 def test_real_edit_survives_redundant_noop_on_second_attempt(tmp_path) -> None:
     engine = _engine(tmp_path)
     responses = iter((

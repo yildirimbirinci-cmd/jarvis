@@ -13,7 +13,9 @@ import sys
 import threading
 import urllib.error
 import urllib.request
+from datetime import datetime, timezone
 from pathlib import Path
+from uuid import uuid4
 
 from artmach_assistant.config import DATA_DIR, NICKNAMES, AppConfig
 from artmach_assistant.core.memory_manager import MemoryManager
@@ -1085,6 +1087,57 @@ class AssistantEngine:
         previous_error = ""
         seen_responses: set[str] = set()
         failures: list[str] = []
+        diagnostic_run_id = (
+            datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
+            + "-"
+            + uuid4().hex[:8]
+        )
+        diagnostic_attempts: list[dict[str, object]] = []
+
+        def record_raw_attempt(
+            *,
+            attempt: int,
+            raw: str,
+            outcome: str,
+            error: str = "",
+        ) -> None:
+            """Persist the exact Ollama content for post-failure diagnosis.
+
+            Diagnostics must never affect proposal generation.  The latest-run
+            JSON is intentionally rewritten after every attempt so a crash or
+            rejected duplicate still leaves all responses received so far.
+            """
+            diagnostic_attempts.append(
+                {
+                    "attempt": attempt,
+                    "received_at_utc": datetime.now(timezone.utc).isoformat(),
+                    "outcome": outcome,
+                    "validation_error": str(error or ""),
+                    "response_sha256": hashlib.sha256(
+                        raw.encode("utf-8", errors="replace")
+                    ).hexdigest(),
+                    "raw_model_response": raw,
+                }
+            )
+            try:
+                diagnostic_path = (
+                    DATA_DIR
+                    / "diagnostics"
+                    / "own_code_model_raw_attempts.json"
+                )
+                diagnostic_path.parent.mkdir(parents=True, exist_ok=True)
+                atomic_write_json(
+                    diagnostic_path,
+                    {
+                        "schema_version": 1,
+                        "run_id": diagnostic_run_id,
+                        "attempt_limit": attempts,
+                        "attempts": diagnostic_attempts,
+                    },
+                    max_bytes=2 * 1024 * 1024,
+                )
+            except Exception:
+                pass
 
         for attempt in range(1, attempts + 1):
             current_prompt = prompt
@@ -1138,6 +1191,12 @@ class AssistantEngine:
                 duplicate_error = (
                     "Kod modeli önceki reddedilen taslağın aynısını tekrar üretti."
                 )
+                record_raw_attempt(
+                    attempt=attempt,
+                    raw=raw,
+                    outcome="rejected_duplicate",
+                    error=duplicate_error,
+                )
                 failures.append(f"deneme {attempt}: {duplicate_error}")
 
                 # Keep the most recent validator report.  Replacing it with a
@@ -1185,6 +1244,12 @@ class AssistantEngine:
                 proposal = self.editor.create_proposal(canonical)
             except WorkspaceError as exc:
                 previous_error = str(exc)
+                record_raw_attempt(
+                    attempt=attempt,
+                    raw=raw,
+                    outcome="rejected_validation",
+                    error=previous_error,
+                )
 
                 try:
                     atomic_write_json(
@@ -1229,6 +1294,11 @@ class AssistantEngine:
                 continue
 
             try:
+                record_raw_attempt(
+                    attempt=attempt,
+                    raw=raw,
+                    outcome="accepted",
+                )
                 self.own_code_history.record(
                     "kod modeli doğrulanmış taslak üretti",
                     deneme=attempt,
