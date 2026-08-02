@@ -240,11 +240,19 @@ class WakeWordWorker(QThread):
 
         def play() -> None:
             try:
-                self.voice.speak(
-                    wake_reply,
-                    *tts_args,
-                    preserve_pending_cancel=True,
+                prepared_player = getattr(self.voice, "speak_prepared", None)
+                played = bool(
+                    prepared_player and prepared_player(wake_reply, *tts_args)
                 )
+                if not played:
+                    self.status.emit(
+                        "Hazır uyandırma sesi bulunamadı; normal TTS yolu kullanılıyor."
+                    )
+                    self.voice.speak(
+                        wake_reply,
+                        *tts_args,
+                        preserve_pending_cancel=True,
+                    )
             except BaseException as exc:
                 failure.append(exc)
             finally:

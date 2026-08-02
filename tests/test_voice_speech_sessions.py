@@ -33,6 +33,35 @@ def test_prepare_speech_builds_piper_cache_without_playback(monkeypatch) -> None
     assert service.speech_snapshot().state == "completed"
 
 
+def test_speak_prepared_uses_memory_audio_without_invoking_piper(monkeypatch) -> None:
+    service = VoiceService()
+    key = service._prepared_speech_key(
+        "Evet.", "", 8, 100, "piper", "piper.exe", "voice.onnx", 4,
+    )
+    audio = object()
+    service._prepared_speech_audio[key] = (audio, 22050)
+    service.begin_speech_session()
+    played = []
+
+    def play_ready(value, rate, output, **kwargs):
+        played.append((value, rate, output, kwargs))
+        return 4, "Logitech", "MME", 44100, 2
+
+    monkeypatch.setattr(service, "_play_audio_resilient", play_ready)
+    monkeypatch.setattr(
+        service,
+        "_speak_with_piper",
+        lambda *_args, **_kwargs: pytest.fail("Piper must not run at wake time"),
+    )
+
+    assert service.speak_prepared(
+        "Evet.", rate=8, backend="piper",
+        piper_executable="piper.exe", piper_model="voice.onnx", output_device=4,
+    ) is True
+    assert played and played[0][:3] == (audio, 22050, 4)
+    assert service.speech_snapshot().state == "completed"
+
+
 def test_new_session_invalidates_old_without_allowing_old_stop() -> None:
     service = VoiceService()
     first = service.begin_speech_session()

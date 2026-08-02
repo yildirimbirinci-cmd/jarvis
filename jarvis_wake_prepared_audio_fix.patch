@@ -1,0 +1,190 @@
+diff --git a/app.py b/app.py
+--- a/app.py
++++ b/app.py
+@@ -247,10 +247,18 @@ class WakeWordWorker(QThread):
+         def play() -> None:
+             try:
+-                self.voice.speak(
+-                    wake_reply,
+-                    *tts_args,
+-                    preserve_pending_cancel=True,
++                prepared_player = getattr(self.voice, "speak_prepared", None)
++                played = bool(
++                    prepared_player and prepared_player(wake_reply, *tts_args)
+                 )
++                if not played:
++                    self.status.emit(
++                        "Hazır uyandırma sesi bulunamadı; normal TTS yolu kullanılıyor."
++                    )
++                    self.voice.speak(
++                        wake_reply,
++                        *tts_args,
++                        preserve_pending_cancel=True,
++                    )
+             except BaseException as exc:
+                 failure.append(exc)
+             finally:
+diff --git a/core/voice_service.py b/core/voice_service.py
+--- a/core/voice_service.py
++++ b/core/voice_service.py
+@@ -177,6 +177,7 @@ class VoiceService:
+         self._last_wake_strong = False
+         self._audio_routes = AudioRouteStore()
+         self._last_audio_recovery = ""
++        self._prepared_speech_audio: dict[tuple[object, ...], tuple[object, int]] = {}
+ 
+     @staticmethod
+     def piper_models() -> list[Path]:
+@@ -2568,6 +2569,7 @@ class VoiceService:
+         cancel_event: threading.Event | None = None,
+         cancel_check: Callable[[], bool] | None = None,
+         play_audio: bool = True,
++        prepared_audio: list[tuple[object, int]] | None = None,
+     ) -> str:
+         session_id, cancel_event = self._resolve_speech_session(session_id, cancel_event)
+         exe, model = self._discover_piper(executable, model_path)
+@@ -2639,6 +2641,4 @@ class VoiceService:
+                 raise RuntimeError(f"Piper WAV dosyası okunamadı: {exc}") from exc
+-            if not play_audio:
+-                continue
+             np = self._numpy()
+             with wave.open(str(target), "rb") as wav_file:
+                 frames = wav_file.readframes(wav_file.getnframes())
+@@ -2701,6 +2701,10 @@ class VoiceService:
+                     audio.astype(np.float32, copy=False),
+                     np.zeros((tail_frames, audio.shape[1]), dtype=np.float32),
+                 ))
++            if not play_audio:
++                if prepared_audio is not None:
++                    prepared_audio.append((audio.copy(), play_rate))
++                continue
+             with self._speech_lock:
+                 if session_id != self._speech_session_id:
+                     return "Piper seslendirmesi kesildi."
+@@ -2745,8 +2749,9 @@ class VoiceService:
+         if selected not in {"auto", "piper"}:
+             return "Seçili TTS motoru ön hazırlık gerektirmiyor."
+         session_id, cancel_event = self._new_speech_session(cancel_previous=False)
++        prepared: list[tuple[object, int]] = []
+         try:
+-            return self._speak_with_piper(
++            result = self._speak_with_piper(
+                 cleaned,
+                 piper_executable,
+                 piper_model,
+@@ -2757,10 +2762,76 @@ class VoiceService:
+                 session_id=session_id,
+                 cancel_event=cancel_event,
+                 play_audio=False,
++                prepared_audio=prepared,
+             )
++            if prepared:
++                key = self._prepared_speech_key(
++                    cleaned, voice_name, rate, volume, backend,
++                    piper_executable, piper_model, output_device,
++                )
++                with self._speech_lock:
++                    self._prepared_speech_audio[key] = prepared[-1]
++            return result
+         finally:
+             self._set_speech_state(session_id, "completed")
+ 
++    @staticmethod
++    def _prepared_speech_key(
++        text: str,
++        voice_name: str,
++        rate: int,
++        volume: int,
++        backend: str,
++        piper_executable: str,
++        piper_model: str,
++        output_device: int | None,
++    ) -> tuple[object, ...]:
++        return (
++            text, voice_name, int(rate), int(volume), (backend or "piper").lower(),
++            piper_executable, piper_model, output_device,
++        )
++
++    def speak_prepared(
++        self,
++        text: str,
++        voice_name: str = "",
++        rate: int = 0,
++        volume: int = 100,
++        backend: str = "auto",
++        piper_executable: str = "",
++        piper_model: str = "",
++        output_device: int | None = None,
++    ) -> bool:
++        """Play an already prepared acknowledgement without invoking Piper."""
++        cleaned = self._prepare_tts_text(text)
++        key = self._prepared_speech_key(
++            cleaned, voice_name, rate, volume, backend,
++            piper_executable, piper_model, output_device,
++        )
++        with self._speech_lock:
++            item = self._prepared_speech_audio.get(key)
++            session_id = self._speech_session_id
++            cancel_event = self._speech_cancel_event
++            if item is None or not session_id:
++                return False
++            self._speech_session_armed = False
++            audio, sample_rate = item
++            self._active_audio = audio
++        self._set_speech_state(session_id, "playing", text_chars=len(cleaned))
++        try:
++            self._play_audio_resilient(
++                audio,
++                sample_rate,
++                output_device,
++                session_id=session_id,
++                cancel_event=cancel_event,
++            )
++        except InterruptedError:
++            self._set_speech_state(session_id, "cancelled")
++            return True
++        self._set_speech_state(session_id, "completed")
++        return True
++
+     def _select_windows_voice(self, requested: str) -> str:
+         voices = self.installed_voices()
+         if requested and requested in voices:
+diff --git a/tests/test_voice_speech_sessions.py b/tests/test_voice_speech_sessions.py
+--- a/tests/test_voice_speech_sessions.py
++++ b/tests/test_voice_speech_sessions.py
+@@ -32,6 +32,35 @@ def test_prepare_speech_builds_piper_cache_without_playback(monkeypatch) -> None:
+     assert service.speech_snapshot().state == "completed"
+ 
+ 
++def test_speak_prepared_uses_memory_audio_without_invoking_piper(monkeypatch) -> None:
++    service = VoiceService()
++    key = service._prepared_speech_key(
++        "Evet.", "", 8, 100, "piper", "piper.exe", "voice.onnx", 4,
++    )
++    audio = object()
++    service._prepared_speech_audio[key] = (audio, 22050)
++    service.begin_speech_session()
++    played = []
++
++    def play_ready(value, rate, output, **kwargs):
++        played.append((value, rate, output, kwargs))
++        return 4, "Logitech", "MME", 44100, 2
++
++    monkeypatch.setattr(service, "_play_audio_resilient", play_ready)
++    monkeypatch.setattr(
++        service,
++        "_speak_with_piper",
++        lambda *_args, **_kwargs: pytest.fail("Piper must not run at wake time"),
++    )
++
++    assert service.speak_prepared(
++        "Evet.", rate=8, backend="piper",
++        piper_executable="piper.exe", piper_model="voice.onnx", output_device=4,
++    ) is True
++    assert played and played[0][:3] == (audio, 22050, 4)
++    assert service.speech_snapshot().state == "completed"
++
++
+ def test_new_session_invalidates_old_without_allowing_old_stop() -> None:
+     service = VoiceService()
+     first = service.begin_speech_session()

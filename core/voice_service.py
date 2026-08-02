@@ -183,6 +183,7 @@ class VoiceService:
         self._last_wake_strong = False
         self._audio_routes = AudioRouteStore()
         self._last_audio_recovery = ""
+        self._prepared_speech_audio: dict[tuple[object, ...], tuple[object, int]] = {}
 
     @staticmethod
     def piper_models() -> list[Path]:
@@ -2579,6 +2580,7 @@ $s.Dispose()
         cancel_event: threading.Event | None = None,
         cancel_check: Callable[[], bool] | None = None,
         play_audio: bool = True,
+        prepared_audio: list[tuple[object, int]] | None = None,
     ) -> str:
         session_id, cancel_event = self._resolve_speech_session(session_id, cancel_event)
         exe, model = self._discover_piper(executable, model_path)
@@ -2652,8 +2654,6 @@ $s.Dispose()
                         raise RuntimeError("Piper geçersiz ses verisi oluşturdu.")
             except (wave.Error, EOFError) as exc:
                 raise RuntimeError(f"Piper WAV dosyası okunamadı: {exc}") from exc
-            if not play_audio:
-                continue
             np = self._numpy()
             with wave.open(str(target), "rb") as wav_file:
                 frames = wav_file.readframes(wav_file.getnframes())
@@ -2712,6 +2712,10 @@ $s.Dispose()
                     audio.astype(np.float32, copy=False),
                     np.zeros((tail_frames, audio.shape[1]), dtype=np.float32),
                 ))
+            if not play_audio:
+                if prepared_audio is not None:
+                    prepared_audio.append((audio.copy(), play_rate))
+                continue
             with self._speech_lock:
                 if session_id != self._speech_session_id:
                     return "Piper seslendirmesi kesildi."
@@ -2757,8 +2761,9 @@ $s.Dispose()
         if selected not in {"auto", "piper"}:
             return "Seçili TTS motoru ön hazırlık gerektirmiyor."
         session_id, cancel_event = self._new_speech_session(cancel_previous=False)
+        prepared: list[tuple[object, int]] = []
         try:
-            return self._speak_with_piper(
+            result = self._speak_with_piper(
                 cleaned,
                 piper_executable,
                 piper_model,
@@ -2768,9 +2773,81 @@ $s.Dispose()
                 session_id=session_id,
                 cancel_event=cancel_event,
                 play_audio=False,
+                prepared_audio=prepared,
             )
+            if prepared:
+                key = self._prepared_speech_key(
+                    cleaned, voice_name, rate, volume, backend,
+                    piper_executable, piper_model, output_device,
+                )
+                with self._speech_lock:
+                    self._prepared_speech_audio[key] = prepared[-1]
+            return result
         finally:
             self._set_speech_state(session_id, "completed")
+
+    @staticmethod
+    def _prepared_speech_key(
+        text: str,
+        voice_name: str,
+        rate: int,
+        volume: int,
+        backend: str,
+        piper_executable: str,
+        piper_model: str,
+        output_device: int | None,
+    ) -> tuple[object, ...]:
+        return (
+            text, voice_name, int(rate), int(volume), (backend or "piper").lower(),
+            piper_executable, piper_model, output_device,
+        )
+
+    def speak_prepared(
+        self,
+        text: str,
+        voice_name: str = "",
+        rate: int = 0,
+        volume: int = 100,
+        backend: str = "auto",
+        piper_executable: str = "",
+        piper_model: str = "",
+        output_device: int | None = None,
+    ) -> bool:
+        """Play an already prepared acknowledgement without invoking Piper."""
+        cleaned = self._prepare_tts_text(text)
+        raw_key = self._prepared_speech_key(
+            str(text).strip(), voice_name, rate, volume, backend,
+            piper_executable, piper_model, output_device,
+        )
+        cleaned_key = self._prepared_speech_key(
+            cleaned, voice_name, rate, volume, backend,
+            piper_executable, piper_model, output_device,
+        )
+        with self._speech_lock:
+            item = self._prepared_speech_audio.get(raw_key)
+            if item is None and cleaned_key != raw_key:
+                item = self._prepared_speech_audio.get(cleaned_key)
+            session_id = self._speech_session_id
+            cancel_event = self._speech_cancel_event
+            if item is None or not session_id:
+                return False
+            self._speech_session_armed = False
+            audio, sample_rate = item
+            self._active_audio = audio
+        self._set_speech_state(session_id, "playing", text_chars=len(cleaned))
+        try:
+            self._play_audio_resilient(
+                audio,
+                sample_rate,
+                output_device,
+                session_id=session_id,
+                cancel_event=cancel_event,
+            )
+        except InterruptedError:
+            self._set_speech_state(session_id, "cancelled")
+            return True
+        self._set_speech_state(session_id, "completed")
+        return True
 
     def _select_windows_voice(self, requested: str) -> str:
         voices = self.installed_voices()

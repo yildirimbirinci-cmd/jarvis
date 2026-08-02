@@ -1,0 +1,304 @@
+diff --git a/core/voice_service.py b/core/voice_service.py
+index e290947..232e91b 100644
+--- a/core/voice_service.py
++++ b/core/voice_service.py
+@@ -13,6 +13,7 @@ import tempfile
+ import time
+ import wave
+ import threading
++import queue
+ from dataclasses import dataclass
+ from pathlib import Path
+ from typing import Callable
+@@ -35,6 +36,7 @@ STOP_WORD_PROFILE_FILE = DATA_DIR / "jarvis_stop_profile.json"
+ PRONUNCIATION_FILE = DATA_DIR / "speech_pronunciations.json"
+ VOICE_PROFILE_MAX_BYTES = 1 * 1024 * 1024
+ PIPER_CACHE_DIR = DATA_DIR / "cache" / "piper_tts"
++OUTPUT_STREAM_OPEN_TIMEOUT_SECONDS = 1.5
+ TURKISH_COMMAND_PROMPT = (
+     "Bu kayıt Yıldırım'ın Jarvis adlı yerel masaüstü asistanına verdiği Türkçe bir komuttur. "
+     "Sık kullanılan ifadeler: Jarvis, kendi kodlarını incele, kaynak kodlarını kontrol et, "
+@@ -2409,25 +2411,76 @@ $s.Dispose()
+                             sd.wait()
+                             frames_written = int(prepared.shape[0])
+                         else:
+-                            stream = sd.OutputStream(
+-                                samplerate=play_rate,
+-                                device=device.index,
+-                                channels=stream_channels,
+-                                dtype="float32",
+-                                latency=latency,
+-                                blocksize=max(
+-                                    512,
+-                                    int(play_rate * (0.04 if latency == "low" else 0.08)),
+-                                ),
++                            opened: queue.Queue[tuple[str, object]] = queue.Queue(maxsize=1)
++                            abandoned = threading.Event()
++
++                            def open_stream() -> None:
++                                try:
++                                    candidate = sd.OutputStream(
++                                        samplerate=play_rate,
++                                        device=device.index,
++                                        channels=stream_channels,
++                                        dtype="float32",
++                                        latency=latency,
++                                        blocksize=max(
++                                            512,
++                                            int(play_rate * (0.04 if latency == "low" else 0.08)),
++                                        ),
++                                    )
++                                except BaseException as exc:
++                                    try:
++                                        opened.put_nowait(("error", exc))
++                                    except queue.Full:
++                                        pass
++                                    return
++                                if abandoned.is_set():
++                                    try:
++                                        candidate.close()
++                                    except Exception:
++                                        pass
++                                    return
++                                try:
++                                    opened.put_nowait(("stream", candidate))
++                                except queue.Full:
++                                    try:
++                                        candidate.close()
++                                    except Exception:
++                                        pass
++
++                            opener = threading.Thread(
++                                target=open_stream,
++                                name="jarvis-output-open",
++                                daemon=True,
+                             )
++                            opener.start()
++                            try:
++                                kind, value = opened.get(
++                                    timeout=OUTPUT_STREAM_OPEN_TIMEOUT_SECONDS
++                                )
++                            except queue.Empty as exc:
++                                abandoned.set()
++                                raise AudioRouteUnavailableError(
++                                    "Windows ses çıkışı 1,5 saniyede açılamadı; "
++                                    "kilitli PortAudio denemesi terk edildi."
++                                ) from exc
++                            if kind == "error":
++                                raise value  # type: ignore[misc]
++                            stream = value
+                             with self._speech_lock:
+-                                if session_id != self._speech_session_id:
++                                if (
++                                    session_id != self._speech_session_id
++                                    or cancel_event.is_set()
++                                ):
+                                     try:
+                                         stream.close()
+                                     except Exception:
+                                         pass
++                                    if session_id != self._speech_session_id:
++                                        raise InterruptedError(
++                                            "Eski seslendirme oturumu geçersiz kılındı."
++                                        )
+                                     raise InterruptedError(
+-                                        "Eski seslendirme oturumu geçersiz kılındı."
++                                        "Ses çıkışı kullanıcı tarafından kesildi."
+                                     )
+                                 self._output_stream = stream
+                             stream.start()
+@@ -2477,6 +2530,15 @@ $s.Dispose()
+                                 pass
+                         raise
+                     except Exception as exc:
++                        # A blocked PortAudio constructor is process-global on
++                        # some Windows WASAPI drivers. Trying more PortAudio
++                        # routes here only stacks additional blocked opener
++                        # threads; let the caller use the native Windows WAV
++                        # path immediately.
++                        if isinstance(exc, AudioRouteUnavailableError) and (
++                            "kilitli PortAudio denemesi" in str(exc)
++                        ):
++                            raise
+                         diagnosis = classify_audio_error(exc)
+                         errors.append(
+                             f"{device.name} [{device.host_api}] {play_rate} Hz/{latency}: "
+@@ -2501,6 +2563,51 @@ $s.Dispose()
+             + " | ".join(errors[:5])
+         )
+ 
++    def _play_wav_with_windows_soundplayer(
++        self,
++        wav_path: Path,
++        *,
++        session_id: str,
++        cancel_event: threading.Event,
++        cancel_check: Callable[[], bool] | None = None,
++    ) -> None:
++        """Play a ready WAV outside PortAudio when WASAPI stream creation stalls."""
++        escaped = str(wav_path.resolve()).replace("'", "''")
++        script = (
++            "Add-Type -AssemblyName System.Windows.Forms; "
++            f"$p = New-Object System.Media.SoundPlayer('{escaped}'); "
++            "$p.Load(); $p.PlaySync(); $p.Dispose()"
++        )
++        process = subprocess.Popen(
++            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
++            stdout=subprocess.PIPE,
++            stderr=subprocess.PIPE,
++            text=True,
++            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
++        )
++        with self._speech_lock:
++            if session_id != self._speech_session_id or cancel_event.is_set():
++                process.terminate()
++                raise InterruptedError("Eski seslendirme oturumu geçersiz kılındı.")
++            self._windows_tts_process = process
++        try:
++            deadline = time.monotonic() + 30.0
++            while process.poll() is None:
++                if self._speech_cancelled(cancel_event, cancel_check):
++                    process.terminate()
++                    raise InterruptedError("Ses çıkışı kullanıcı tarafından kesildi.")
++                if time.monotonic() >= deadline:
++                    process.kill()
++                    raise RuntimeError("Windows WAV oynatımı zaman aşımına uğradı.")
++                time.sleep(0.025)
++            if process.returncode:
++                _stdout, stderr = process.communicate()
++                raise RuntimeError(stderr.strip() or "Windows WAV oynatıcısı başarısız oldu.")
++        finally:
++            with self._speech_lock:
++                if self._windows_tts_process is process:
++                    self._windows_tts_process = None
++
+     def play_output_test_tone(
+         self,
+         output_device: int | None = None,
+@@ -2713,6 +2820,15 @@ $s.Dispose()
+                 )
+             except InterruptedError:
+                 return "Piper seslendirmesi kesildi."
++            except AudioRouteUnavailableError as exc:
++                if "1,5 saniyede açılamadı" not in str(exc) or os.name != "nt":
++                    raise
++                self._play_wav_with_windows_soundplayer(
++                    target,
++                    session_id=session_id,
++                    cancel_event=cancel_event,
++                    cancel_check=cancel_check,
++                )
+             if self._speech_cancelled(cancel_event, cancel_check):
+                 return "Piper seslendirmesi kesildi."
+         cache_note = " (hazır ses önbelleği)" if cache_used else ""
+diff --git a/tests/test_voice_audio_device_recovery.py b/tests/test_voice_audio_device_recovery.py
+index 8bbcb2b..790d550 100644
+--- a/tests/test_voice_audio_device_recovery.py
++++ b/tests/test_voice_audio_device_recovery.py
+@@ -1,5 +1,6 @@
+ from __future__ import annotations
+ 
++import threading
+ import time
+ from types import SimpleNamespace
+ 
+@@ -7,6 +8,8 @@ import numpy as np
+ import pytest
+ 
+ from artmach_assistant.core.audio_device_resilience import AudioRouteStore
++from artmach_assistant.core.audio_device_resilience import AudioRouteUnavailableError
++from artmach_assistant.core import voice_service as voice_service_module
+ from artmach_assistant.core.voice_service import VoiceService
+ 
+ 
+@@ -152,6 +155,90 @@ def _service(monkeypatch, tmp_path, *, partial_failure: bool = False):
+     return service, fake
+ 
+ 
++def test_cancelled_session_cannot_start_after_output_stream_open_unblocks(
++    monkeypatch,
++    tmp_path,
++) -> None:
++    service, fake = _service(monkeypatch, tmp_path)
++    opening = threading.Event()
++    release = threading.Event()
++    original_output_stream = fake.OutputStream
++
++    def blocked_output_stream(**kwargs):
++        opening.set()
++        assert release.wait(2.0)
++        return original_output_stream(**kwargs)
++
++    monkeypatch.setattr(fake, "OutputStream", blocked_output_stream)
++    session_id = service.begin_speech_session()
++    cancel_event = service._speech_cancel_event
++    result: dict[str, object] = {}
++
++    def play() -> None:
++        try:
++            service._play_audio_resilient(
++                np.ones((2400,), dtype=np.float32),
++                24000,
++                3,
++                session_id=session_id,
++                cancel_event=cancel_event,
++            )
++        except BaseException as exc:
++            result["error"] = exc
++
++    worker = threading.Thread(target=play, daemon=True)
++    worker.start()
++    assert opening.wait(1.0)
++    assert service.stop_speaking(session_id) is True
++    release.set()
++    worker.join(timeout=2.0)
++
++    assert worker.is_alive() is False
++    assert isinstance(result.get("error"), InterruptedError)
++    assert fake.frames_written == 0
++    assert fake.streams and fake.streams[0].active is False
++
++
++def test_stalled_output_open_is_abandoned_and_can_never_play(
++    monkeypatch,
++    tmp_path,
++) -> None:
++    service, fake = _service(monkeypatch, tmp_path)
++    opening = threading.Event()
++    release = threading.Event()
++    original_output_stream = fake.OutputStream
++
++    def blocked_output_stream(**kwargs):
++        opening.set()
++        assert release.wait(2.0)
++        return original_output_stream(**kwargs)
++
++    monkeypatch.setattr(fake, "OutputStream", blocked_output_stream)
++    monkeypatch.setattr(
++        voice_service_module,
++        "OUTPUT_STREAM_OPEN_TIMEOUT_SECONDS",
++        0.02,
++    )
++    session_id = service.begin_speech_session()
++
++    with pytest.raises(AudioRouteUnavailableError, match="kilitli PortAudio"):
++        service._play_audio_resilient(
++            np.ones((2400,), dtype=np.float32),
++            24000,
++            3,
++            session_id=session_id,
++            cancel_event=service._speech_cancel_event,
++        )
++
++    assert opening.is_set()
++    release.set()
++    deadline = time.monotonic() + 1.0
++    while not fake.streams and time.monotonic() < deadline:
++        time.sleep(0.01)
++    assert fake.frames_written == 0
++    assert fake.streams and fake.streams[0].active is False
++
++
+ def test_microphone_recovery_uses_durable_endpoint_when_index_is_reused(
+     monkeypatch,
+     tmp_path,
