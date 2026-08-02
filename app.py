@@ -135,6 +135,16 @@ class BargeInWorker(QThread):
     command_heard = Signal(str)
     status = Signal(str)
 
+    # This worker recognizes only a handful of interruption words.  Using the
+    # normal command listener settings here kept the microphone open for up to
+    # five seconds and loaded the slower ``small`` model before "dur" could be
+    # acted on.  These bounds keep the capture phase below the user-visible
+    # half-second target while retaining the local owner verification below.
+    CAPTURE_SECONDS = 1.20
+    WAIT_FOR_SPEECH_SECONDS = 0.35
+    SILENCE_STOP_SECONDS = 0.30
+    MODEL_SIZE = "base"
+
     def __init__(
         self, voice, device_index: int | None, owner_threshold: float,
         phrases: list[str], source: str, reference_text: str = "",
@@ -159,13 +169,13 @@ class BargeInWorker(QThread):
             try:
                 heard = self.voice.listen_utterance(
                     self.device_index,
-                    5.0,
+                    self.CAPTURE_SECONDS,
                     "tr-TR",
-                    model_size="small",
+                    model_size=self.MODEL_SIZE,
                     cancel_check=self.isInterruptionRequested,
                     wake_mode=False,
-                    silence_stop_seconds=0.48,
-                    wait_for_speech_seconds=0.70,
+                    silence_stop_seconds=self.SILENCE_STOP_SECONDS,
+                    wait_for_speech_seconds=self.WAIT_FOR_SPEECH_SECONDS,
                 ).strip()
             except InterruptedError:
                 return
