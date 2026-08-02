@@ -2426,13 +2426,20 @@ $s.Dispose()
                                 ),
                             )
                             with self._speech_lock:
-                                if session_id != self._speech_session_id:
+                                if (
+                                    session_id != self._speech_session_id
+                                    or cancel_event.is_set()
+                                ):
                                     try:
                                         stream.close()
                                     except Exception:
                                         pass
+                                    if session_id != self._speech_session_id:
+                                        raise InterruptedError(
+                                            "Eski seslendirme oturumu geçersiz kılındı."
+                                        )
                                     raise InterruptedError(
-                                        "Eski seslendirme oturumu geçersiz kılındı."
+                                        "Ses çıkışı kullanıcı tarafından kesildi."
                                     )
                                 self._output_stream = stream
                             stream.start()

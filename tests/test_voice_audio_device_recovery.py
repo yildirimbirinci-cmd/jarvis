@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 import time
 from types import SimpleNamespace
 
@@ -150,6 +151,50 @@ def _service(monkeypatch, tmp_path, *, partial_failure: bool = False):
     monkeypatch.setattr(service, "_sounddevice", lambda: fake)
     service._audio_routes = AudioRouteStore(tmp_path / "routes.json")
     return service, fake
+
+
+def test_cancelled_session_cannot_start_after_output_stream_open_unblocks(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    service, fake = _service(monkeypatch, tmp_path)
+    opening = threading.Event()
+    release = threading.Event()
+    original_output_stream = fake.OutputStream
+
+    def blocked_output_stream(**kwargs):
+        opening.set()
+        assert release.wait(2.0)
+        return original_output_stream(**kwargs)
+
+    monkeypatch.setattr(fake, "OutputStream", blocked_output_stream)
+    session_id = service.begin_speech_session()
+    cancel_event = service._speech_cancel_event
+    result: dict[str, object] = {}
+
+    def play() -> None:
+        try:
+            service._play_audio_resilient(
+                np.ones((2400,), dtype=np.float32),
+                24000,
+                3,
+                session_id=session_id,
+                cancel_event=cancel_event,
+            )
+        except BaseException as exc:
+            result["error"] = exc
+
+    worker = threading.Thread(target=play, daemon=True)
+    worker.start()
+    assert opening.wait(1.0)
+    assert service.stop_speaking(session_id) is True
+    release.set()
+    worker.join(timeout=2.0)
+
+    assert worker.is_alive() is False
+    assert isinstance(result.get("error"), InterruptedError)
+    assert fake.frames_written == 0
+    assert fake.streams and fake.streams[0].active is False
 
 
 def test_microphone_recovery_uses_durable_endpoint_when_index_is_reused(
