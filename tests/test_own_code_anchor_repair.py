@@ -1,5 +1,6 @@
 from pathlib import Path
 
+from artmach_assistant.core.edit_manager import EditManager
 from artmach_assistant.core.own_code_anchor_repair import (
     build_ambiguous_anchor_guidance,
     merge_duplicate_operation_rows,
@@ -167,6 +168,144 @@ def test_ambiguous_insert_before_anchor_is_expanded_without_moving_point(
     assert source.count(anchor) == 1
     assert anchor.startswith("        return None\n")
     assert anchor.endswith("        self.wait()\n")
+
+
+def test_ambiguous_delete_is_expanded_without_deleting_context(
+    tmp_path: Path,
+) -> None:
+    source = (
+        "class WakeWordWorker:\n"
+        "    def helper(self):\n"
+        "        self.pause_listening()\n"
+        "\n"
+        "    def run(self):\n"
+        "        if self.active:\n"
+        "            self.pause_listening()\n"
+        "            self.command.emit()\n"
+        "            continue\n"
+        "        self.pause_listening()\n"
+        "        self.wait()\n"
+    )
+    target = tmp_path / "app.py"
+    target.write_text(source, encoding="utf-8")
+    payload = {
+        "files": [
+            {
+                "path": "app.py",
+                "operations": [
+                    {
+                        "op": "delete",
+                        "old": "        self.pause_listening()\n",
+                    }
+                ],
+            }
+        ]
+    }
+
+    repaired = repair_ambiguous_replace_anchors(
+        payload,
+        project_root=tmp_path,
+        instruction="app.py WakeWordWorker.run bloğunu çıkar",
+    )
+
+    operation = repaired["files"][0]["operations"][0]
+    assert operation["op"] == "replace"
+    assert source.count(operation["old"]) == 1
+    assert operation["old"].replace(
+        "        self.pause_listening()\n", "", 1
+    ) == operation["new"]
+
+
+def test_ambiguous_delete_stays_rejected_when_symbol_has_multiple_matches(
+    tmp_path: Path,
+) -> None:
+    source = (
+        "class WakeWordWorker:\n"
+        "    def run(self):\n"
+        "        self.pause_listening()\n"
+        "        self.pause_listening()\n"
+    )
+    (tmp_path / "app.py").write_text(source, encoding="utf-8")
+    payload = {
+        "files": [
+            {
+                "path": "app.py",
+                "operations": [
+                    {
+                        "op": "delete",
+                        "old": "        self.pause_listening()\n",
+                    }
+                ],
+            }
+        ]
+    }
+
+    repaired = repair_ambiguous_replace_anchors(
+        payload,
+        project_root=tmp_path,
+        instruction="app.py WakeWordWorker.run bloğunu çıkar",
+    )
+
+    assert repaired == payload
+
+
+def test_refactor_insert_then_three_count_delete_is_applied_safely(
+    tmp_path: Path,
+) -> None:
+    source = (
+        "class WakeWordWorker:\n"
+        "    def helper(self):\n"
+        "        self.pause_listening()\n"
+        "\n"
+        "    def run(self):\n"
+        "        if self.active:\n"
+        "            self.pause_listening()\n"
+        "            self.command.emit()\n"
+        "            continue\n"
+        "        self.pause_listening()\n"
+        "        self.wait()\n"
+    )
+    (tmp_path / "app.py").write_text(source, encoding="utf-8")
+    repeated = "        self.pause_listening()\n"
+    assert source.count(repeated) == 3
+    payload = {
+        "files": [
+            {
+                "path": "app.py",
+                "operations": [
+                    {
+                        "op": "insert_before",
+                        "anchor": "    def run(self):\n",
+                        "content": (
+                            "    def listen_active_dialogue(self):\n"
+                            "        return self.voice.listen()\n\n"
+                        ),
+                    },
+                    {"op": "delete", "old": repeated},
+                ],
+            }
+        ]
+    }
+
+    repaired = repair_ambiguous_replace_anchors(
+        payload,
+        project_root=tmp_path,
+        instruction=(
+            "app.py içindeki WakeWordWorker.run aktif diyalog komut dinleme "
+            "bloğunu tek yardımcı metoda çıkar"
+        ),
+    )
+    operations = repaired["files"][0]["operations"]
+    rendered = EditManager._apply_operations(
+        source,
+        operations,
+        path="app.py",
+    )
+
+    assert "    def listen_active_dialogue(self):\n" in rendered
+    assert "            self.pause_listening()\n" in rendered
+    assert "    def helper(self):\n        self.pause_listening()\n" in rendered
+    assert "\n        self.pause_listening()\n        self.wait()\n" not in rendered
 
 
 def test_ambiguous_insert_after_anchor_is_expanded_without_moving_point(

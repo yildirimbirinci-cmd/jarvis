@@ -81,10 +81,23 @@ def _expand_unique_replace(
     if not old or source.count(old) <= 1:
         return None
 
-    if symbol_source.count(old) != 1:
-        return None
+    positions = _occurrence_positions(symbol_source, old)
+    if len(positions) != 1:
+        # Indented Python text can be counted as a substring of a more deeply
+        # indented line.  When exactly one occurrence starts at a real line
+        # boundary, that is the only position which can represent the model's
+        # complete source line; the others are indentation substrings.
+        line_aligned = tuple(
+            position
+            for position in positions
+            if position == 0 or symbol_source[position - 1] in "\r\n"
+        )
+        if len(line_aligned) != 1:
+            return None
+        position = line_aligned[0]
+    else:
+        position = positions[0]
 
-    position = symbol_source.find(old)
     if position < 0:
         return None
 
@@ -225,6 +238,33 @@ def repair_ambiguous_replace_anchors(
                 )
                 if expanded is not None:
                     operation["old"], operation["new"] = expanded
+                continue
+
+            if operation_name == "delete":
+                old = operation.get("old")
+                if not isinstance(old, str):
+                    continue
+
+                # A delete anchor cannot simply be expanded: EditManager would
+                # delete the added context as well.  Re-express the operation
+                # as a replace that preserves that context and removes only the
+                # model-requested fragment.  This is safe only when the fragment
+                # occurs exactly once inside the explicitly requested symbol.
+                expanded = _expand_unique_replace(
+                    source,
+                    scoped_source,
+                    old,
+                    "",
+                )
+                if expanded is not None:
+                    operation.clear()
+                    operation.update(
+                        {
+                            "op": "replace",
+                            "old": expanded[0],
+                            "new": expanded[1],
+                        }
+                    )
                 continue
 
             if operation_name not in {"insert_before", "insert_after"}:
