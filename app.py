@@ -167,54 +167,19 @@ class BargeInWorker(QThread):
                 self.msleep(200)
                 continue
             try:
-                # A four-sample local "dur" profile already exists for this
-                # exact job.  Use it before Whisper so a one-syllable stop is
-                # acted on before loudspeaker audio contaminates the capture.
-                # The lexical path remains the fallback for installations
-                # where that optional profile has not been enrolled.
-                has_stop_profile = bool(
-                    getattr(self.voice, "has_stop_word_profile", lambda: False)()
+                # Capture only.  Waiting for Whisper to spell a one-syllable
+                # "dur" made interruption depend on loudspeaker echo and model
+                # latency.  During TTS, any newly captured owner-verified voice
+                # is an interruption; the normal dialogue loop records the
+                # actual follow-up command after playback has stopped.
+                self.voice.record_utterance_wav(
+                    self.device_index,
+                    max_seconds=self.CAPTURE_SECONDS,
+                    cancel_check=self.isInterruptionRequested,
+                    silence_stop_seconds=self.SILENCE_STOP_SECONDS,
+                    wait_for_speech_seconds=self.WAIT_FOR_SPEECH_SECONDS,
+                    min_capture_seconds=0.30,
                 )
-                if has_stop_profile:
-                    matched_stop, stop_score = self.voice.listen_for_local_stop(
-                        self.device_index,
-                        max_seconds=0.90,
-                        cancel_check=self.isInterruptionRequested,
-                    )
-                    if matched_stop:
-                        accepted, _score = self.voice.verify_owner_voice(
-                            threshold=max(0.60, min(0.95, self.owner_threshold))
-                        )
-                        if accepted:
-                            self.status.emit(
-                                "DUR ses kalıbı sahip sesiyle doğrulandı; "
-                                f"güven %{int(max(0.0, stop_score) * 100)}."
-                            )
-                            self.interrupted.emit(f"profile:{self.source}")
-                            return
-                    # Reuse the audio just captured by the profile check.  A
-                    # second microphone recording would force the owner to say
-                    # "dur" twice, which was the observed runtime failure.
-                    path = getattr(self.voice, "last_utterance_path", None)
-                    heard = self.voice.recognize_wav(
-                        path,
-                        "tr-TR",
-                        model_size=self.MODEL_SIZE,
-                        wake_mode=False,
-                        hotwords=" ".join(self.phrases),
-                    ).strip()
-                else:
-                    heard = self.voice.listen_utterance(
-                        self.device_index,
-                        self.CAPTURE_SECONDS,
-                        "tr-TR",
-                        model_size=self.MODEL_SIZE,
-                        cancel_check=self.isInterruptionRequested,
-                        wake_mode=False,
-                        silence_stop_seconds=self.SILENCE_STOP_SECONDS,
-                        wait_for_speech_seconds=self.WAIT_FOR_SPEECH_SECONDS,
-                        min_capture_seconds=0.30,
-                    ).strip()
             except InterruptedError:
                 return
             except Exception as exc:
@@ -230,22 +195,9 @@ class BargeInWorker(QThread):
             )
             if not accepted:
                 continue
-            heard_key = WakeWordWorker._normalize_wake_text(heard)
-            matched = heard_key in self.phrases or any(
-                difflib.SequenceMatcher(None, heard_key, phrase).ratio() >= 0.84
-                for phrase in self.phrases
-            )
-            if matched:
-                self.status.emit("Kesme komutu sahip sesiyle doğrulandı.")
-                self.interrupted.emit(f"learned:{self.source}")
-                return
-            if self._probable_tts_echo(heard):
-                self.status.emit("Hoparlör yankısı algılandı; komut olarak işlenmedi.")
-                continue
-            if len(heard_key.split()) >= 2:
-                self.status.emit("Sahibin yeni cümlesi algılandı; önceki yanıt kesiliyor.")
-                self.command_heard.emit(heard)
-                return
+            self.status.emit("Sahibin araya girdiği doğrulandı; önceki yanıt kesiliyor.")
+            self.interrupted.emit(f"owner:{self.source}")
+            return
 
 
 class WakeWordWorker(QThread):
