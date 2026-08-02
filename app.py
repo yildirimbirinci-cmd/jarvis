@@ -176,6 +176,7 @@ class BargeInWorker(QThread):
                     self.device_index,
                     max_seconds=self.CAPTURE_SECONDS,
                     cancel_check=self.isInterruptionRequested,
+                    wake_mode=False,
                     silence_stop_seconds=self.SILENCE_STOP_SECONDS,
                     wait_for_speech_seconds=self.WAIT_FOR_SPEECH_SECONDS,
                     min_capture_seconds=0.30,
