@@ -2571,6 +2571,7 @@ $s.Dispose()
         session_id: str | None = None,
         cancel_event: threading.Event | None = None,
         cancel_check: Callable[[], bool] | None = None,
+        play_audio: bool = True,
     ) -> str:
         session_id, cancel_event = self._resolve_speech_session(session_id, cancel_event)
         exe, model = self._discover_piper(executable, model_path)
@@ -2644,6 +2645,8 @@ $s.Dispose()
                         raise RuntimeError("Piper geçersiz ses verisi oluşturdu.")
             except (wave.Error, EOFError) as exc:
                 raise RuntimeError(f"Piper WAV dosyası okunamadı: {exc}") from exc
+            if not play_audio:
+                continue
             np = self._numpy()
             with wave.open(str(target), "rb") as wav_file:
                 frames = wav_file.readframes(wav_file.getnframes())
@@ -2722,6 +2725,45 @@ $s.Dispose()
                 return "Piper seslendirmesi kesildi."
         cache_note = " (hazır ses önbelleği)" if cache_used else ""
         return f"Piper yerel TTS kullanıldı: {model.name}{cache_note}"
+
+    def prepare_speech(
+        self,
+        text: str,
+        voice_name: str = "",
+        rate: int = 0,
+        volume: int = 100,
+        backend: str = "auto",
+        piper_executable: str = "",
+        piper_model: str = "",
+        output_device: int | None = None,
+    ) -> str:
+        """Prepare a short Piper utterance without playing it.
+
+        Wake acknowledgements are latency-sensitive.  Building their WAV
+        while the user is waiting after saying the wake word can keep command
+        capture closed for several seconds on CPU-only systems.
+        """
+        cleaned = self._prepare_tts_text(text)
+        if not cleaned:
+            return "Hazırlanacak ses metni yok."
+        selected = (backend or "piper").lower()
+        if selected not in {"auto", "piper"}:
+            return "Seçili TTS motoru ön hazırlık gerektirmiyor."
+        session_id, cancel_event = self._new_speech_session(cancel_previous=False)
+        try:
+            return self._speak_with_piper(
+                cleaned,
+                piper_executable,
+                piper_model,
+                output_device,
+                volume,
+                rate,
+                session_id=session_id,
+                cancel_event=cancel_event,
+                play_audio=False,
+            )
+        finally:
+            self._set_speech_state(session_id, "completed")
 
     def _select_windows_voice(self, requested: str) -> str:
         voices = self.installed_voices()

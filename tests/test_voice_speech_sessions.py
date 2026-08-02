@@ -9,6 +9,30 @@ import pytest
 from artmach_assistant.core.voice_service import VoiceService
 
 
+def test_prepare_speech_builds_piper_cache_without_playback(monkeypatch) -> None:
+    service = VoiceService()
+    calls = []
+
+    def prepare_backend(*args, **kwargs):
+        calls.append((args, kwargs))
+        return "hazır"
+
+    monkeypatch.setattr(service, "_speak_with_piper", prepare_backend)
+
+    result = service.prepare_speech(
+        "Evet.",
+        rate=8,
+        backend="piper",
+        piper_executable="piper.exe",
+        piper_model="voice.onnx",
+    )
+
+    assert result == "hazır"
+    assert len(calls) == 1
+    assert calls[0][1]["play_audio"] is False
+    assert service.speech_snapshot().state == "completed"
+
+
 def test_new_session_invalidates_old_without_allowing_old_stop() -> None:
     service = VoiceService()
     first = service.begin_speech_session()

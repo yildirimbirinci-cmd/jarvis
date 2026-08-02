@@ -403,6 +403,21 @@ class WakeWordWorker(QThread):
         return None
 
     def run(self) -> None:
+        # Prepare the tiny acknowledgement before advertising wake readiness.
+        # This moves Piper's first-use synthesis cost out of the wake-to-command
+        # hand-off, where it previously kept the microphone closed for seconds.
+        wake_replies = set(self.wake_responses.values()) or {"Evet."}
+        fast_tts_args = list(self.tts_args)
+        if len(fast_tts_args) >= 2:
+            fast_tts_args[1] = max(8, int(fast_tts_args[1]))
+        try:
+            self.status.emit("Kısa uyandırma yanıtı hazırlanıyor.")
+            for wake_reply in wake_replies:
+                self.voice.prepare_speech(wake_reply, *fast_tts_args)
+        except Exception as exc:
+            # Preparation is an optimization. Normal speak() keeps its
+            # existing fallback/error handling if a backend cannot warm up.
+            self.status.emit(f"Uyandırma yanıtı önceden hazırlanamadı: {exc}")
         self.status.emit(
             f"Wake word döngüsü başladı: '{self.wake_word}', varyasyonlar={', '.join(self.wake_aliases)}, "
             f"model={self.wake_model}, pencere={self.wake_seconds:.1f}s."
@@ -504,7 +519,7 @@ class WakeWordWorker(QThread):
                     # until speak() sees it.
                     self.voice.begin_speech_session()
                     self.speech_started.emit("wake_reply")
-                    self.voice.speak(wake_reply, *self.tts_args, preserve_pending_cancel=True)
+                    self.voice.speak(wake_reply, *fast_tts_args, preserve_pending_cancel=True)
                 except Exception as exc:
                     self.failed.emit(f"Uyandırma yanıtı seslendirilemedi: {exc}")
                 finally:
