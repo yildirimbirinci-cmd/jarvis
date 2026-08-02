@@ -354,7 +354,7 @@ class ExtractMethodRefactoring:
             returned = ", ".join(analysis.outputs)
             new_def.append(f"{definition_indent}    return {returned}\n")
         elif has_loop_control:
-            new_def.append(f'{definition_indent}    return "continue"\n')
+            new_def.append(f"{definition_indent}    return None\n")
         new_def.append("\n")
 
         args = ", ".join(analysis.inputs)
@@ -364,7 +364,8 @@ class ExtractMethodRefactoring:
                 f"{original_indent}extract_action = {call}\n",
                 f'{original_indent}if extract_action == "break":\n',
                 f"{original_indent}    break\n",
-                f"{original_indent}continue\n",
+                f'{original_indent}if extract_action == "continue":\n',
+                f"{original_indent}    continue\n",
             ]
         elif analysis.outputs:
             lhs = ", ".join(analysis.outputs)

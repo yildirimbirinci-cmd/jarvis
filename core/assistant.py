@@ -1565,14 +1565,20 @@ class AssistantEngine:
             run = methods.get("run")
             if helper is None or run is None:
                 return False
-            calls_helper = any(
-                isinstance(node, ast.Call)
-                and isinstance(node.func, ast.Attribute)
-                and isinstance(node.func.value, ast.Name)
-                and node.func.value.id == "self"
-                and node.func.attr == "_listen_active_dialogue"
+            action_names = {
+                target.id
                 for node in ast.walk(run)
-            )
+                if isinstance(node, (ast.Assign, ast.AnnAssign))
+                and isinstance(node.value, ast.Call)
+                and isinstance(node.value.func, ast.Attribute)
+                and isinstance(node.value.func.value, ast.Name)
+                and node.value.func.value.id == "self"
+                and node.value.func.attr == "_listen_active_dialogue"
+                for target in (
+                    node.targets if isinstance(node, ast.Assign) else [node.target]
+                )
+                if isinstance(target, ast.Name)
+            }
             helper_owns_dialogue_guard = any(
                 isinstance(node, ast.If)
                 and "_next_mode" in {
@@ -1587,7 +1593,43 @@ class AssistantEngine:
                 }
                 for node in ast.walk(helper)
             )
-            return calls_helper and helper_owns_dialogue_guard
+            idle_reaches_wake_loop = any(
+                isinstance(node, ast.Return)
+                and isinstance(node.value, ast.Constant)
+                and node.value.value in {None, "sleep"}
+                for node in helper.body
+            )
+            handles_continue = any(
+                isinstance(node, ast.If)
+                and isinstance(node.test, ast.Compare)
+                and isinstance(node.test.left, ast.Name)
+                and node.test.left.id in action_names
+                and any(
+                    isinstance(item, ast.Constant) and item.value == "continue"
+                    for item in node.test.comparators
+                )
+                and any(isinstance(item, ast.Continue) for item in node.body)
+                for node in ast.walk(run)
+            )
+            handles_break = any(
+                isinstance(node, ast.If)
+                and isinstance(node.test, ast.Compare)
+                and isinstance(node.test.left, ast.Name)
+                and node.test.left.id in action_names
+                and any(
+                    isinstance(item, ast.Constant) and item.value == "break"
+                    for item in node.test.comparators
+                )
+                and any(isinstance(item, ast.Break) for item in node.body)
+                for node in ast.walk(run)
+            )
+            return (
+                bool(action_names)
+                and helper_owns_dialogue_guard
+                and idle_reaches_wake_loop
+                and handles_continue
+                and handles_break
+            )
         return False
 
     def prepare_own_code_proposal(

@@ -85,14 +85,16 @@ class WakeWordWorker:
     def _listen_active_dialogue(self):
         if self._next_mode != "sleep":
             return "continue"
-        return "continue"
+        return None
 
     def run(self):
         while True:
             action = self._listen_active_dialogue()
             if action == "break":
                 break
-            continue
+            if action == "continue":
+                continue
+            self.listen_for_wake()
 """.lstrip()
     (tmp_path / "app.py").write_text(source, encoding="utf-8")
     engine = object.__new__(AssistantEngine)
@@ -121,3 +123,31 @@ class WakeWordWorker:
     assert saved_plans[-1]["completion"] == "already_satisfied"
     assert saved_cycles[-1][0] == "completed"
     ast.parse((tmp_path / "app.py").read_text(encoding="utf-8"))
+
+
+def test_broken_active_dialogue_refactor_is_not_already_satisfied(tmp_path) -> None:
+    request = (
+        "Kendi kodunda yalnızca app.py dosyasını değiştir. "
+        "WakeWordWorker.run içindeki aktif diyalog bloğunu tek yardımcı metoda çıkar. "
+        "Davranışı kesinlikle değiştirme."
+    )
+    source = """
+class WakeWordWorker:
+    def _listen_active_dialogue(self):
+        if self._next_mode != "sleep":
+            return "continue"
+        return "continue"
+
+    def run(self):
+        while True:
+            action = self._listen_active_dialogue()
+            if action == "break":
+                break
+            continue
+            self.listen_for_wake()
+""".lstrip()
+    (tmp_path / "app.py").write_text(source, encoding="utf-8")
+    engine = object.__new__(AssistantEngine)
+    engine.own_project_root = lambda: tmp_path
+
+    assert not engine._active_dialogue_refactor_already_present(request)

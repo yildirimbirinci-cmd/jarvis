@@ -404,7 +404,7 @@ class WakeWordWorker(QThread):
             self._renew_owner_session()
             self.command_recognized.emit(command)
             return "continue"
-        return "continue"
+        return None
 
     def run(self) -> None:
         self.status.emit(
@@ -420,7 +420,8 @@ class WakeWordWorker(QThread):
                 extract_action = self._listen_active_dialogue()
                 if extract_action == "break":
                     break
-                continue
+                if extract_action == "continue":
+                    continue
 
                 self._cycle += 1
                 cycle = self._cycle

@@ -121,10 +121,15 @@ class ExtractMethodTests(unittest.TestCase):
 
         content = plan.proposal.files[0].new_content
         self.assertIn('return "break"', content)
-        self.assertGreaterEqual(content.count('return "continue"'), 2)
+        self.assertEqual(content.count('return "continue"'), 2)
+        self.assertIn("return None", content)
         self.assertIn("self.msleep(250)", content)
         self.assertIn('extract_action = self._handle_ready()', content)
         self.assertIn('if extract_action == "break":\n                break', content)
+        self.assertIn(
+            'if extract_action == "continue":\n                continue', content
+        )
+        self.assertIn("            self.idle()", content)
         compile(content, "sample.py", "exec")
 
     def test_loop_control_remains_opt_in(self) -> None:
