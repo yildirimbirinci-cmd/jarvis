@@ -783,6 +783,18 @@ class AssistantEngine:
             stage=stage,
             targets=selected,
         )
+        # Structural extraction repairs need the proven AST source range on
+        # the very first semantic attempt.  Previously this guidance was only
+        # appended after a JSON/schema failure inside this method.  A model
+        # response could therefore be syntactically valid but semantically
+        # incomplete, return to the outer semantic loop, and start every fresh
+        # repair request without ever seeing the complete block it must keep.
+        structural_guidance = build_structural_method_block_guidance(
+            project_root=self.own_project_root(),
+            instruction=instruction,
+        )
+        if structural_guidance:
+            base_prompt += "\n\n" + structural_guidance
         source_rows: list[str] = []
         remaining = 24_000
         try:
@@ -821,12 +833,6 @@ class AssistantEngine:
                     + "\nAynı cevabı tekrar etme; bu doğrulama hatasını gider."
                 )
 
-                structural_guidance = build_structural_method_block_guidance(
-                    project_root=self.own_project_root(),
-                    instruction=instruction,
-                )
-                if structural_guidance:
-                    prompt += "\n\n" + structural_guidance
             if previous_response:
                 prompt += (
                     "\n\nÖNCEKİ REDDEDİLEN ONARIM YANITI:\n"
@@ -1319,6 +1325,19 @@ class AssistantEngine:
                 )
                 canonical = json.dumps(payload, ensure_ascii=False)
                 proposal = self.editor.create_proposal(canonical)
+                # Do not label a behavior-preserving structural extraction as
+                # accepted when applying its operations already proves that
+                # observable behavior was dropped. Feeding the semantic report
+                # into this bounded loop gives the next proposal attempt both
+                # the exact loss inventory and the complete AST block guidance.
+                if build_structural_method_block_guidance(
+                    project_root=self.own_project_root(),
+                    instruction=prompt,
+                ):
+                    semantic = validate_semantic_replacement(prompt, proposal.files)
+                    if not semantic.valid:
+                        self.editor.reject()
+                        raise WorkspaceError(semantic.report())
             except WorkspaceError as exc:
                 previous_error = str(exc)
                 operation_detail = rejected_operation_detail(payload, exc)

@@ -149,6 +149,54 @@ def test_same_invalid_patch_is_not_repeated_forever(tmp_path, monkeypatch) -> No
     assert engine.editor.pending is None
 
 
+def test_structural_semantic_loss_retries_inside_proposal_loop(
+    tmp_path, monkeypatch
+) -> None:
+    engine = _engine(tmp_path)
+    drafts = iter((
+        json.dumps({
+            "summary": "first",
+            "files": [{"path": "core/example.py", "operations": [{
+                "op": "replace", "old": "VALUE = 1", "new": "VALUE = 2"
+            }]}],
+        }),
+        json.dumps({
+            "summary": "second",
+            "files": [{"path": "core/example.py", "operations": [{
+                "op": "replace", "old": "VALUE = 1", "new": "VALUE = 3"
+            }]}],
+        }),
+    ))
+    prompts: list[str] = []
+    engine._request_code_model_json = (
+        lambda prompt, **_kwargs: prompts.append(prompt) or next(drafts)
+    )
+    validations = iter((
+        SimpleNamespace(
+            valid=False,
+            report=lambda: "Semantik koruma reddi: call:self.msleep",
+        ),
+        SimpleNamespace(valid=True, report=lambda: "ok"),
+    ))
+    monkeypatch.setitem(
+        AssistantEngine._generate_validated_own_code_proposal.__globals__,
+        "build_structural_method_block_guidance",
+        lambda **_kwargs: "PROVEN STRUCTURAL BLOCK",
+    )
+    monkeypatch.setitem(
+        AssistantEngine._generate_validated_own_code_proposal.__globals__,
+        "validate_semantic_replacement",
+        lambda *_args: next(validations),
+    )
+
+    proposal = engine._generate_validated_own_code_proposal("structural request")
+
+    assert proposal.files[0].new_content.startswith("VALUE = 3")
+    assert len(prompts) == 2
+    assert "call:self.msleep" in prompts[1]
+    assert "PROVEN STRUCTURAL BLOCK" in prompts[1]
+
+
 def test_all_raw_ollama_attempts_are_preserved_for_diagnosis(
     tmp_path, monkeypatch
 ) -> None:

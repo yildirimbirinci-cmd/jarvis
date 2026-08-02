@@ -219,6 +219,81 @@ def test_semantic_repair_retries_semantically_invalid_candidate(monkeypatch) -> 
     assert history_rows[-1][1]["deneme"] == 2
 
 
+def test_first_targeted_semantic_request_includes_structural_source_guidance(
+    monkeypatch,
+) -> None:
+    engine = object.__new__(AssistantEngine)
+    engine.config = SimpleNamespace(
+        model="local-model",
+        code_model="",
+        ollama_url="http://127.0.0.1:11434",
+    )
+    engine._own_code_repair_policy = RepairRetryPolicy(max_attempts=1)
+    engine.own_code_history = SimpleNamespace(record=lambda *_args, **_kwargs: None)
+    engine.editor = SimpleNamespace(
+        create_proposal=lambda raw: SimpleNamespace(
+            summary="repair",
+            files=(SimpleNamespace(path="app.py", new_content="fixed"),),
+        )
+    )
+    engine.own_project_root = lambda: "/project"
+    engine._model_role_resolver = lambda: SimpleNamespace(
+        code=SimpleNamespace(
+            model="local-model", context_window=32768, max_output_tokens=8192
+        )
+    )
+    monkeypatch.setitem(
+        AssistantEngine._request_targeted_validation_repair.__globals__,
+        "build_structural_method_block_guidance",
+        lambda **_kwargs: "PROVEN COMPLETE AST BLOCK",
+    )
+    requested_prompts: list[str] = []
+
+    class _Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return json.dumps({
+                "message": {
+                    "content": json.dumps({
+                        "summary": "repair",
+                        "files": [{
+                            "path": "app.py",
+                            "reason": "fix",
+                            "content": "fixed",
+                        }],
+                    })
+                }
+            }).encode("utf-8")
+
+    def fake_urlopen(request, **_kwargs):
+        body = json.loads(request.data.decode("utf-8"))
+        requested_prompts.append(body["messages"][1]["content"])
+        return _Response()
+
+    monkeypatch.setattr(
+        "artmach_assistant.core.assistant.urllib.request.urlopen",
+        fake_urlopen,
+    )
+    rejected = Proposal(files=(Change("app.py", new_content="broken"),))
+
+    repaired = engine._request_targeted_validation_repair(
+        "app.py içindeki WakeWordWorker.run aktif diyalog bloğunu "
+        "davranışı değiştirmeden yardımcı metoda çıkar",
+        rejected,
+        "app.py: gözlenebilir işlem kaybı (call:self.msleep)",
+        stage="semantik koruma",
+    )
+
+    assert repaired is not None
+    assert len(requested_prompts) == 1
+    assert "PROVEN COMPLETE AST BLOCK" in requested_prompts[0]
+
+
 
 def test_assistant_repair_request_merges_only_validator_target(monkeypatch) -> None:
     engine = object.__new__(AssistantEngine)
