@@ -2091,6 +2091,15 @@ $s.Dispose()
 
     def _prepare_tts_text(self, text: str) -> str:
         cleaned = re.sub(r"\s+", " ", str(text)).strip()
+        # Runtime maintenance findings belong in the visible transcript, not
+        # in the conversational reply.  Speaking the full RUN diagnostic made
+        # ordinary answers substantially longer and delayed the next turn.
+        cleaned = re.split(
+            r"\s+Bakım uyarısı\s*\[RUN-[^\]]+\]\s*:",
+            cleaned,
+            maxsplit=1,
+            flags=re.IGNORECASE,
+        )[0].rstrip()
         # Learned pronunciations have priority over the built-in technical
         # dictionary. Protect their source terms with placeholders first.
         learned_placeholders: dict[str, str] = {}
@@ -2143,25 +2152,34 @@ $s.Dispose()
         cleaned = re.sub(r"\s*[-*]\s+(?=\S)", ". ", cleaned)
         cleaned = re.sub(r"([.!?])(?=\S)", r"\1 ", cleaned)
         cleaned = re.sub(r"([.!?])\s*", r"\1  ", cleaned)
-        return self._limit_spoken_text(cleaned)
+        return self._limit_spoken_text(cleaned).strip()
 
     @staticmethod
-    def _sentence_chunks(text: str) -> list[str]:
+    def _sentence_chunks(text: str, target_chars: int = 72) -> list[str]:
         parts = [part.strip() for part in re.split(r"(?<=[.!?])\s+|\n+", text) if part.strip()]
         chunks: list[str] = []
         for part in parts:
-            if len(part) <= 180:
+            if len(part) <= target_chars:
                 chunks.append(part)
                 continue
             subparts = [x.strip() for x in re.split(r"(?<=[,;:])\s+", part) if x.strip()]
             current = ""
             for subpart in subparts:
                 candidate = f"{current} {subpart}".strip()
-                if current and len(candidate) > 180:
+                if current and len(candidate) > target_chars:
                     chunks.append(current)
                     current = subpart
                 else:
                     current = candidate
+                # A clause without punctuation can still be much longer than
+                # the latency target.  Split it at a word boundary so Piper
+                # can produce the first audible block promptly.
+                while len(current) > target_chars:
+                    boundary = current.rfind(" ", 0, target_chars + 1)
+                    if boundary <= 0:
+                        boundary = target_chars
+                    chunks.append(current[:boundary].rstrip())
+                    current = current[boundary:].lstrip()
             if current:
                 chunks.append(current)
         return chunks or [text]
