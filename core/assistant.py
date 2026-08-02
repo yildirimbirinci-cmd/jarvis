@@ -1445,6 +1445,28 @@ class AssistantEngine:
             f"{detail}"
         )
 
+    @classmethod
+    def _is_deterministic_active_dialogue_refactor(cls, instruction: str) -> bool:
+        """Recognise only the proven behavior-preserving dialogue extraction."""
+
+        normalized = cls.command_key(instruction)
+        raw_folded = str(instruction or "").casefold()
+        preserves_behavior = any(
+            phrase in normalized
+            for phrase in (
+                "davranisi degistirmeden",
+                "davranisi degistirme",
+                "davranisi kesinlikle degistirme",
+            )
+        )
+        return (
+            "app.py" in raw_folded
+            and "wakewordworker.run" in raw_folded
+            and "aktif diyalog" in normalized
+            and preserves_behavior
+            and any(token in normalized for token in ("cikar", "ayir", "refaktor"))
+        )
+
     def _prepare_deterministic_own_code_refactor(
         self,
         instruction: str,
@@ -1458,16 +1480,7 @@ class AssistantEngine:
         the complete statement range.
         """
 
-        normalized = self.command_key(instruction)
-        raw_folded = str(instruction or "").casefold()
-        required = (
-            "app.py" in raw_folded
-            and "wakewordworker.run" in raw_folded
-            and "aktif diyalog" in normalized
-            and "davranisi degistirmeden" in normalized
-            and any(token in normalized for token in ("cikar", "ayir", "refaktor"))
-        )
-        if not required:
+        if not self._is_deterministic_active_dialogue_refactor(instruction):
             return None
 
         root = Path(self.own_project_root()).resolve(strict=False)

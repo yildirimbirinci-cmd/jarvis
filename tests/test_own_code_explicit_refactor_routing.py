@@ -46,3 +46,23 @@ def test_explicit_path_without_symbol_does_not_claim_unrelated_request() -> None
     )
 
     assert result is None
+
+
+def test_exact_runtime_wording_uses_deterministic_refactor_route() -> None:
+    request = (
+        "Kendi kodunda yalnızca app.py dosyasını değiştir. "
+        "WakeWordWorker.run içindeki aktif diyalog sırasında komut dinleyen "
+        "bloğu tek bir yardımcı metoda çıkar. Davranışı kesinlikle değiştirme; "
+        "mevcut atamalar, self.msleep çağrıları, break ve continue akışları aynı kalsın."
+    )
+
+    assert AssistantEngine._is_deterministic_active_dialogue_refactor(request)
+
+
+def test_deterministic_refactor_route_requires_behavior_preservation() -> None:
+    request = (
+        "app.py içindeki WakeWordWorker.run aktif diyalog bloğunu "
+        "tek yardımcı metoda çıkar."
+    )
+
+    assert not AssistantEngine._is_deterministic_active_dialogue_refactor(request)
