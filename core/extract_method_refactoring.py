@@ -26,6 +26,7 @@ class ExtractMethodRequest:
     start_line: int
     end_line: int
     new_name: str
+    preserve_loop_control: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,7 +101,10 @@ class ExtractMethodRefactoring:
             tree, request.start_line, request.end_line
         )
         selected = self._select_statements(function, request.start_line, request.end_line)
-        self._validate_selected_nodes(selected)
+        self._validate_selected_nodes(
+            selected,
+            preserve_loop_control=bool(request.preserve_loop_control),
+        )
         if any(
             isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
             and node.name == name
@@ -121,6 +125,7 @@ class ExtractMethodRefactoring:
             selected=selected,
             name=name,
             analysis=analysis,
+            preserve_loop_control=bool(request.preserve_loop_control),
         )
         raw = json.dumps(
             {
@@ -145,6 +150,8 @@ class ExtractMethodRefactoring:
         for parent in ast.walk(tree):
             owner = parent if isinstance(parent, ast.ClassDef) else None
             body = getattr(parent, "body", ())
+            if not isinstance(body, (list, tuple)):
+                continue
             for node in body:
                 if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                     if node.lineno <= start and getattr(node, "end_lineno", node.lineno) >= end:
@@ -157,27 +164,88 @@ class ExtractMethodRefactoring:
 
     @staticmethod
     def _select_statements(function: ast.AST, start: int, end: int) -> list[ast.stmt]:
-        body = list(getattr(function, "body", ()))
-        selected = [
-            stmt for stmt in body
-            if stmt.lineno >= start and getattr(stmt, "end_lineno", stmt.lineno) <= end
-        ]
-        if not selected or selected[0].lineno != start or getattr(selected[-1], "end_lineno", 0) != end:
-            raise WorkspaceError("Satır aralığı tam ve ardışık üst seviye ifadeler seçmeli.")
-        first = body.index(selected[0])
-        if body[first:first + len(selected)] != selected:
-            raise WorkspaceError("Seçili ifadeler ardışık olmalı.")
-        return selected
+        bodies: list[list[ast.stmt]] = []
+
+        def collect(node: ast.AST) -> None:
+            if node is not function and isinstance(
+                node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)
+            ):
+                return
+            for _field, value in ast.iter_fields(node):
+                if isinstance(value, list) and (
+                    not value or all(isinstance(item, ast.stmt) for item in value)
+                ):
+                    statement_body = [item for item in value if isinstance(item, ast.stmt)]
+                    if statement_body:
+                        bodies.append(statement_body)
+                        for item in statement_body:
+                            collect(item)
+                elif isinstance(value, ast.AST):
+                    collect(value)
+
+        collect(function)
+        matches: list[list[ast.stmt]] = []
+        for body in bodies:
+            selected = [
+                stmt for stmt in body
+                if stmt.lineno >= start and getattr(stmt, "end_lineno", stmt.lineno) <= end
+            ]
+            if (
+                selected
+                and selected[0].lineno == start
+                and getattr(selected[-1], "end_lineno", 0) == end
+            ):
+                first = body.index(selected[0])
+                if body[first:first + len(selected)] == selected:
+                    matches.append(selected)
+        if len(matches) != 1:
+            raise WorkspaceError(
+                "Satır aralığı aynı blokta tam ve ardışık ifadeler seçmeli."
+            )
+        return matches[0]
 
     @staticmethod
-    def _validate_selected_nodes(selected: list[ast.stmt]) -> None:
-        forbidden = (ast.Return, ast.Yield, ast.YieldFrom, ast.Break, ast.Continue, ast.Global, ast.Nonlocal)
+    def _validate_selected_nodes(
+        selected: list[ast.stmt],
+        *,
+        preserve_loop_control: bool = False,
+    ) -> None:
+        forbidden = (ast.Return, ast.Yield, ast.YieldFrom, ast.Global, ast.Nonlocal)
         for stmt in selected:
             for node in ast.walk(stmt):
                 if isinstance(node, forbidden):
                     raise WorkspaceError(
                         f"Seçim {type(node).__name__} içerdiği için güvenle çıkarılamıyor."
                     )
+                if isinstance(node, (ast.Break, ast.Continue)) and not preserve_loop_control:
+                    raise WorkspaceError(
+                        f"Seçim {type(node).__name__} içerdiği için güvenle çıkarılamıyor."
+                    )
+        if preserve_loop_control:
+            ExtractMethodRefactoring._validate_external_loop_control(selected)
+
+    @staticmethod
+    def _validate_external_loop_control(selected: list[ast.stmt]) -> None:
+        """Allow only break/continue statements owned by the caller's loop.
+
+        A break or continue nested in a loop contained by the selection already
+        belongs to that nested loop and must not be converted into a helper
+        outcome.  Refuse that ambiguous shape instead of changing its meaning.
+        """
+
+        def walk(node: ast.AST, nested_loop: int = 0) -> None:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
+                return
+            if isinstance(node, (ast.Break, ast.Continue)) and nested_loop:
+                raise WorkspaceError(
+                    "Seçim iç içe döngü kontrolü içerdiği için güvenle çıkarılamıyor."
+                )
+            child_depth = nested_loop + int(isinstance(node, (ast.For, ast.AsyncFor, ast.While)))
+            for child in ast.iter_child_nodes(node):
+                walk(child, child_depth)
+
+        for statement in selected:
+            walk(statement)
 
     @staticmethod
     def _facts(nodes: list[ast.AST]) -> _NameFacts:
@@ -239,14 +307,35 @@ class ExtractMethodRefactoring:
         selected: list[ast.stmt],
         name: str,
         analysis: ExtractMethodAnalysis,
+        preserve_loop_control: bool = False,
     ) -> str:
         lines = source.splitlines(keepends=True)
         first = selected[0].lineno - 1
         last = getattr(selected[-1], "end_lineno", selected[-1].lineno)
         original_indent = lines[first][: len(lines[first]) - len(lines[first].lstrip())]
-        definition_indent = original_indent[:-4] if len(original_indent) >= 4 else ""
+        definition_indent = " " * int(getattr(function, "col_offset", 0))
         body_lines = lines[first:last]
         dedented = [line[len(original_indent):] if line.strip() else line for line in body_lines]
+        has_loop_control = preserve_loop_control and any(
+            isinstance(node, (ast.Break, ast.Continue))
+            for statement in selected
+            for node in ast.walk(statement)
+        )
+        if has_loop_control:
+            selected_start = selected[0].lineno
+            replacements: list[tuple[int, int, str]] = []
+            for statement in selected:
+                for node in ast.walk(statement):
+                    if isinstance(node, ast.Break):
+                        replacements.append((node.lineno - selected_start, node.col_offset, 'return "break"'))
+                    elif isinstance(node, ast.Continue):
+                        replacements.append((node.lineno - selected_start, node.col_offset, 'return "continue"'))
+            for line_index, column, replacement_text in sorted(replacements, reverse=True):
+                relative_column = max(0, column - len(original_indent))
+                line = dedented[line_index]
+                stripped_end = len(line.rstrip("\r\n"))
+                newline = line[stripped_end:]
+                dedented[line_index] = line[:relative_column] + replacement_text + newline
 
         receiver = ""
         call_target = name
@@ -264,11 +353,20 @@ class ExtractMethodRefactoring:
         if analysis.outputs:
             returned = ", ".join(analysis.outputs)
             new_def.append(f"{definition_indent}    return {returned}\n")
+        elif has_loop_control:
+            new_def.append(f'{definition_indent}    return "continue"\n')
         new_def.append("\n")
 
         args = ", ".join(analysis.inputs)
         call = f"{await_prefix}{call_target}({args})"
-        if analysis.outputs:
+        if has_loop_control:
+            replacement = [
+                f"{original_indent}extract_action = {call}\n",
+                f'{original_indent}if extract_action == "break":\n',
+                f"{original_indent}    break\n",
+                f"{original_indent}continue\n",
+            ]
+        elif analysis.outputs:
             lhs = ", ".join(analysis.outputs)
             replacement = [f"{original_indent}{lhs} = {call}\n"]
         else:

@@ -90,6 +90,56 @@ class ExtractMethodTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "Return"):
             self.service.prepare(ExtractMethodRequest("sample.py", 2, 2, "finish"))
 
+    def test_preserves_outer_loop_break_and_continue_as_helper_result(self) -> None:
+        source = (
+            "class Worker:\n"
+            "    def run(self):\n"
+            "        while True:\n"
+            "            if self.ready:\n"
+            "                try:\n"
+            "                    self.work()\n"
+            "                except InterruptedError:\n"
+            "                    break\n"
+            "                except Exception:\n"
+            "                    self.msleep(250)\n"
+            "                    continue\n"
+            "                self.done.emit()\n"
+            "                continue\n"
+            "            self.idle()\n"
+        )
+        (self.root / "sample.py").write_text(source, encoding="utf-8")
+
+        plan = self.service.prepare(
+            ExtractMethodRequest(
+                "sample.py",
+                4,
+                13,
+                "_handle_ready",
+                preserve_loop_control=True,
+            )
+        )
+
+        content = plan.proposal.files[0].new_content
+        self.assertIn('return "break"', content)
+        self.assertGreaterEqual(content.count('return "continue"'), 2)
+        self.assertIn("self.msleep(250)", content)
+        self.assertIn('extract_action = self._handle_ready()', content)
+        self.assertIn('if extract_action == "break":\n                break', content)
+        compile(content, "sample.py", "exec")
+
+    def test_loop_control_remains_opt_in(self) -> None:
+        source = (
+            "def run():\n"
+            "    while True:\n"
+            "        if ready():\n"
+            "            break\n"
+        )
+        (self.root / "sample.py").write_text(source, encoding="utf-8")
+        with self.assertRaisesRegex(RuntimeError, "Break"):
+            self.service.prepare(
+                ExtractMethodRequest("sample.py", 3, 4, "_handle_ready")
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

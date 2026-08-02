@@ -4,6 +4,7 @@ from enum import Enum
 from contextlib import nullcontext
 
 import hashlib
+import ast
 import json
 import os
 import re
@@ -23,6 +24,11 @@ from artmach_assistant.core.agent_manager import AgentManager
 from artmach_assistant.core.planning_manager import PlanningManager
 from artmach_assistant.core.research_manager import ResearchManager, ResearchResult
 from artmach_assistant.core.edit_manager import EditManager, EditProposal
+from artmach_assistant.core.extract_method_refactoring import (
+    ExtractMethodRefactoring,
+    ExtractMethodRequest,
+)
+from artmach_assistant.core.refactoring_coordinator import RefactoringCoordinator
 from artmach_assistant.core.build_manager import BuildManager, BuildProfile, BuildResult
 from artmach_assistant.core.workspace import WorkspaceError, WorkspaceService
 from artmach_assistant.core.architecture_service import ArchitectureService
@@ -1438,6 +1444,90 @@ class AssistantEngine:
             f"{detail}"
         )
 
+    def _prepare_deterministic_own_code_refactor(
+        self,
+        instruction: str,
+    ) -> EditProposal | None:
+        """Use the refactoring engine for the proven active-dialogue extraction.
+
+        The code model still selects non-mechanical changes. This route is
+        intentionally narrow: it activates only when the user explicitly asks
+        to extract WakeWordWorker.run's active-dialogue block without changing
+        behavior. The source AST, rather than model-generated code, determines
+        the complete statement range.
+        """
+
+        normalized = self.command_key(instruction)
+        raw_folded = str(instruction or "").casefold()
+        required = (
+            "app.py" in raw_folded
+            and "wakewordworker.run" in raw_folded
+            and "aktif diyalog" in normalized
+            and "davranisi degistirmeden" in normalized
+            and any(token in normalized for token in ("cikar", "ayir", "refaktor"))
+        )
+        if not required:
+            return None
+
+        root = Path(self.own_project_root()).resolve(strict=False)
+        source_path = root / "app.py"
+        try:
+            source = source_path.read_text(encoding="utf-8")
+            tree = ast.parse(source, filename="app.py")
+        except (OSError, UnicodeError, SyntaxError) as exc:
+            raise WorkspaceError(
+                f"Deterministik refaktör için app.py okunamadı: {exc}"
+            ) from exc
+
+        matches: list[ast.If] = []
+        for owner in tree.body:
+            if not isinstance(owner, ast.ClassDef) or owner.name != "WakeWordWorker":
+                continue
+            for method in owner.body:
+                if not isinstance(method, (ast.FunctionDef, ast.AsyncFunctionDef)) or method.name != "run":
+                    continue
+                for statement in method.body:
+                    if not isinstance(statement, ast.Try):
+                        continue
+                    for row in ast.walk(statement):
+                        if not isinstance(row, ast.If):
+                            continue
+                        attrs = {
+                            node.attr for node in ast.walk(row.test)
+                            if isinstance(node, ast.Attribute)
+                        }
+                        constants = {
+                            node.value for node in ast.walk(row.test)
+                            if isinstance(node, ast.Constant)
+                        }
+                        if "_next_mode" in attrs and "sleep" in constants:
+                            matches.append(row)
+        if len(matches) != 1:
+            raise WorkspaceError(
+                "WakeWordWorker.run aktif diyalog bloğu kaynak AST içinde benzersiz değil."
+            )
+
+        target = matches[0]
+        coordinator = RefactoringCoordinator(self.editor)
+        service = ExtractMethodRefactoring(coordinator)
+        plan = service.prepare(
+            ExtractMethodRequest(
+                path="app.py",
+                start_line=int(target.lineno),
+                end_line=int(getattr(target, "end_lineno", target.lineno)),
+                new_name="_listen_active_dialogue",
+                preserve_loop_control=True,
+            )
+        )
+        self.own_code_history.record(
+            "deterministik extract method taslağı hazırlandı",
+            dosya="app.py",
+            sembol="WakeWordWorker.run",
+            baslangic=int(target.lineno),
+            bitis=int(getattr(target, "end_lineno", target.lineno)),
+        )
+        return plan.proposal
+
     def prepare_own_code_proposal(
         self,
         raw_instruction: str,
@@ -1643,14 +1733,16 @@ class AssistantEngine:
                 "tests/ altındaki dosyaları, test_*.py dosyalarını ve test beklentilerini değiştirme. "
                 "Yalnızca hatanın gerçek nedenini oluşturan üretim kaynak kodunu düzelt."
             )
-        try:
-            proposal = self._generate_validated_own_code_proposal(
-                prompt, max_attempts=3
-            )
-        except (urllib.error.URLError, TimeoutError, ValueError, json.JSONDecodeError) as exc:
-            return f"Yerel kod öneri motoru yanıt veremedi: {exc}"
-        except Exception as exc:
-            return f"Kod değişikliği önerisi güvenli biçimde hazırlanamadı: {exc}"
+        proposal = self._prepare_deterministic_own_code_refactor(raw_instruction)
+        if proposal is None:
+            try:
+                proposal = self._generate_validated_own_code_proposal(
+                    prompt, max_attempts=3
+                )
+            except (urllib.error.URLError, TimeoutError, ValueError, json.JSONDecodeError) as exc:
+                return f"Yerel kod öneri motoru yanıt veremedi: {exc}"
+            except Exception as exc:
+                return f"Kod değişikliği önerisi güvenli biçimde hazırlanamadı: {exc}"
 
         if production_repair:
             forbidden = [
