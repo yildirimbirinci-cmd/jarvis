@@ -429,3 +429,173 @@ def test_retry_identifies_exact_rejected_operation_json_path(tmp_path) -> None:
     assert "files[0].operations[1]" in prompts[1]
     assert '"op": "insert_after"' in prompts[1]
     assert '"anchor": "def run(self) -> None:"' in prompts[1]
+
+
+def test_structural_method_insert_and_block_replace_are_both_required(tmp_path) -> None:
+    engine = _engine(tmp_path)
+    (tmp_path / "app.py").write_text(
+        "class WakeWordWorker:\n"
+        "    def run(self) -> None:\n"
+        "        while True:\n"
+        "            command = self.listen_dialogue()\n"
+        "            self.engine_end_dialogue.emit()\n"
+        "            break\n"
+        "\n"
+        "class MainWindow:\n"
+        "    pass\n",
+        encoding="utf-8",
+    )
+    raw = json.dumps({
+        "summary": "extract dialogue block",
+        "files": [{
+            "path": "app.py",
+            "operations": [
+                {
+                    "op": "insert_class_method",
+                    "class_name": "WakeWordWorker",
+                    "content": (
+                        "def _listen_active_dialogue(self):\n"
+                        "    command = self.listen_dialogue()\n"
+                        "    self.engine_end_dialogue.emit()\n"
+                        "    return command\n"
+                    ),
+                },
+                {
+                    "op": "replace",
+                    "old": (
+                        "            command = self.listen_dialogue()\n"
+                        "            self.engine_end_dialogue.emit()\n"
+                    ),
+                    "new": "            command = self._listen_active_dialogue()\n",
+                },
+            ],
+        }],
+    })
+    engine._request_code_model_json = lambda *_args, **_kwargs: raw
+
+    proposal = engine._generate_validated_own_code_proposal(
+        "app.py içindeki WakeWordWorker.run bloğunu davranışı değiştirmeden yardımcı metoda çıkar"
+    )
+
+    rendered = proposal.files[0].new_content
+    assert "    def _listen_active_dialogue(self):\n" in rendered
+    assert "            command = self._listen_active_dialogue()\n" in rendered
+    assert rendered.index("def _listen_active_dialogue") < rendered.index("class MainWindow")
+
+
+def test_declaration_anchor_and_missing_block_replace_receive_exact_retry(tmp_path) -> None:
+    engine = _engine(tmp_path)
+    (tmp_path / "app.py").write_text(
+        "class WakeWordWorker:\n"
+        "    def run(self) -> None:\n"
+        "        self.listen_dialogue()\n"
+        "\n"
+        "class MainWindow:\n"
+        "    pass\n",
+        encoding="utf-8",
+    )
+    unsafe = json.dumps({
+        "summary": "unsafe helper",
+        "files": [{
+            "path": "app.py",
+            "operations": [{
+                "op": "insert_before",
+                "anchor": "    def run(self) -> None:\n",
+                "content": "    def _listen_active_dialogue(self):\n        pass\n",
+            }],
+        }],
+    })
+    prompts: list[str] = []
+
+    def respond(prompt: str, **_kwargs) -> str:
+        prompts.append(prompt)
+        return unsafe
+
+    engine._request_code_model_json = respond
+    with pytest.raises(WorkspaceError, match="insert_class_method operasyonu zorunlu"):
+        engine._generate_validated_own_code_proposal(
+            "app.py içindeki WakeWordWorker.run bloğunu davranışı değiştirmeden yardımcı metoda çıkar"
+        )
+
+    assert len(prompts) == 3
+    assert "insert_class_method operasyonu zorunlu" in prompts[1]
+    assert "iki gerçek operasyon" not in prompts[1]
+
+
+def test_empty_structural_method_is_rejected_before_edit_manager(tmp_path) -> None:
+    engine = _engine(tmp_path)
+    (tmp_path / "app.py").write_text(
+        "class WakeWordWorker:\n"
+        "    def run(self) -> None:\n"
+        "        pass\n\n"
+        "class MainWindow:\n"
+        "    pass\n",
+        encoding="utf-8",
+    )
+    empty = json.dumps({
+        "summary": "empty helper",
+        "files": [{
+            "path": "app.py",
+            "operations": [{
+                "op": "insert_class_method",
+                "class_name": "WakeWordWorker",
+                "content": "def _listen_active_dialogue(self):\n    pass\n",
+            }],
+        }],
+    })
+    engine._request_code_model_json = lambda *_args, **_kwargs: empty
+
+    with pytest.raises(WorkspaceError, match="gövdeli tek bir metot"):
+        engine._generate_validated_own_code_proposal(
+            "app.py içindeki WakeWordWorker.run bloğunu davranışı değiştirmeden yardımcı metoda çıkar",
+            max_attempts=1,
+        )
+
+
+def test_active_dialogue_raw_replace_retry_contains_full_structural_range(tmp_path) -> None:
+    engine = _engine(tmp_path)
+    (tmp_path / "app.py").write_text(
+        "class WakeWordWorker:\n"
+        "    def run(self) -> None:\n"
+        "        while True:\n"
+        "            if self._next_mode != \"sleep\":\n"
+        "                mode = self._next_mode\n"
+        "                self.status.emit(mode)\n"
+        "                self.command_recognized.emit(mode)\n"
+        "                continue\n\n"
+        "class MainWindow:\n"
+        "    pass\n",
+        encoding="utf-8",
+    )
+    unsafe = json.dumps({
+        "summary": "raw replace",
+        "files": [{"path": "app.py", "operations": [
+            {
+                "op": "insert_class_method",
+                "class_name": "WakeWordWorker",
+                "content": "def _active(self):\n    self.status.emit('active')\n",
+            },
+            {
+                "op": "replace",
+                "old": "                self.status.emit(mode)\n",
+                "new": "                self._active()\n",
+            },
+        ]}],
+    })
+    prompts: list[str] = []
+
+    def respond(prompt: str, **_kwargs) -> str:
+        prompts.append(prompt)
+        return unsafe
+
+    engine._request_code_model_json = respond
+    with pytest.raises(WorkspaceError):
+        engine._generate_validated_own_code_proposal(
+            "app.py içindeki WakeWordWorker.run aktif diyalog bloğunu davranışı değiştirmeden yardımcı metoda çıkar",
+            max_attempts=2,
+        )
+
+    assert len(prompts) == 2
+    assert "YAPISAL CIKARMA ICIN TAM GERCEK KAYNAK ARALIGI" in prompts[1]
+    assert "self.command_recognized.emit(mode)" in prompts[1]
+    assert "replace_method_block" in prompts[1]

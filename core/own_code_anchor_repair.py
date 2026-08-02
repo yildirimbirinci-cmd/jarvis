@@ -3,7 +3,10 @@ import ast
 import copy
 import difflib
 import re
+import textwrap
 from typing import Any
+
+from artmach_assistant.core.workspace import WorkspaceError
 
 
 _SYMBOL_PATTERN = re.compile(
@@ -70,6 +73,452 @@ def _symbol_source(
             return "".join(lines[start:end])
 
     return ""
+
+
+def normalize_structural_class_method_insertions(
+    payload: dict[str, Any],
+    *,
+    project_root: Path,
+    instruction: str,
+) -> dict[str, Any]:
+    """Convert AST-scoped class-method additions into exact text operations.
+
+    A model must not guess a repeated ``def run`` anchor to add a sibling
+    method.  ``insert_class_method`` names the owning class instead; this
+    normalizer proves that class in the current file, validates a complete
+    method body, fixes its class indentation, and chooses an exact structural
+    boundary outside the target method.
+    """
+    repaired = copy.deepcopy(payload)
+    files = repaired.get("files")
+    if not isinstance(files, list):
+        return repaired
+
+    root = Path(project_root).resolve(strict=False)
+    requested = _requested_symbol(instruction)
+    for file_row in files:
+        if not isinstance(file_row, dict):
+            continue
+        operations = file_row.get("operations")
+        if not isinstance(operations, list):
+            continue
+        raw_path = str(file_row.get("path", "")).strip()
+        candidate = (root / raw_path).resolve(strict=False)
+        try:
+            candidate.relative_to(root)
+            source = candidate.read_text(encoding="utf-8")
+            tree = ast.parse(source, filename=raw_path)
+        except (ValueError, OSError, UnicodeError, SyntaxError):
+            continue
+        lines = source.splitlines(keepends=True)
+
+        for operation_index, operation in enumerate(operations, start=1):
+            if not isinstance(operation, dict):
+                continue
+            kind = str(operation.get("op", "")).strip().casefold()
+            if kind != "insert_class_method":
+                continue
+            class_name = str(operation.get("class_name", "")).strip()
+            content = operation.get("content")
+            if requested and class_name != requested[0]:
+                raise WorkspaceError(
+                    f"Yapısal metot hedef sınıfı onaylı sembolle eşleşmiyor: "
+                    f"{raw_path} işlem {operation_index}; beklenen={requested[0]}"
+                )
+            owners = [
+                node for node in tree.body
+                if isinstance(node, ast.ClassDef) and node.name == class_name
+            ]
+            if len(owners) != 1:
+                raise WorkspaceError(
+                    f"Yapısal metot hedef sınıfı tam olarak bir kez bulunmalı: "
+                    f"{raw_path} işlem {operation_index}; bulunan={len(owners)}"
+                )
+            if not isinstance(content, str) or not content.strip():
+                raise WorkspaceError(
+                    f"insert_class_method için eksiksiz content gerekli: "
+                    f"{raw_path} işlem {operation_index}"
+                )
+
+            dedented = textwrap.dedent(content).strip("\r\n") + "\n"
+            try:
+                parsed = ast.parse(dedented)
+            except SyntaxError as exc:
+                raise WorkspaceError(
+                    f"Yardımcı metot eksik veya sözdizimi geçersiz: "
+                    f"{raw_path} işlem {operation_index}; {exc.msg}"
+                ) from exc
+            if (
+                len(parsed.body) != 1
+                or not isinstance(parsed.body[0], (ast.FunctionDef, ast.AsyncFunctionDef))
+                or not parsed.body[0].body
+                or all(isinstance(row, ast.Pass) for row in parsed.body[0].body)
+            ):
+                raise WorkspaceError(
+                    f"Yardımcı metot content alanı gövdeli tek bir metot olmalı: "
+                    f"{raw_path} işlem {operation_index}"
+                )
+            method_name = parsed.body[0].name
+            owner = owners[0]
+            if any(
+                isinstance(row, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and row.name == method_name
+                for row in owner.body
+            ):
+                raise WorkspaceError(
+                    f"Yardımcı metot sınıfta zaten var: {raw_path} işlem "
+                    f"{operation_index}; {class_name}.{method_name}"
+                )
+
+            owner_index = tree.body.index(owner)
+            if owner_index + 1 >= len(tree.body):
+                raise WorkspaceError(
+                    f"Yapısal metot ekleme için sınıf sonu sınırı bulunamadı: "
+                    f"{raw_path} işlem {operation_index}"
+                )
+            following = tree.body[owner_index + 1]
+            decorator_lines = [
+                int(getattr(row, "lineno", 0))
+                for row in getattr(following, "decorator_list", ())
+                if int(getattr(row, "lineno", 0)) > 0
+            ]
+            anchor_line = min(
+                [int(getattr(following, "lineno", 0)), *decorator_lines]
+            )
+            if not anchor_line or anchor_line > len(lines):
+                raise WorkspaceError(
+                    f"Yapısal metot ekleme sınırı çözülemedi: "
+                    f"{raw_path} işlem {operation_index}"
+                )
+            anchor = lines[anchor_line - 1]
+            if source.count(anchor) != 1:
+                raise WorkspaceError(
+                    f"Yapısal metot sınıf sonu sınırı benzersiz değil: "
+                    f"{raw_path} işlem {operation_index}; bulunan={source.count(anchor)}"
+                )
+            rendered = textwrap.indent(dedented, "    ") + "\n"
+            operation.clear()
+            operation.update({
+                "op": "insert_before",
+                "anchor": anchor,
+                "content": rendered,
+                "_structural_method": method_name,
+            })
+    return repaired
+
+
+def _expression_fingerprint(value: str) -> str:
+    try:
+        parsed = ast.parse(str(value or "").strip(), mode="eval")
+    except SyntaxError:
+        return ""
+    return ast.dump(parsed.body, annotate_fields=True, include_attributes=False)
+
+
+def _normalize_if_test_selector(value: str) -> str:
+    """Accept either an if-test expression or one bare ``if ...:`` header.
+
+    Code models sometimes preserve the source line's ``if`` keyword and colon
+    even though ``block_test`` is documented as an expression.  Stripping them
+    textually would be unsafe for multiline conditions, so parse the header as
+    a real statement and recover its AST test only when it is exactly one
+    body-less ``if`` header after adding a temporary body.
+    """
+    selector = str(value or "").strip()
+    if _expression_fingerprint(selector):
+        return selector
+    try:
+        parsed = ast.parse(selector + "\n    pass\n")
+    except SyntaxError:
+        return selector
+    if len(parsed.body) != 1 or not isinstance(parsed.body[0], ast.If):
+        return selector
+    statement = parsed.body[0]
+    if statement.orelse or len(statement.body) != 1 or not isinstance(statement.body[0], ast.Pass):
+        return selector
+    return ast.unparse(statement.test)
+
+
+def normalize_structural_method_block_replacements(
+    payload: dict[str, Any],
+    *,
+    project_root: Path,
+    instruction: str,
+) -> dict[str, Any]:
+    """Resolve a complete direct method-body statement through Python's AST.
+
+    ``replace_method_block`` avoids copying a large, indentation-sensitive
+    source fragment into JSON.  The model names the approved class/method and
+    the condition of one direct ``if`` statement.  This normalizer proves that
+    selector is unique, replaces the *entire* AST node, and then emits the
+    ordinary exact replace operation consumed by EditManager.
+    """
+    repaired = copy.deepcopy(payload)
+    files = repaired.get("files")
+    if not isinstance(files, list):
+        return repaired
+
+    requested = _requested_symbol(instruction)
+    root = Path(project_root).resolve(strict=False)
+    normalized_instruction = str(instruction or "").casefold()
+    active_dialogue_request = (
+        requested == ("WakeWordWorker", "run")
+        and any(word in normalized_instruction for word in ("aktif diyalog", "active dialogue"))
+    )
+
+    for file_row in files:
+        if not isinstance(file_row, dict):
+            continue
+        operations = file_row.get("operations")
+        if not isinstance(operations, list):
+            continue
+        raw_path = str(file_row.get("path", "")).strip()
+        candidate = (root / raw_path).resolve(strict=False)
+        try:
+            candidate.relative_to(root)
+            source = candidate.read_text(encoding="utf-8")
+            tree = ast.parse(source, filename=raw_path)
+        except (ValueError, OSError, UnicodeError, SyntaxError):
+            continue
+        lines = source.splitlines(keepends=True)
+
+        for operation_index, operation in enumerate(operations, start=1):
+            if not isinstance(operation, dict):
+                continue
+            if str(operation.get("op", "")).strip().casefold() != "replace_method_block":
+                continue
+            class_name = str(operation.get("class_name", "")).strip()
+            method_name = str(operation.get("method_name", "")).strip()
+            block_test = _normalize_if_test_selector(operation.get("block_test", ""))
+            replacement = operation.get("replacement")
+            if requested and (class_name, method_name) != requested:
+                raise WorkspaceError(
+                    "Yapısal blok hedefi onaylı sembolle eşleşmiyor: "
+                    f"{raw_path} işlem {operation_index}; beklenen={requested[0]}.{requested[1]}"
+                )
+            wanted = _expression_fingerprint(block_test)
+            if not wanted:
+                raise WorkspaceError(
+                    f"replace_method_block için geçerli block_test gerekli: "
+                    f"{raw_path} işlem {operation_index}"
+                )
+            methods: list[ast.FunctionDef | ast.AsyncFunctionDef] = []
+            for owner in tree.body:
+                if not isinstance(owner, ast.ClassDef) or owner.name != class_name:
+                    continue
+                methods.extend(
+                    row for row in owner.body
+                    if isinstance(row, (ast.FunctionDef, ast.AsyncFunctionDef))
+                    and row.name == method_name
+                )
+            if len(methods) != 1:
+                raise WorkspaceError(
+                    "Yapısal blok hedef metodu tam olarak bir kez bulunmalı: "
+                    f"{raw_path} işlem {operation_index}; bulunan={len(methods)}"
+                )
+            matches = [
+                row for row in ast.walk(methods[0])
+                if isinstance(row, ast.If)
+                and ast.dump(row.test, annotate_fields=True, include_attributes=False) == wanted
+            ]
+            if len(matches) != 1:
+                raise WorkspaceError(
+                    "Yapısal blok koşulu hedef metot ağacında tam olarak "
+                    f"bir kez bulunmalı: {raw_path} işlem {operation_index}; bulunan={len(matches)}"
+                )
+            if active_dialogue_request:
+                selector_attrs = {row.attr for row in ast.walk(matches[0].test) if isinstance(row, ast.Attribute)}
+                selector_constants = {row.value for row in ast.walk(matches[0].test) if isinstance(row, ast.Constant)}
+                if "_next_mode" not in selector_attrs or "sleep" not in selector_constants:
+                    raise WorkspaceError(
+                        "Aktif diyalog çıkarımı yalnız WakeWordWorker.run içindeki "
+                        "`self._next_mode != \"sleep\"` tam üst düzey bloğunu hedeflemeli; "
+                        f"daha küçük alt blok reddedildi: {raw_path} işlem {operation_index}"
+                    )
+            if not isinstance(replacement, str) or not replacement.strip():
+                raise WorkspaceError(
+                    f"replace_method_block için replacement gerekli: {raw_path} işlem {operation_index}"
+                )
+            dedented_replacement = textwrap.dedent(replacement).strip("\r\n") + "\n"
+            replacement_lines = dedented_replacement.splitlines()
+            replacement_if_tests = []
+            try:
+                partial_tree = ast.parse(dedented_replacement)
+            except SyntaxError:
+                partial_tree = None
+            if partial_tree is not None:
+                replacement_if_tests = [
+                    ast.dump(row.test, annotate_fields=True, include_attributes=False)
+                    for row in ast.walk(partial_tree)
+                    if isinstance(row, ast.If)
+                ]
+            selector_was_copied = wanted in replacement_if_tests
+            if (
+                selector_was_copied
+                or len(replacement_lines) > 12
+                or dedented_replacement.lstrip().startswith((
+                    "if self._next_mode", "if (self._next_mode",
+                ))
+            ):
+                raise WorkspaceError(
+                    "replace_method_block replacement alanına çıkarılan eski bloğu "
+                    "yeniden kopyalama. Bu alan en fazla 12 satırlık yalnız "
+                    "`self.<yardımcı_metot>(...)` çağrısını ve gerekiyorsa run "
+                    "içindeki break/continue kararını içermeli; seçilen AST bloğu "
+                    "Jarvis tarafından otomatik kaldırılır. Tam davranış yardımcı "
+                    f"metodun content alanına taşınmalı: {raw_path} işlem {operation_index}"
+                )
+            try:
+                replacement_tree = ast.parse(dedented_replacement)
+            except SyntaxError as exc:
+                raise WorkspaceError(
+                    f"Yapısal blok replacement sözdizimi geçersiz: {raw_path} "
+                    f"işlem {operation_index}; {exc.msg}"
+                ) from exc
+            self_calls = [
+                node for node in ast.walk(replacement_tree)
+                if isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "self"
+            ]
+            if not self_calls:
+                raise WorkspaceError(
+                    "Çıkarılan blok replacement alanında `self.<yardımcı_metot>(...)` "
+                    f"çağrısı zorunlu: {raw_path} işlem {operation_index}"
+                )
+            target = matches[0]
+            start = int(target.lineno) - 1
+            end = int(getattr(target, "end_lineno", target.lineno))
+            old = "".join(lines[start:end])
+            indent = re.match(r"[ \t]*", lines[start]).group(0)
+            new = textwrap.indent(dedented_replacement, indent)
+            operation.clear()
+            operation.update({
+                "op": "replace",
+                "old": old,
+                "new": new,
+                "_structural_block": f"{class_name}.{method_name}:{block_test}",
+            })
+    return repaired
+
+
+def build_structural_method_block_guidance(
+    *,
+    project_root: Path,
+    instruction: str,
+) -> str:
+    """Return the complete proven extraction range for a retry prompt."""
+    requested = _requested_symbol(instruction)
+    normalized = str(instruction or "").casefold()
+    if requested != ("WakeWordWorker", "run") or not any(
+        word in normalized for word in ("aktif diyalog", "active dialogue")
+    ):
+        return ""
+    candidate = (Path(project_root).resolve(strict=False) / "app.py").resolve(strict=False)
+    try:
+        candidate.relative_to(Path(project_root).resolve(strict=False))
+        source = candidate.read_text(encoding="utf-8")
+        tree = ast.parse(source, filename="app.py")
+    except (ValueError, OSError, UnicodeError, SyntaxError):
+        return ""
+    lines = source.splitlines(keepends=True)
+    matches: list[ast.If] = []
+    for owner in tree.body:
+        if not isinstance(owner, ast.ClassDef) or owner.name != requested[0]:
+            continue
+        for method in owner.body:
+            if not isinstance(method, (ast.FunctionDef, ast.AsyncFunctionDef)) or method.name != requested[1]:
+                continue
+            for row in ast.walk(method):
+                if not isinstance(row, ast.If):
+                    continue
+                attrs = {node.attr for node in ast.walk(row.test) if isinstance(node, ast.Attribute)}
+                constants = {node.value for node in ast.walk(row.test) if isinstance(node, ast.Constant)}
+                if "_next_mode" in attrs and "sleep" in constants:
+                    matches.append(row)
+    if len(matches) != 1:
+        return ""
+    target = matches[0]
+    complete = "".join(
+        lines[int(target.lineno) - 1:int(getattr(target, "end_lineno", target.lineno))]
+    )
+    return (
+        "YAPISAL CIKARMA ICIN TAM GERCEK KAYNAK ARALIGI "
+        "(ilk satirdan son satira kadar tek AST blogu):\n"
+        + complete
+        + "\nBu metni ham replace old alanina kopyalama. "
+        "replace_method_block kullan: class_name=WakeWordWorker, method_name=run, "
+        "block_test=self._next_mode != \"sleep\". Secilen 75 satirlik eski blok "
+        "AST'den otomatik kaldirilir; replacement alanina bu blogu yeniden yazma. "
+        "replacement yalniz self.<yardimci_metot>(...) cagrisini ve gerekiyorsa "
+        "run icindeki break/continue kararini iceren en fazla 12 satir olmali. "
+        "Tasinan davranisin tamami insert_class_method content alaninda bulunmali."
+    )
+
+
+def validate_behavior_preserving_extraction_payload(
+    payload: dict[str, Any],
+    *,
+    instruction: str,
+) -> None:
+    """Require both halves of a behavior-preserving method extraction."""
+    normalized = str(instruction or "").casefold()
+    if not (
+        ("davranışı değiştirmeden" in normalized or "davranisi degistirmeden" in normalized)
+        and any(word in normalized for word in ("çıkar", "cikar", "ayır", "ayir", "extract"))
+    ):
+        return
+
+    files = payload.get("files")
+    if not isinstance(files, list):
+        return
+    structural: list[tuple[str, int]] = []
+    replacements: list[dict[str, Any]] = []
+    for file_row in files:
+        if not isinstance(file_row, dict):
+            continue
+        for index, operation in enumerate(file_row.get("operations", ()), start=1):
+            if not isinstance(operation, dict):
+                continue
+            method_name = str(operation.get("_structural_method", "")).strip()
+            if method_name:
+                structural.append((method_name, index))
+            if str(operation.get("op", "")).strip().casefold() in {"replace", "replace_exact"}:
+                replacements.append(operation)
+
+    if not structural:
+        raise WorkspaceError(
+            "Davranış-koruyan çıkarma için insert_class_method operasyonu zorunlu; "
+            "ham def bildirimiyle insert_before/insert_after kullanma."
+        )
+    active_dialogue_request = (
+        _requested_symbol(instruction) == ("WakeWordWorker", "run")
+        and any(word in normalized for word in ("aktif diyalog", "active dialogue"))
+    )
+    if active_dialogue_request and not any(
+        str(row.get("_structural_block", "")).startswith("WakeWordWorker.run:")
+        for row in replacements
+    ):
+        raise WorkspaceError(
+            "Aktif diyalog çıkarımında ham replace yasak; tam kaynak aralığı için "
+            "replace_method_block operasyonu zorunlu. block_test olarak "
+            "`self._next_mode != \"sleep\"` kullan."
+        )
+    for method_name, _index in structural:
+        call_pattern = re.compile(rf"\bself\.{re.escape(method_name)}\s*\(")
+        if not any(
+            isinstance(row.get("old"), str)
+            and isinstance(row.get("new"), str)
+            and row.get("old") != row.get("new")
+            and call_pattern.search(str(row.get("new")))
+            for row in replacements
+        ):
+            raise WorkspaceError(
+                "Davranış-koruyan çıkarma iki gerçek operasyon gerektirir: "
+                f"{method_name} yardımcı metodunu ekle ve run içindeki eski bloğu "
+                "bu metot çağrısıyla ayrı bir replace işleminde değiştir."
+            )
 
 
 def _expand_unique_replace(

@@ -3,12 +3,227 @@ from pathlib import Path
 from artmach_assistant.core.edit_manager import EditManager
 from artmach_assistant.core.own_code_anchor_repair import (
     build_ambiguous_anchor_guidance,
+    build_structural_method_block_guidance,
     merge_duplicate_operation_rows,
+    normalize_structural_method_block_replacements,
     remove_redundant_noop_replaces,
     repair_ambiguous_replace_anchors,
     reorder_insertions_after_exact_edits,
     repair_unique_whitespace_anchors,
+    validate_behavior_preserving_extraction_payload,
 )
+
+
+def _active_dialogue_source() -> str:
+    return (
+        "class WakeWordWorker:\n"
+        "    def run(self):\n"
+        "        if self.debug:\n"
+        "            self.trace()\n"
+        "        while self.running:\n"
+        "            if self._next_mode != \"sleep\":\n"
+        "                mode = self._next_mode\n"
+        "                self._next_mode = \"sleep\"\n"
+        "                command = self.voice.listen()\n"
+        "                self.command_recognized.emit(command)\n"
+        "                continue\n"
+        "            self.wait_for_wake()\n"
+    )
+
+
+def test_structural_method_block_replaces_complete_direct_if(tmp_path: Path) -> None:
+    source = _active_dialogue_source()
+    (tmp_path / "app.py").write_text(source, encoding="utf-8")
+    payload = {"files": [{"path": "app.py", "operations": [{
+        "op": "replace_method_block",
+        "class_name": "WakeWordWorker",
+        "method_name": "run",
+        "block_test": "self._next_mode != 'sleep'",
+        "replacement": "result = self._listen_active_dialogue()\nif result == 'continue':\n    continue",
+    }]}]}
+
+    repaired = normalize_structural_method_block_replacements(
+        payload,
+        project_root=tmp_path,
+        instruction=("app.py içindeki WakeWordWorker.run aktif diyalog bloğunu "
+                     "davranışı değiştirmeden yardımcı metoda çıkar"),
+    )
+
+    operation = repaired["files"][0]["operations"][0]
+    assert operation["op"] == "replace"
+    assert "if self._next_mode" in operation["old"]
+    assert "self.command_recognized.emit(command)" in operation["old"]
+    assert "self._listen_active_dialogue()" in operation["new"]
+    assert source.count(operation["old"]) == 1
+
+
+def test_structural_method_block_accepts_complete_if_header_selector(tmp_path: Path) -> None:
+    source = _active_dialogue_source()
+    (tmp_path / "app.py").write_text(source, encoding="utf-8")
+    payload = {"files": [{"path": "app.py", "operations": [{
+        "op": "replace_method_block",
+        "class_name": "WakeWordWorker",
+        "method_name": "run",
+        "block_test": "if self._next_mode != 'sleep':",
+        "replacement": "self._listen_active_dialogue()",
+    }]}]}
+
+    repaired = normalize_structural_method_block_replacements(
+        payload,
+        project_root=tmp_path,
+        instruction=("WakeWordWorker.run aktif diyalog bloğunu davranışı "
+                     "değiştirmeden yardımcı metoda çıkar"),
+    )
+
+    operation = repaired["files"][0]["operations"][0]
+    assert operation["op"] == "replace"
+    assert operation["_structural_block"].endswith("self._next_mode != 'sleep'")
+
+
+def test_structural_method_block_does_not_accept_other_statements(tmp_path: Path) -> None:
+    (tmp_path / "app.py").write_text(_active_dialogue_source(), encoding="utf-8")
+    payload = {"files": [{"path": "app.py", "operations": [{
+        "op": "replace_method_block",
+        "class_name": "WakeWordWorker",
+        "method_name": "run",
+        "block_test": "while self._next_mode != 'sleep':",
+        "replacement": "self._listen_active_dialogue()",
+    }]}]}
+
+    import pytest
+    with pytest.raises(Exception) as exc_info:
+        normalize_structural_method_block_replacements(
+            payload,
+            project_root=tmp_path,
+            instruction=("WakeWordWorker.run aktif diyalog bloğunu davranışı "
+                         "değiştirmeden yardımcı metoda çıkar"),
+        )
+    assert "geçerli block_test" in str(exc_info.value)
+
+
+def test_structural_method_block_rejects_smaller_active_dialogue_subblock(tmp_path: Path) -> None:
+    (tmp_path / "app.py").write_text(_active_dialogue_source(), encoding="utf-8")
+    payload = {"files": [{"path": "app.py", "operations": [{
+        "op": "replace_method_block",
+        "class_name": "WakeWordWorker",
+        "method_name": "run",
+        "block_test": "self.debug",
+        "replacement": "self._listen_active_dialogue()",
+    }]}]}
+
+    import pytest
+    with pytest.raises(Exception) as exc_info:
+        normalize_structural_method_block_replacements(
+            payload,
+            project_root=tmp_path,
+            instruction=("WakeWordWorker.run aktif diyalog bloğunu davranışı "
+                         "değiştirmeden yardımcı metoda çıkar"),
+        )
+    assert "daha küçük alt blok reddedildi" in str(exc_info.value)
+
+
+def test_structural_method_block_requires_self_helper_call(tmp_path: Path) -> None:
+    (tmp_path / "app.py").write_text(_active_dialogue_source(), encoding="utf-8")
+    payload = {"files": [{"path": "app.py", "operations": [{
+        "op": "replace_method_block",
+        "class_name": "WakeWordWorker",
+        "method_name": "run",
+        "block_test": "self._next_mode != 'sleep'",
+        "replacement": "_listen_active_dialogue()",
+    }]}]}
+
+    import pytest
+    with pytest.raises(Exception) as exc_info:
+        normalize_structural_method_block_replacements(
+            payload,
+            project_root=tmp_path,
+            instruction=("WakeWordWorker.run aktif diyalog bloğunu davranışı "
+                         "değiştirmeden yardımcı metoda çıkar"),
+        )
+    assert "self.<yardımcı_metot>" in str(exc_info.value)
+
+
+def test_structural_method_block_rejects_copying_selected_block_into_replacement(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "app.py").write_text(_active_dialogue_source(), encoding="utf-8")
+    payload = {"files": [{"path": "app.py", "operations": [{
+        "op": "replace_method_block",
+        "class_name": "WakeWordWorker",
+        "method_name": "run",
+        "block_test": "self._next_mode != 'sleep'",
+        "replacement": (
+            "if self._next_mode != 'sleep':\n"
+            "    command = self.voice.listen()\n"
+            "    self._listen_active_dialogue(command)\n"
+        ),
+    }]}]}
+
+    import pytest
+    with pytest.raises(Exception) as exc_info:
+        normalize_structural_method_block_replacements(
+            payload,
+            project_root=tmp_path,
+            instruction=("WakeWordWorker.run aktif diyalog bloğunu davranışı "
+                         "değiştirmeden yardımcı metoda çıkar"),
+        )
+    assert "eski bloğu yeniden kopyalama" in str(exc_info.value)
+
+
+def test_structural_method_block_rejects_oversized_replacement(tmp_path: Path) -> None:
+    (tmp_path / "app.py").write_text(_active_dialogue_source(), encoding="utf-8")
+    replacement = "\n".join(
+        ["value = self._listen_active_dialogue()"]
+        + [f"step_{index} = {index}" for index in range(12)]
+    )
+    payload = {"files": [{"path": "app.py", "operations": [{
+        "op": "replace_method_block",
+        "class_name": "WakeWordWorker",
+        "method_name": "run",
+        "block_test": "self._next_mode != 'sleep'",
+        "replacement": replacement,
+    }]}]}
+
+    import pytest
+    with pytest.raises(Exception) as exc_info:
+        normalize_structural_method_block_replacements(
+            payload,
+            project_root=tmp_path,
+            instruction=("WakeWordWorker.run aktif diyalog bloğunu davranışı "
+                         "değiştirmeden yardımcı metoda çıkar"),
+        )
+    assert "en fazla 12 satırlık" in str(exc_info.value)
+
+
+def test_active_dialogue_extraction_rejects_raw_replace_after_helper_insert() -> None:
+    payload = {"files": [{"path": "app.py", "operations": [
+        {"op": "insert_before", "anchor": "class MainWindow:", "content": "helper", "_structural_method": "_listen"},
+        {"op": "replace", "old": "small block", "new": "self._listen()"},
+    ]}]}
+    import pytest
+    with pytest.raises(Exception) as exc_info:
+        validate_behavior_preserving_extraction_payload(
+            payload,
+            instruction=("WakeWordWorker.run aktif diyalog bloğunu davranışı "
+                         "değiştirmeden yardımcı metoda çıkar"),
+        )
+    assert "replace_method_block" in str(exc_info.value)
+
+
+def test_structural_retry_guidance_contains_complete_real_block(tmp_path: Path) -> None:
+    source = _active_dialogue_source()
+    (tmp_path / "app.py").write_text(source, encoding="utf-8")
+    guidance = build_structural_method_block_guidance(
+        project_root=tmp_path,
+        instruction=("WakeWordWorker.run aktif diyalog bloğunu davranışı "
+                     "değiştirmeden yardımcı metoda çıkar"),
+    )
+    assert "if self._next_mode" in guidance
+    assert "self.command_recognized.emit(command)" in guidance
+    assert "continue" in guidance
+    assert "replace_method_block" in guidance
+    assert "replacement alanina bu blogu yeniden yazma" in guidance
+    assert "en fazla 12 satir" in guidance
 
 
 def test_helper_insertion_is_moved_after_edit_when_insert_creates_ambiguity(

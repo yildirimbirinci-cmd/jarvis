@@ -59,11 +59,15 @@ from artmach_assistant.core.own_code_risk import assess_own_code_proposal
 from artmach_assistant.core.own_code_anchor_repair import (
     build_ambiguous_anchor_guidance,
     build_missing_anchor_guidance,
+    build_structural_method_block_guidance,
     merge_duplicate_operation_rows,
+    normalize_structural_class_method_insertions,
+    normalize_structural_method_block_replacements,
     remove_redundant_noop_replaces,
     reorder_insertions_after_exact_edits,
     repair_ambiguous_replace_anchors,
     repair_unique_whitespace_anchors,
+    validate_behavior_preserving_extraction_payload,
 )
 from artmach_assistant.core.own_code_scope import validate_proposal_scope
 from artmach_assistant.core.own_code_symbol_guard import validate_approved_symbol_scope
@@ -242,6 +246,15 @@ Kurallar:
 - Mevcut dosyalarda tam dosya içeriği üretme; küçük ve tam eşleşen operations kullan.
 - replace old metni çalışan kaynakta tam olarak bir kez bulunmalı ve yeterli bağlam içermeli.
 - Ekleme gerekiyorsa op=insert_before veya insert_after, anchor ve content alanlarını kullan.
+- Bir sınıfa kardeş yardımcı metot eklemek için op=insert_class_method, class_name ve
+  eksiksiz/gövdeli content alanlarını kullan. Bu işlem sınıf sınırını AST ile çözer.
+- Bir metodun doğrudan gövdesindeki if bloğunun tamamını çıkarmak için
+  op=replace_method_block, class_name, method_name, çalışan kaynaktaki if koşulunu
+  yalnız ifade olarak içeren block_test (if anahtar sözcüğü ve sondaki : olmadan)
+  ve self.<yardımcı>(...) çağrılı replacement alanlarını kullan. Seçilen eski blok
+  AST ile otomatik kaldırılır; replacement alanına eski bloğu kopyalama. Taşınan
+  davranış insert_class_method content alanında, replacement ise yalnız kısa çağrı
+  ve gerekiyorsa çağırandaki break/continue kararı olmalı.
 - Silme gerekiyorsa op=delete ve old alanını kullan.
 - content alanını yalnızca gerçekten yeni dosya oluştururken kullan.
 - En fazla 8 dosya ve dosya başına 24 küçük işlem öner.
@@ -807,6 +820,13 @@ class AssistantEngine:
                     + previous_error[-4_000:]
                     + "\nAynı cevabı tekrar etme; bu doğrulama hatasını gider."
                 )
+
+                structural_guidance = build_structural_method_block_guidance(
+                    project_root=self.own_project_root(),
+                    instruction=instruction,
+                )
+                if structural_guidance:
+                    prompt += "\n\n" + structural_guidance
             if previous_response:
                 prompt += (
                     "\n\nÖNCEKİ REDDEDİLEN ONARIM YANITI:\n"
@@ -1177,6 +1197,13 @@ class AssistantEngine:
                     "aynı dosya ve sembol kapsamında küçük operations kullanarak düzelt."
                 )
 
+                structural_guidance = build_structural_method_block_guidance(
+                    project_root=self.own_project_root(),
+                    instruction=prompt,
+                )
+                if structural_guidance:
+                    current_prompt += "\n\n" + structural_guidance
+
             if is_anchor_error(previous_error):
                 anchor_hints = self._unique_anchor_hints(prompt)
                 if anchor_hints:
@@ -1254,6 +1281,20 @@ class AssistantEngine:
                 payload = self._validate_own_code_payload_shape(raw)
                 payload = merge_duplicate_operation_rows(payload)
                 payload = remove_redundant_noop_replaces(payload)
+                payload = normalize_structural_class_method_insertions(
+                    payload,
+                    project_root=self.own_project_root(),
+                    instruction=prompt,
+                )
+                payload = normalize_structural_method_block_replacements(
+                    payload,
+                    project_root=self.own_project_root(),
+                    instruction=prompt,
+                )
+                validate_behavior_preserving_extraction_payload(
+                    payload,
+                    instruction=prompt,
+                )
                 payload = repair_unique_whitespace_anchors(
                     payload,
                     project_root=self.own_project_root(),
@@ -1489,6 +1530,12 @@ class AssistantEngine:
                 "fonksiyon imzasinin hemen ardina insert_after ile ekleme; bu onu "
                 "run govdesinin icine koyar. Sinif kardesi yardimci metod icin "
                 "verilen sonraki sinif/modul uyesini insert_before anchor'i yap."
+                " Tercih edilen ve zorunlu yapısal biçim: "
+                "{\"op\":\"insert_class_method\","
+                "\"class_name\":\"WakeWordWorker\","
+                "\"content\":\"def _yardimci(self):\\n    ...\\n\"}. "
+                "content tek, eksiksiz ve gövdeli bir metot olmalı; sınıf girintisini "
+                "kendin ekleme."
             )
         normalized_request = self.command_key(raw_instruction)
         if (
@@ -1502,6 +1549,20 @@ class AssistantEngine:
                 "sessizce return ile degistirme. Yardimci metod dogrudan ayni dongu "
                 "kontrolunu yapamiyorsa sonucu acik bir kontrol degeriyle cagirana "
                 "dondur ve break/continue kararini run icinde aynen koru."
+                " Taslak iki ayrı gerçek değişiklik içermeli: insert_class_method "
+                "ile yardımcı metodu ekle ve run içindeki taşınan eski bloğu "
+                "replace_method_block ile bu yardımcı metodun self.<metot>(...) "
+                "çağrısına dönüştür. Aktif diyalog bloğunda block_test çalışan "
+                "kaynaktan birebir `self._next_mode != \"sleep\"` olmalı; "
+                "`if self._next_mode != \"sleep\":` biçimini kullanma. Ham, "
+                "girintiye duyarlı replace kullanma. Yapısal işlem AST ile bu if "
+                "düğümünün başlangıcından sonuna kadar tamamını kaldırır; daha küçük "
+                "bir alt blok veya self. öneksiz çağrı reddedilir. Seçilen eski "
+                "bloğu replacement alanına yeniden yazma; replacement en fazla 12 "
+                "satırda yalnız self.<yardımcı_metot>(...) çağrısını ve gerekiyorsa "
+                "run içindeki break/continue kararını içermeli. Taşınan davranışın "
+                "tamamı yardımcı metodun content alanında olmalı. Bunlardan biri "
+                "eksikse taslak reddedilir."
             )
         voice_domain = any(
             token in self.command_key(raw_instruction)
