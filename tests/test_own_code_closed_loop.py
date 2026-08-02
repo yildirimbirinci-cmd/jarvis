@@ -5,7 +5,10 @@ from types import SimpleNamespace
 from artmach_assistant.core import assistant as assistant_module
 from artmach_assistant.core.assistant import AssistantEngine
 from artmach_assistant.core.edit_manager import EditProposal, ProposedFileChange
-from artmach_assistant.core.own_code_approval import proposal_fingerprint
+from artmach_assistant.core.own_code_approval import (
+    proposal_fingerprint,
+    short_fingerprint,
+)
 
 
 def _engine() -> AssistantEngine:
@@ -321,6 +324,36 @@ def test_critical_proposal_requires_named_approval() -> None:
 
     assert result is not None
     assert "kritik değişikliği onaylıyorum" in result
+
+
+def test_explicit_approval_id_must_match_pending_proposal() -> None:
+    engine = _engine()
+    proposal = EditProposal("test", [
+        ProposedFileChange("app.py", "test", "x = 1\n", "x = 2\n", True)
+    ])
+    engine.editor.pending = proposal
+
+    result = engine._own_code_approval_request(
+        "deadbeefcafe onay kimlikli kod değişikliğini uygula"
+    )
+
+    assert "eşleşmiyor" in result
+    assert short_fingerprint(proposal) in result
+
+
+def test_explicit_approval_id_reaches_apply() -> None:
+    engine = _engine()
+    proposal = EditProposal("test", [
+        ProposedFileChange("app.py", "test", "x = 1\n", "x = 2\n", True)
+    ])
+    engine.editor.pending = proposal
+    engine.apply_pending_own_code_proposal = lambda: "TRANSACTIONAL_APPLY"
+
+    result = engine._own_code_approval_request(
+        f"{short_fingerprint(proposal)} onay kimlikli kod değişikliğini uygula"
+    )
+
+    assert result == "TRANSACTIONAL_APPLY"
 
 
 def test_spoken_last_change_undo_runs_health_checks() -> None:

@@ -1978,6 +1978,7 @@ class AssistantEngine:
         """Apply an approved proposal, verify it, and roll back broken source."""
         if self.editor.pending is None:
             return "Uygulanacak bekleyen bir kod değişikliği önerisi yok. Önce açıkça bir değişiklik taslağı istemelisin."
+        approved_proposal = self.editor.pending
         expected_fingerprint = getattr(
             self, "_pending_own_code_fingerprint", None
         )
@@ -2058,6 +2059,44 @@ class AssistantEngine:
                 failures=sorted(baseline_failures),
             )
             return f"Kod değişikliği uygulanmadı: {exc}"
+        if isinstance(approved_proposal, EditProposal):
+            mismatches: list[str] = []
+            for change in approved_proposal.files:
+                target = self.workspace.safe_path(change.path)
+                expected_sha256 = hashlib.sha256(
+                    change.new_content.encode("utf-8")
+                ).hexdigest()
+                actual_sha256 = (
+                    hashlib.sha256(target.read_bytes()).hexdigest()
+                    if target.is_file() else "missing"
+                )
+                old_sha256 = hashlib.sha256(
+                    change.old_content.encode("utf-8")
+                ).hexdigest()
+                if (
+                    actual_sha256 != expected_sha256
+                    or actual_sha256 == old_sha256
+                ):
+                    mismatches.append(change.path)
+            if mismatches:
+                try:
+                    rollback = self.own_code_transactions.undo()
+                except Exception as rollback_error:
+                    return (
+                        "Kod değişikliği yazıldı olarak raporlandı ancak hedef dosya "
+                        "içeriği doğrulanamadı. Otomatik geri alma da başarısız oldu: "
+                        f"{rollback_error}. Dosyalar: {', '.join(mismatches)}"
+                    )
+                self._save_own_code_cycle(
+                    "rolled_back",
+                    "Yazma sonrası SHA-256 doğrulaması başarısız oldu.",
+                    failures=sorted(baseline_failures),
+                )
+                return (
+                    "Kod değişikliği uygulanmadı: yazma sonrası SHA-256 doğrulaması "
+                    f"başarısız oldu; değişiklik geri alındı. {rollback}. "
+                    f"Dosyalar: {', '.join(mismatches)}"
+                )
         self._save_own_code_cycle(
             "validating",
             "Uygulanan değişiklik derleniyor ve regresyon testleri çalıştırılıyor.",
@@ -2766,6 +2805,19 @@ class AssistantEngine:
         normalized = self.command_key(text)
         words = normalized.split()
         pending = getattr(getattr(self, "editor", None), "pending", None)
+        supplied_ids = re.findall(r"(?<![0-9a-f])[0-9a-f]{12}(?![0-9a-f])", normalized)
+        if supplied_ids:
+            if pending is None:
+                return (
+                    f"{supplied_ids[0]} onay kimliğine ait bekleyen taslak bellekte "
+                    "yok. Uygulama yapılmadı; yeni bir taslak ve onay kimliği üretmelisin."
+                )
+            expected_id = short_fingerprint(pending)
+            if supplied_ids[0] != expected_id:
+                return (
+                    "Onay kimliği bekleyen taslakla eşleşmiyor. "
+                    f"Beklenen kimlik: {expected_id}. Hiçbir dosya değiştirilmedi."
+                )
         project_runtime = getattr(self, "project_improvements", None)
         project_pending = bool(
             project_runtime is not None
@@ -8021,6 +8073,13 @@ class AssistantEngine:
         explicit_own_code_plan = self._explicit_new_own_code_plan_request(text)
         if explicit_own_code_plan is not None:
             return explicit_own_code_plan
+        # A pending source proposal and its explicit approval identity must be
+        # resolved before a collaborative session can interpret "uygula" as
+        # ordinary dialogue.  Otherwise the model may fabricate an apply
+        # report without ever reaching the transactional editor.
+        own_code_approval = self._own_code_approval_request(text)
+        if own_code_approval is not None:
+            return own_code_approval
         collaborative_problem = self._collaborative_problem_request(text)
         if collaborative_problem is not None:
             return collaborative_problem
@@ -8085,9 +8144,6 @@ class AssistantEngine:
         project_edit_approval = self._project_edit_approval_request(text)
         if project_edit_approval is not None:
             return project_edit_approval
-        own_code_approval = self._own_code_approval_request(text)
-        if own_code_approval is not None:
-            return own_code_approval
         fast_capability = self._fast_capability_question(text)
         if fast_capability is not None:
             return fast_capability
