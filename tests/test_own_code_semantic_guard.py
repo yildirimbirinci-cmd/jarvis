@@ -132,3 +132,70 @@ def test_behavior_preserving_extraction_accepts_moved_operations() -> None:
     )
 
     assert result.valid
+
+
+def test_behavior_preserving_extraction_allows_collapsed_continue_dispatch() -> None:
+    old = (
+        "class Worker:\n"
+        "    def run(self):\n"
+        "        while True:\n"
+        "            if self.first():\n"
+        "                continue\n"
+        "            if self.second():\n"
+        "                continue\n"
+        "            continue\n"
+    )
+    new = (
+        "class Worker:\n"
+        "    def run(self):\n"
+        "        while True:\n"
+        "            self._handle()\n"
+        "            continue\n"
+        "\n"
+        "    def _handle(self):\n"
+        "        if self.first():\n"
+        "            return\n"
+        "        if self.second():\n"
+        "            return\n"
+    )
+
+    result = validate_semantic_replacement(
+        "Bloğu davranışı değiştirmeden yardımcı metoda çıkar.",
+        [_change(old, new)],
+    )
+
+    assert result.valid
+
+
+def test_behavior_preserving_extraction_still_rejects_missing_sleep_call() -> None:
+    old = (
+        "class Worker:\n"
+        "    def run(self):\n"
+        "        while True:\n"
+        "            try:\n"
+        "                self.listen()\n"
+        "            except Exception:\n"
+        "                self.msleep(250)\n"
+        "                continue\n"
+    )
+    new = (
+        "class Worker:\n"
+        "    def run(self):\n"
+        "        while True:\n"
+        "            self._handle()\n"
+        "            continue\n"
+        "\n"
+        "    def _handle(self):\n"
+        "        try:\n"
+        "            self.listen()\n"
+        "        except Exception:\n"
+        "            return\n"
+    )
+
+    result = validate_semantic_replacement(
+        "Bloğu davranışı değiştirmeden yardımcı metoda çıkar.",
+        [_change(old, new)],
+    )
+
+    assert not result.valid
+    assert "call:self.msleep" in result.report()

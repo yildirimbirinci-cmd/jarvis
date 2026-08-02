@@ -72,6 +72,34 @@ def _behavior_inventory(tree: ast.Module) -> dict[str, int]:
     return inventory
 
 
+def _lost_behavior(old_tree: ast.Module, new_tree: ast.Module) -> list[str]:
+    """Return conservatively lost observable operations.
+
+    Calls and attribute assignments remain count-sensitive: collapsing either
+    can remove a side effect.  ``break`` and ``continue`` are control-flow
+    markers, however, and a method extraction commonly replaces several branch
+    local markers with one dispatch point.  For those nodes presence is the
+    useful conservative signal; exact AST counts are not semantically stable.
+    """
+
+    old_behavior = _behavior_inventory(old_tree)
+    new_behavior = _behavior_inventory(new_tree)
+    presence_only = {"control:break", "control:continue"}
+    return sorted(
+        key
+        for key, count in old_behavior.items()
+        if (
+            key in presence_only
+            and count > 0
+            and new_behavior.get(key, 0) == 0
+        )
+        or (
+            key not in presence_only
+            and new_behavior.get(key, 0) < count
+        )
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class SemanticGuardResult:
     valid: bool
@@ -128,12 +156,7 @@ def validate_semantic_replacement(
         old_symbols = _public_symbols(old_tree)
         new_symbols = _public_symbols(new_tree)
         if preserves_behavior:
-            old_behavior = _behavior_inventory(old_tree)
-            new_behavior = _behavior_inventory(new_tree)
-            lost = sorted(
-                key for key, count in old_behavior.items()
-                if new_behavior.get(key, 0) < count
-            )
+            lost = _lost_behavior(old_tree, new_tree)
             if lost:
                 issues.append(
                     f"{path}: davranış-koruyan refaktörde gözlenebilir işlem kaybı "
