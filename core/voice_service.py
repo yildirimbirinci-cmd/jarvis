@@ -574,18 +574,29 @@ class VoiceService:
         path = self.last_utterance_path
         if path is None or not path.exists():
             return False, ""
-        # A majority match against the user's five enrolled Jarvis recordings
-        # is already owner-specific acoustic evidence. Re-running a one-word
-        # phrase through Whisper made valid 0.70+ matches become "cals"/"giz".
-        # Strong enrolled matches proceed immediately; weaker candidates still
-        # require the constrained text verifier below.
-        if self._last_wake_strong:
+        # A single explicitly configured wake word can rely on the enrolled
+        # acoustic profile when that profile produced a strong match.  This is
+        # the low-latency canonical ``jarvis`` path and must not depend on
+        # Whisper being available.  With multiple aliases, keep lexical
+        # confirmation enabled: a longer owner utterance such as "tekrar
+        # anlat" can otherwise resemble one of the enrolled variants.
+        normalized_aliases = [
+            self._normalize_phrase(item)
+            for item in aliases
+            if self._normalize_phrase(item)
+        ]
+        if self._last_wake_strong and len(normalized_aliases) == 1:
             if status_callback:
                 status_callback(
-                    f"Kayıtlı Jarvis ses kalıbı doğrulandı; güven %{int(max(0.0, self._last_wake_score) * 100)}."
+                    "Kayıtlı Jarvis ses kalıbı doğrulandı; "
+                    f"güven %{int(max(0.0, self._last_wake_score) * 100)}."
                 )
-            return True, "jarvis"
-        allowed = [self._normalize_phrase(item) for item in aliases if self._normalize_phrase(item)]
+            return True, normalized_aliases[0]
+        # The spectral signature is only a fast candidate gate.  A different
+        # owner utterance with similar duration/cadence (observed with
+        # "tekrar anlat") can score strongly against the enrolled Jarvis
+        # samples.  Never let that score bypass lexical confirmation.
+        allowed = normalized_aliases
         if not allowed:
             return False, ""
         heard = self.recognize_wav(
@@ -1881,6 +1892,7 @@ try {{
         hotwords: str = "",
         silence_stop_seconds: float | None = None,
         wait_for_speech_seconds: float | None = None,
+        min_capture_seconds: float | None = None,
     ) -> str:
         wav_path = self.record_utterance_wav(
             device_index, max_seconds=max_seconds, level_callback=level_callback,
@@ -1892,7 +1904,9 @@ try {{
             # listening slightly longer after a command than after the wake
             # word so that learning sentences are not cut mid-thought.
             silence_stop_seconds=(0.30 if wake_mode else 0.85) if silence_stop_seconds is None else max(0.30, float(silence_stop_seconds)),
-            min_capture_seconds=0.40 if wake_mode else 0.90,
+            min_capture_seconds=(
+                0.40 if wake_mode else 0.90
+            ) if min_capture_seconds is None else max(0.25, float(min_capture_seconds)),
         )
         if status_callback:
             status_callback("Konuşma yerel Whisper motorunda çözümleniyor.")

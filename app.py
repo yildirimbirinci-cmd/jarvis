@@ -176,6 +176,7 @@ class BargeInWorker(QThread):
                     wake_mode=False,
                     silence_stop_seconds=self.SILENCE_STOP_SECONDS,
                     wait_for_speech_seconds=self.WAIT_FOR_SPEECH_SECONDS,
+                    min_capture_seconds=0.30,
                 ).strip()
             except InterruptedError:
                 return
@@ -424,10 +425,6 @@ class WakeWordWorker(QThread):
                 if mode in {"command", "command_retry"}:
                     if not self._expected_silence(str(exc)):
                         self.failed.emit(f"{labels.get(mode, 'Yanıt')} alınamadı: {exc}")
-                    # A silent dialogue turn closes the short owner session.
-                    # Re-arming command mode here caused consecutive blocking
-                    # recordings and kept wake-word listening disabled until
-                    # the whole owner-session deadline elapsed.
                     self._command_retry_count = 0
                     self.end_owner_session()
                     self.engine_end_dialogue.emit()
@@ -441,7 +438,9 @@ class WakeWordWorker(QThread):
             self._command_retry_count = 0
             self.status.emit(f"{labels.get(mode, 'Yanıt')} Whisper çıktısı: {command!r}")
             if self.voice.has_owner_voice_profile():
-                accepted, score = self.voice.verify_owner_voice(threshold=max(0.82, self.owner_threshold))
+                accepted, score = self.voice.verify_owner_voice(
+                    threshold=max(0.60, min(0.95, self.owner_threshold))
+                )
                 if not accepted:
                     self.status.emit(f"{labels.get(mode, 'Yanıt')}: sahip ses profili eşleşmedi; komut reddedildi (%{int(max(0.0, score) * 100)}).")
                     # A rejected normal command never opens another
@@ -534,8 +533,13 @@ class WakeWordWorker(QThread):
                         + (f" ({confirmation_text!r})." if confirmation_text else ".")
                     )
                     continue
-                heard = self.wake_word
-                matched_alias, confidence, matched_index = self.wake_word, score, 0
+                heard = confirmation_text.strip()
+                matched_alias, confidence, matched_index = self._wake_match(heard)
+                if matched_alias is None:
+                    self.status.emit(
+                        f"Wake turu #{cycle}: sözcük doğrulaması wake ifadesi döndürmedi ({heard!r})."
+                    )
+                    continue
 
                 if self.verify_owner:
                     if not self.voice.has_owner_voice_profile():
@@ -628,7 +632,9 @@ class WakeWordWorker(QThread):
 
                 self.status.emit(f"Komut Whisper çıktısı: {command!r}")
                 if self.voice.has_owner_voice_profile():
-                    accepted, score = self.voice.verify_owner_voice(threshold=max(0.82, self.owner_threshold))
+                    accepted, score = self.voice.verify_owner_voice(
+                        threshold=max(0.60, min(0.95, self.owner_threshold))
+                    )
                     if not accepted:
                         self.status.emit(f"Komut sahip ses profiliyle eşleşmedi; komut reddedildi (%{int(max(0.0, score) * 100)}).")
                         if self._owner_session_active():

@@ -51,6 +51,7 @@ def test_barge_in_uses_short_dedicated_capture_profile() -> None:
     assert voice.listen_kwargs["model_size"] == "base"
     assert voice.listen_kwargs["wait_for_speech_seconds"] == 0.35
     assert voice.listen_kwargs["silence_stop_seconds"] == 0.30
+    assert voice.listen_kwargs["min_capture_seconds"] == 0.30
     assert voice.listen_kwargs["wake_mode"] is False
     assert voice.owner_threshold == 0.82
 
