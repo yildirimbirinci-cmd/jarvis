@@ -362,22 +362,18 @@ class WakeWordWorker(QThread):
             except InterruptedError:
                 return "break"
             except Exception as exc:
-                if mode in {"command", "command_retry"} and self._owner_session_active():
-                    # Silence is not a new command and must not make
-                    # Jarvis react to ambient sound. Keep the owner-
-                    # verified session alive until its idle deadline.
-                    self.status.emit("Sahip sesli konuşma oturumu beklemede; yalnızca sesin kabul edilecek.")
-                    self._next_mode = "command"
-                elif mode in {"command", "command_retry"}:
-                    self.failed.emit(f"{labels.get(mode, 'Yanıt')} alınamadı: {exc}")
-                    # A rejected audio packet must not open another
-                    # unprompted recording. That was the path through
-                    # which electrical noise could become a fabricated
-                    # command after a genuine wake word.
-                    self.status.emit("Geçerli insan konuşması alınamadı; Jarvis yeniden wake word bekliyor.")
+                if mode in {"command", "command_retry"}:
+                    if not self._expected_silence(str(exc)):
+                        self.failed.emit(f"{labels.get(mode, 'Yanıt')} alınamadı: {exc}")
+                    # A silent dialogue turn closes the short owner session.
+                    # Re-arming command mode here caused consecutive blocking
+                    # recordings and kept wake-word listening disabled until
+                    # the whole owner-session deadline elapsed.
                     self._command_retry_count = 0
+                    self.end_owner_session()
                     self.engine_end_dialogue.emit()
                     self._next_mode = "sleep"
+                    self.status.emit("Geçerli insan konuşması alınamadı; Jarvis yeniden wake word bekliyor.")
                 else:
                     self.failed.emit(f"{labels.get(mode, 'Yanıt')} alınamadı: {exc}")
                     self._next_mode = mode
@@ -542,15 +538,13 @@ class WakeWordWorker(QThread):
                 except InterruptedError:
                     break
                 except Exception as exc:
-                    if self._owner_session_active():
-                        self.status.emit("Sahip sesli konuşma oturumu beklemede; yalnızca sesin kabul edilecek.")
-                        self._next_mode = "command"
-                    else:
+                    if not self._expected_silence(str(exc)):
                         self.failed.emit(f"Komut alınamadı: {exc}")
-                        self._command_retry_count = 0
-                        self.engine_end_dialogue.emit()
-                        self._next_mode = "sleep"
-                        self.status.emit("Geçerli insan konuşması alınamadı; Jarvis yeniden wake word bekliyor.")
+                    self._command_retry_count = 0
+                    self.end_owner_session()
+                    self.engine_end_dialogue.emit()
+                    self._next_mode = "sleep"
+                    self.status.emit("Geçerli insan konuşması alınamadı; Jarvis yeniden wake word bekliyor.")
                     self.msleep(250)
                     continue
 

@@ -39,3 +39,48 @@ def test_sleep_mode_reaches_wake_listener_after_dialogue_extraction() -> None:
         and node.func.attr == "listen_for_local_wake"
         for node in ast.walk(run)
     )
+
+
+def test_silent_command_turn_closes_owner_session_before_returning_to_wake() -> None:
+    source_path = Path(__file__).resolve().parents[1] / "app.py"
+    tree = ast.parse(source_path.read_text(encoding="utf-8"), filename="app.py")
+    wake_worker = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "WakeWordWorker"
+    )
+    methods = {
+        node.name: node
+        for node in wake_worker.body
+        if isinstance(node, ast.FunctionDef)
+    }
+
+    for method_name in ("_listen_active_dialogue", "run"):
+        method = methods[method_name]
+        handlers = [
+            node
+            for node in ast.walk(method)
+            if isinstance(node, ast.ExceptHandler)
+            and isinstance(node.type, ast.Name)
+            and node.type.id == "Exception"
+        ]
+        assert any(
+            any(
+                isinstance(item, ast.Call)
+                and isinstance(item.func, ast.Attribute)
+                and item.func.attr == "end_owner_session"
+                for item in ast.walk(handler)
+            )
+            and any(
+                isinstance(item, ast.Assign)
+                and any(
+                    isinstance(target, ast.Attribute)
+                    and target.attr == "_next_mode"
+                    for target in item.targets
+                )
+                and isinstance(item.value, ast.Constant)
+                and item.value.value == "sleep"
+                for item in ast.walk(handler)
+            )
+            for handler in handlers
+        )
