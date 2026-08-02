@@ -1277,6 +1277,15 @@ class AssistantEngine:
                 else:
                     previous_error = duplicate_error
 
+                previous_error += (
+                    "\nBir sonraki denemede onceki yardimci metot govdesini yeniden "
+                    "yazma. Kontrol akisini farkli ve acik bir sonuc protokoluyle "
+                    "kur: helper `break`/`continue` kararini deger olarak dondursun; "
+                    "gercek break/continue yalniz WakeWordWorker.run icindeki "
+                    "replacement kodunda kalsin. Onceki reddin bildirdigi tum "
+                    "assign/call/control islemlerini kaynak siralariyla koru."
+                )
+
                 if is_anchor_error(previous_error):
                     previous_error += (
                         " Bir sonraki denemede aynı old/anchor değerlerini "

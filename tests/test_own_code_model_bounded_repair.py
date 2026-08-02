@@ -647,3 +647,42 @@ def test_active_dialogue_raw_replace_retry_contains_full_structural_range(tmp_pa
     assert "YAPISAL CIKARMA ICIN TAM GERCEK KAYNAK ARALIGI" in prompts[1]
     assert "self.command_recognized.emit(mode)" in prompts[1]
     assert "replace_method_block" in prompts[1]
+    assert "dialogue_action = self._listen_active_dialogue()" in prompts[1]
+    assert 'dialogue_action == "break"' in prompts[1]
+
+
+def test_duplicate_structural_retry_requires_a_different_control_flow_protocol(
+    tmp_path,
+) -> None:
+    engine = _engine(tmp_path)
+    (tmp_path / "app.py").write_text(
+        "class WakeWordWorker:\n"
+        "    def run(self) -> None:\n"
+        "        while True:\n"
+        "            if self._next_mode != 'sleep':\n"
+        "                continue\n\n"
+        "class MainWindow:\n"
+        "    pass\n",
+        encoding="utf-8",
+    )
+    repeated = json.dumps({
+        "summary": "invalid repeated draft",
+        "files": [{"path": "app.py", "operations": []}],
+    })
+    prompts: list[str] = []
+
+    def respond(prompt: str, **_kwargs) -> str:
+        prompts.append(prompt)
+        return repeated
+
+    engine._request_code_model_json = respond
+    with pytest.raises(WorkspaceError):
+        engine._generate_validated_own_code_proposal(
+            "app.py içindeki WakeWordWorker.run aktif diyalog bloğunu "
+            "davranışı değiştirmeden yardımcı metoda çıkar",
+            max_attempts=3,
+        )
+
+    assert len(prompts) == 3
+    assert "farkli ve acik bir sonuc protokoluyle" in prompts[2]
+    assert "gercek break/continue yalniz WakeWordWorker.run" in prompts[2]
