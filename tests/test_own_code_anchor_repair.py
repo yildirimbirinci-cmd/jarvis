@@ -133,6 +133,77 @@ def test_missing_anchor_is_not_guessed(tmp_path: Path) -> None:
     assert repaired == payload
 
 
+def test_ambiguous_insert_before_anchor_is_expanded_without_moving_point(
+    tmp_path: Path,
+) -> None:
+    source = (
+        "class WakeWordWorker:\n"
+        "    def helper(self):\n"
+        "        return None\n"
+        "\n"
+        "    def run(self):\n"
+        "        return None\n"
+        "        self.wait()\n"
+    )
+    (tmp_path / "app.py").write_text(source, encoding="utf-8")
+    payload = {
+        "files": [{
+            "path": "app.py",
+            "operations": [{
+                "op": "insert_before",
+                "anchor": "        return None\n",
+                "content": "        self.listen_dialogue()\n",
+            }],
+        }],
+    }
+
+    repaired = repair_ambiguous_replace_anchors(
+        payload,
+        project_root=tmp_path,
+        instruction="WakeWordWorker.run metodunu refaktör et",
+    )
+    anchor = repaired["files"][0]["operations"][0]["anchor"]
+
+    assert source.count(anchor) == 1
+    assert anchor.startswith("        return None\n")
+    assert anchor.endswith("        self.wait()\n")
+
+
+def test_ambiguous_insert_after_anchor_is_expanded_without_moving_point(
+    tmp_path: Path,
+) -> None:
+    source = (
+        "class WakeWordWorker:\n"
+        "    def helper(self):\n"
+        "        self.status.emit('ready')\n"
+        "\n"
+        "    def run(self):\n"
+        "        self.status.emit('ready')\n"
+        "        self.listen()\n"
+    )
+    (tmp_path / "app.py").write_text(source, encoding="utf-8")
+    payload = {
+        "files": [{
+            "path": "app.py",
+            "operations": [{
+                "op": "insert_after",
+                "anchor": "        self.status.emit('ready')\n",
+                "content": "        self.prepare_dialogue()\n",
+            }],
+        }],
+    }
+
+    repaired = repair_ambiguous_replace_anchors(
+        payload,
+        project_root=tmp_path,
+        instruction="WakeWordWorker.run metodunu refaktör et",
+    )
+    anchor = repaired["files"][0]["operations"][0]["anchor"]
+
+    assert source.count(anchor) == 1
+    assert anchor.endswith("        self.status.emit('ready')\n")
+
+
 def test_file_name_before_symbol_does_not_hide_requested_method(
     tmp_path: Path,
 ) -> None:

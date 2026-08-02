@@ -108,6 +108,42 @@ def _expand_unique_replace(
     return None
 
 
+def _expand_unique_insert_anchor(
+    source: str,
+    symbol_source: str,
+    anchor: str,
+    *,
+    insert_before: bool,
+) -> str:
+    """Disambiguate an insert anchor without moving the insertion point."""
+    if not anchor or source.count(anchor) <= 1:
+        return ""
+
+    if symbol_source.count(anchor) != 1:
+        return ""
+
+    position = symbol_source.find(anchor)
+    if position < 0:
+        return ""
+
+    before = symbol_source[:position].splitlines(keepends=True)
+    after = symbol_source[position + len(anchor):].splitlines(keepends=True)
+
+    # insert_before(anchor) may only grow to the right: content +
+    # (anchor + suffix) keeps content immediately before the original anchor.
+    # insert_after(anchor) has the inverse rule and may only grow to the left.
+    for radius in range(1, 17):
+        if insert_before:
+            expanded = anchor + "".join(after[:radius])
+        else:
+            expanded = "".join(before[-radius:]) + anchor
+
+        if source.count(expanded) == 1:
+            return expanded
+
+    return ""
+
+
 def repair_ambiguous_replace_anchors(
     payload: dict[str, Any],
     *,
@@ -116,9 +152,9 @@ def repair_ambiguous_replace_anchors(
 ) -> dict[str, Any]:
     """Safely expand ambiguous replace anchors inside an explicit symbol.
 
-    Only replace operations are changed. Missing anchors and operations outside
-    the explicitly named Class.method scope remain untouched and are rejected
-    later by the normal EditManager validation.
+    Replace operations and direction-safe insert anchors are changed. Missing
+    anchors and operations outside the explicitly named Class.method scope
+    remain untouched and are rejected by normal EditManager validation.
     """
 
     requested = _requested_symbol(instruction)
@@ -172,25 +208,40 @@ def repair_ambiguous_replace_anchors(
         for operation in operations:
             if not isinstance(operation, dict):
                 continue
-            if str(operation.get("op", "")).strip().casefold() != "replace":
+            operation_name = str(operation.get("op", "")).strip().casefold()
+
+            if operation_name == "replace":
+                old = operation.get("old")
+                new = operation.get("new")
+
+                if not isinstance(old, str) or not isinstance(new, str):
+                    continue
+
+                expanded = _expand_unique_replace(
+                    source,
+                    scoped_source,
+                    old,
+                    new,
+                )
+                if expanded is not None:
+                    operation["old"], operation["new"] = expanded
                 continue
 
-            old = operation.get("old")
-            new = operation.get("new")
-
-            if not isinstance(old, str) or not isinstance(new, str):
+            if operation_name not in {"insert_before", "insert_after"}:
                 continue
 
-            expanded = _expand_unique_replace(
+            anchor = operation.get("anchor")
+            if not isinstance(anchor, str):
+                continue
+
+            expanded_anchor = _expand_unique_insert_anchor(
                 source,
                 scoped_source,
-                old,
-                new,
+                anchor,
+                insert_before=operation_name == "insert_before",
             )
-            if expanded is None:
-                continue
-
-            operation["old"], operation["new"] = expanded
+            if expanded_anchor:
+                operation["anchor"] = expanded_anchor
 
     return repaired
 
