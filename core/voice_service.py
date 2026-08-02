@@ -49,6 +49,11 @@ def _repair_turkish_command_text(text: str) -> str:
     repaired = str(text)
     replacements = (
         (r"\bkoşma özellik", "konuşma özellik"),
+        # Whisper occasionally drops the middle syllable of "anlat" in the
+        # common capability request "özelliklerimi anlat".  Keep this repair
+        # deliberately phrase-specific so an ordinary "özelliklerimi at"
+        # sentence is not rewritten outside that observed command shape.
+        (r"\bözelliklerimi at\b", "özelliklerimi anlat"),
         (r"\bkendi kodlarını ilgili\b", "kendi kodlarınla ilgili"),
         (r"\bkodlarını güzellebiliyorsun\b", "kodlarını düzenleyebiliyor musun"),
     )

@@ -83,6 +83,10 @@ def test_wake_recognition_does_not_use_long_command_context(
 
 def test_observed_turkish_command_confusions_are_repaired() -> None:
     assert (
+        _repair_turkish_command_text("Bana özelliklerimi at.")
+        == "Bana özelliklerimi anlat."
+    )
+    assert (
         _repair_turkish_command_text(
             "Koşma özelliklerinin ilgili kodlar görebiliyorsun."
         ).startswith("konuşma özellik")

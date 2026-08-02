@@ -225,3 +225,16 @@ def test_handle_appends_new_maintenance_warning_after_command(tmp_path: Path) ->
     events = engine.runtime_events.load()
     assert len(events) == 1
     assert events[0].status == "completed"
+
+
+def test_spoken_response_omits_automatic_maintenance_warning() -> None:
+    engine = AssistantEngine.__new__(AssistantEngine)
+
+    spoken = engine.spoken_response(
+        "Özelliklerimi anlattım.\n\n"
+        "Bakım uyarısı [RUN-CB636AB534]: Tekrarlanan hata: VoiceService.speech_turn. "
+        "Kanıt: 5 tekrar."
+    )
+
+    assert spoken == "Özelliklerimi anlattım."
+    assert "Bakım uyarısı" not in spoken

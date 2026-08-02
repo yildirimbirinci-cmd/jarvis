@@ -4878,6 +4878,11 @@ class AssistantEngine:
         text = str(response or "").strip()
         if not text:
             return ""
+        # Automatic maintenance findings are operational UI notifications,
+        # not part of the answer to the user's current question.  They remain
+        # visible in the chat/log, but must not be read aloud as if they were
+        # a continuation of the conversational answer.
+        text = text.partition("\n\nBakım uyarısı [RUN-")[0].strip()
         if "KANITA DAYALI MİMARİ İYİLEŞTİRME RAPORU" in text:
             totals = re.search(
                 r"İncelenen dosya:\s*(\d+)\s*\|\s*Bulgu:\s*(\d+)",
@@ -4944,6 +4949,8 @@ class AssistantEngine:
         for line in text.splitlines():
             stripped = line.strip()
             if not stripped or stripped.startswith(("-", "*", "[", "Traceback")):
+                continue
+            if stripped.startswith("Bakım uyarısı [RUN-"):
                 continue
             if re.search(r"(?:^|\s)[\w.-]+[/\\][\w./\\-]+:\d+", stripped):
                 continue
