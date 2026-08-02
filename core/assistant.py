@@ -1202,6 +1202,7 @@ class AssistantEngine:
 
         for attempt in range(1, attempts + 1):
             current_prompt = prompt
+            structural_guidance = ""
 
             if previous_error:
                 current_prompt += (
@@ -1215,8 +1216,6 @@ class AssistantEngine:
                     project_root=self.own_project_root(),
                     instruction=prompt,
                 )
-                if structural_guidance:
-                    current_prompt += "\n\n" + structural_guidance
 
             if is_anchor_error(previous_error):
                 anchor_hints = self._unique_anchor_hints(prompt)
@@ -1245,6 +1244,23 @@ class AssistantEngine:
                 current_prompt += (
                     "\n\nÖNCEKİ REDDEDİLEN JSON:\n"
                     + previous_response[-12_000:]
+                )
+
+            # Keep the proven source contract after the rejected JSON.  Putting
+            # the old draft last made a deterministic model copy its incomplete
+            # helper even though the preceding guidance explicitly required the
+            # missing sleep call and break-result protocol.
+            if structural_guidance:
+                current_prompt += (
+                    "\n\n" + structural_guidance
+                    + "\n\nSON ZORUNLU DÜZELTMELER (önceki JSON'u kopyalama):\n"
+                    + previous_error[-6_000:]
+                    + "\nDoğrulayıcının kayıp bildirdiği her assign/call/control "
+                    "işlemini gerçek kaynak sırasıyla yeni JSON'a ekle. Özellikle "
+                    "raporda call:self.msleep varsa helper genel hata yolunda "
+                    "self.msleep(250) çağrısını içermeden cevap verme. "
+                    "InterruptedError helper'dan 'break' döndürmeli ve run "
+                    "replacement bu sonucu gerçek break ile uygulamalıdır."
                 )
 
             raw = self._request_code_model_json(
