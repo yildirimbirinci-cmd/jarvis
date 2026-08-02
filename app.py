@@ -451,7 +451,11 @@ class WakeWordWorker(QThread):
         # Prepare the tiny acknowledgement before advertising wake readiness.
         # This moves Piper's first-use synthesis cost out of the wake-to-command
         # hand-off, where it previously kept the microphone closed for seconds.
-        wake_replies = set(self.wake_responses.values()) or {"Evet."}
+        # A configured response table may be partial: an alias without an
+        # explicit entry still falls back to ``"Evet."`` at wake time.  Keep
+        # that fallback prepared alongside custom replies so the real wake
+        # path never has to invoke Piper synchronously.
+        wake_replies = {"Evet.", *self.wake_responses.values()}
         fast_tts_args = list(self.tts_args)
         if len(fast_tts_args) >= 2:
             fast_tts_args[1] = max(8, int(fast_tts_args[1]))
