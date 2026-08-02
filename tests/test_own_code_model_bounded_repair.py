@@ -526,8 +526,8 @@ def test_structural_method_insert_and_block_replace_are_both_required(tmp_path) 
     )
 
     rendered = proposal.files[0].new_content
-    assert "    def _listen_active_dialogue(self):\n" in rendered
-    assert "            command = self._listen_active_dialogue()\n" in rendered
+    assert "    def _listen_active_dialogue(self):" in rendered.splitlines()
+    assert "            command = self._listen_active_dialogue()" in rendered.splitlines()
     assert rendered.index("def _listen_active_dialogue") < rendered.index("class MainWindow")
 
 
