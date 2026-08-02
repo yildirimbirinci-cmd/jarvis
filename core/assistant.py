@@ -1542,6 +1542,54 @@ class AssistantEngine:
         )
         return plan.proposal
 
+    def _active_dialogue_refactor_already_present(self, instruction: str) -> bool:
+        """Return true when the narrowly requested extraction is complete."""
+
+        if not self._is_deterministic_active_dialogue_refactor(instruction):
+            return False
+        source_path = Path(self.own_project_root()).resolve(strict=False) / "app.py"
+        try:
+            tree = ast.parse(source_path.read_text(encoding="utf-8"), filename="app.py")
+        except (OSError, UnicodeError, SyntaxError):
+            return False
+
+        for owner in tree.body:
+            if not isinstance(owner, ast.ClassDef) or owner.name != "WakeWordWorker":
+                continue
+            methods = {
+                method.name: method
+                for method in owner.body
+                if isinstance(method, (ast.FunctionDef, ast.AsyncFunctionDef))
+            }
+            helper = methods.get("_listen_active_dialogue")
+            run = methods.get("run")
+            if helper is None or run is None:
+                return False
+            calls_helper = any(
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "self"
+                and node.func.attr == "_listen_active_dialogue"
+                for node in ast.walk(run)
+            )
+            helper_owns_dialogue_guard = any(
+                isinstance(node, ast.If)
+                and "_next_mode" in {
+                    item.attr
+                    for item in ast.walk(node.test)
+                    if isinstance(item, ast.Attribute)
+                }
+                and "sleep" in {
+                    item.value
+                    for item in ast.walk(node.test)
+                    if isinstance(item, ast.Constant)
+                }
+                for node in ast.walk(helper)
+            )
+            return calls_helper and helper_owns_dialogue_guard
+        return False
+
     def prepare_own_code_proposal(
         self,
         raw_instruction: str,
@@ -1571,6 +1619,25 @@ class AssistantEngine:
         root = self.own_project_root()
         self.workspace.set_workspace(str(root))
         self.workspace.invalidate_index()
+
+        if self._active_dialogue_refactor_already_present(raw_instruction):
+            self.editor.reject()
+            completed_plan = self._load_own_code_plan()
+            if completed_plan and completed_plan.get("status") == "approved":
+                completed_plan["status"] = "completed"
+                completed_plan["completion"] = "already_satisfied"
+                self._save_own_code_plan(completed_plan)
+            self._save_own_code_cycle("completed", "İstenen refaktör kaynakta zaten mevcut.")
+            self.own_code_history.record(
+                "istenen değişiklik kaynakta zaten mevcut",
+                dosya="app.py",
+                sembol="WakeWordWorker._listen_active_dialogue",
+            )
+            return (
+                "İstenen değişiklik zaten mevcut: WakeWordWorker._listen_active_dialogue "
+                "yardımcı metodu tanımlı ve WakeWordWorker.run tarafından çağrılıyor. "
+                "Yeni patch üretmedim; hiçbir dosya değiştirilmedi."
+            )
 
         approved_path_rows = tuple(
             dict.fromkeys(
