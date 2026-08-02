@@ -2472,7 +2472,7 @@ class MainWindow(QMainWindow):
                 # The spoken response is visible before Piper has finished
                 # rendering it.  Start one cancellable speech session here so
                 # "dur"/"sus" can cancel in that otherwise silent gap.
-                self.engine.voice.begin_speech_session()
+                speech_session_id = self.engine.voice.begin_speech_session()
                 # Normal Jarvis replies use a separate worker from the wake
                 # reply. Start the learned interruption listener here as
                 # well; otherwise it existed only during "Dinliyorum" and a
@@ -2484,6 +2484,7 @@ class MainWindow(QMainWindow):
                     self.config.piper_executable, self.config.piper_model,
                     self.config.voice_output_index,
                     preserve_pending_cancel=True,
+                    speech_session_id=speech_session_id,
                 ))
                 self.tts_worker.finished_value.connect(self._on_tts_reply_finished)
                 self.tts_worker.failed.connect(self._on_tts_reply_failed)

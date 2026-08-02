@@ -1,6 +1,11 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
+
+
+APP_PATH = Path(__file__).resolve().parents[1] / "app.py"
 
 
 try:
@@ -47,3 +52,10 @@ def test_barge_in_uses_short_dedicated_capture_profile() -> None:
     assert voice.listen_kwargs["wait_for_speech_seconds"] == 0.35
     assert voice.listen_kwargs["silence_stop_seconds"] == 0.30
     assert voice.listen_kwargs["wake_mode"] is False
+
+
+def test_answer_tts_worker_is_bound_to_the_armed_speech_session() -> None:
+    source = APP_PATH.read_text(encoding="utf-8")
+
+    assert "speech_session_id = self.engine.voice.begin_speech_session()" in source
+    assert "speech_session_id=speech_session_id" in source
