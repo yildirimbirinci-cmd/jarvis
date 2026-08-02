@@ -1,0 +1,158 @@
+[1mdiff --git a/core/assistant.py b/core/assistant.py[m
+[1mindex 8d5c9d3..c88df50 100644[m
+[1m--- a/core/assistant.py[m
+[1m+++ b/core/assistant.py[m
+[36m@@ -6043,10 +6043,70 @@[m [mclass AssistantEngine:[m
+             if word not in action_words[m
+             and word not in {"ve", "bir", "daha", "icin", "bana", "istiyorum"}[m
+         ][m
+[31m-        if not action_words or len(detail_words) < 2:[m
+[32m+[m[32m        explicit_paths, explicit_symbols = self._explicit_own_code_scope([m
+[32m+[m[32m            instruction[m
+[32m+[m[32m        )[m
+[32m+[m
+[32m+[m[32m        candidates: list[str] = [][m
+[32m+[m[32m        selected_finding = None[m
+[32m+[m[32m        assessment_error = ""[m
+[32m+[m
+[32m+[m[32m        # A??k dosya veya sembol hedefi olmayan genel ?z-geli?tirme[m
+[32m+[m[32m        # taleplerini ?nceliklendirilmi? yerel mimari bulguya ba?la.[m
+[32m+[m[32m        generic_improvement_request = ([m
+[32m+[m[32m            bool(action_words)[m
+[32m+[m[32m            and len(detail_words) < 2[m
+[32m+[m[32m            and not explicit_paths[m
+[32m+[m[32m            and not explicit_symbols[m
+[32m+[m[32m        )[m
+[32m+[m[32m        if generic_improvement_request:[m
+[32m+[m[32m            try:[m
+[32m+[m[32m                assessment = self._project_improvement_runtime().assessment([m
+[32m+[m[32m                    own_code=True,[m
+[32m+[m[32m                    refresh=True,[m
+[32m+[m[32m                )[m
+[32m+[m[32m                project_root = Path([m
+[32m+[m[32m                    self.own_project_root()[m
+[32m+[m[32m                ).resolve(strict=False)[m
+[32m+[m
+[32m+[m[32m                for finding in assessment.findings:[m
+[32m+[m[32m                    finding_paths: list[str] = [][m
+[32m+[m[32m                    for raw_path in finding.affected_paths:[m
+[32m+[m[32m                        relative = ([m
+[32m+[m[32m                            str(raw_path or "")[m
+[32m+[m[32m                            .strip()[m
+[32m+[m[32m                            .replace("\\", "/")[m
+[32m+[m[32m                        )[m
+[32m+[m[32m                        if ([m
+[32m+[m[32m                            not relative[m
+[32m+[m[32m                            or Path(relative).is_absolute()[m
+[32m+[m[32m                            or self._is_test_path(relative)[m
+[32m+[m[32m                        ):[m
+[32m+[m[32m                            continue[m
+[32m+[m[32m                        try:[m
+[32m+[m[32m                            candidate = ([m
+[32m+[m[32m                                project_root / relative[m
+[32m+[m[32m                            ).resolve(strict=False)[m
+[32m+[m[32m                            candidate.relative_to(project_root)[m
+[32m+[m[32m                        except (OSError, ValueError):[m
+[32m+[m[32m                            continue[m
+[32m+[m[32m                        if candidate.is_file():[m
+[32m+[m[32m                            finding_paths.append(relative)[m
+[32m+[m
+[32m+[m[32m                    if finding_paths:[m
+[32m+[m[32m                        selected_finding = finding[m
+[32m+[m[32m                        candidates.extend(dict.fromkeys(finding_paths))[m
+[32m+[m[32m                        break[m
+[32m+[m[32m            except Exception as exc:[m
+[32m+[m[32m                assessment_error = str(exc)[m
+[32m+[m
+[32m+[m[32m        if ([m
+[32m+[m[32m            (not action_words or len(detail_words) < 2)[m
+[32m+[m[32m            and selected_finding is None[m
+[32m+[m[32m        ):[m
+             question = ([m
+[31m-                "Geliştirme hedefi yeterince somut değil. Hangi davranışın değişmesini "[m
+[31m-                "ve başarılı sonucu nasıl anlayacağımızı tek cümleyle söyler misin?"[m
+[32m+[m[32m                "Geli?tirme hedefi yeterince somut de?il. Hangi davran???n de?i?mesini "[m
+[32m+[m[32m                "ve ba?ar?l? sonucu nas?l anlayaca??m?z? tek c?mleyle s?yler misin?"[m
+             )[m
+             try:[m
+                 self._save_own_code_plan({[m
+[36m@@ -6056,15 +6116,11 @@[m [mclass AssistantEngine:[m
+                     "question": question,[m
+                     "candidate_files": [],[m
+                     "acceptance": [],[m
+[32m+[m[32m                    "assessment_error": assessment_error,[m
+                 })[m
+             except Exception as exc:[m
+                 return f"Kendi-kod planlama sorusu kaydedilemedi: {exc}"[m
+             return question[m
+[31m-        explicit_paths, explicit_symbols = self._explicit_own_code_scope([m
+[31m-            instruction[m
+[31m-        )[m
+[31m-[m
+[31m-        candidates: list[str] = [][m
+ [m
+         # Proje k?k?ne yaln?zca kullan?c? a??k bir dosya yolu verdiyse[m
+         # ihtiya? var. Genel planlarda do?rudan ?a?r? grafi?i adaylar?na ge?.[m
+[36m@@ -6106,12 +6162,34 @@[m [mclass AssistantEngine:[m
+             "instruction": instruction.strip(),[m
+             "candidate_files": candidates[:6],[m
+             "approved_symbols": list(explicit_symbols),[m
+[31m-            "acceptance": [[m
+[31m-                "Değişiklik yalnızca gerekli üretim dosyalarıyla sınırlı kalmalı.",[m
+[31m-                "Python derleme doğrulaması geçmeli.",[m
+[31m-                "Temiz süreç çalışma zamanı kontrolü geçmeli.",[m
+[31m-                "Değişiklik öncesine göre yeni pytest hatası oluşmamalı.",[m
+[31m-            ],[m
+[32m+[m[32m            "finding_id": ([m
+[32m+[m[32m                selected_finding.finding_id[m
+[32m+[m[32m                if selected_finding is not None else ""[m
+[32m+[m[32m            ),[m
+[32m+[m[32m            "finding_title": ([m
+[32m+[m[32m                selected_finding.title[m
+[32m+[m[32m                if selected_finding is not None else ""[m
+[32m+[m[32m            ),[m
+[32m+[m[32m            "finding_evidence": ([m
+[32m+[m[32m                [[m
+[32m+[m[32m                    f"{item.location}: {item.detail}"[m
+[32m+[m[32m                    for item in selected_finding.evidence[m
+[32m+[m[32m                ][m
+[32m+[m[32m                if selected_finding is not None else [][m
+[32m+[m[32m            ),[m
+[32m+[m[32m            "assessment_error": assessment_error,[m
+[32m+[m[32m            "acceptance": list(dict.fromkeys([m
+[32m+[m[32m                list([m
+[32m+[m[32m                    selected_finding.acceptance_criteria[m
+[32m+[m[32m                    if selected_finding is not None else ()[m
+[32m+[m[32m                )[m
+[32m+[m[32m                + [[m
+[32m+[m[32m                    "De?i?iklik yaln?zca gerekli ?retim dosyalar?yla s?n?rl? kalmal?.",[m
+[32m+[m[32m                    "Python derleme do?rulamas? ge?meli.",[m
+[32m+[m[32m                    "Temiz s?re? ?al??ma zaman? kontrol? ge?meli.",[m
+[32m+[m[32m                    "De?i?iklik ?ncesine g?re yeni pytest hatas? olu?mamal?.",[m
+[32m+[m[32m                ][m
+[32m+[m[32m            )),[m
+         }[m
+         try:[m
+             self._save_own_code_plan(plan)[m
+[36m@@ -6125,11 +6203,17 @@[m [mclass AssistantEngine:[m
+                 "sınıf veya fonksiyon adını söylemelisin."[m
+             )[m
+         targets = ", ".join(candidates[:4])[m
+[32m+[m[32m        finding_text = ([m
+[32m+[m[32m            f" Se?ilen mimari bulgu: {selected_finding.finding_id} ? "[m
+[32m+[m[32m            f"{selected_finding.title}."[m
+[32m+[m[32m            if selected_finding is not None else ""[m
+[32m+[m[32m        )[m
+         return ([m
+[31m-            f"Teknik planı hazırladım. Hedef: {instruction.strip()}. "[m
+[31m-            f"Kanıtlı aday dosyalar: {targets}. Başarı ölçütleri: derleme, temiz süreç "[m
+[31m-            "başlatma ve yeni regresyon oluşturmadan test karşılaştırması. "[m
+[31m-            "Henüz patch hazırlamadım. Devam etmek için 'planı onayla' de."[m
+[32m+[m[32m            f"Teknik plan? haz?rlad?m. Hedef: {instruction.strip()}."[m
+[32m+[m[32m            f"{finding_text} Kan?tl? aday dosyalar: {targets}. "[m
+[32m+[m[32m            "Ba?ar? ?l??tleri: derleme, temiz s?re? ba?latma ve yeni regresyon "[m
+[32m+[m[32m            "olu?turmadan test kar??la?t?rmas?. Hen?z patch haz?rlamad?m. "[m
+[32m+[m[32m            "Devam etmek i?in 'plan? onayla' de."[m
+         )[m
+ [m
+     @staticmethod[m

@@ -6043,7 +6043,67 @@ class AssistantEngine:
             if word not in action_words
             and word not in {"ve", "bir", "daha", "icin", "bana", "istiyorum"}
         ]
-        if not action_words or len(detail_words) < 2:
+        explicit_paths, explicit_symbols = self._explicit_own_code_scope(
+            instruction
+        )
+
+        candidates: list[str] = []
+        selected_finding = None
+        assessment_error = ""
+
+        # Açık dosya veya sembol hedefi olmayan genel öz-geliştirme
+        # taleplerini önceliklendirilmiş yerel mimari bulguya bağla.
+        generic_improvement_request = (
+            bool(action_words)
+            and len(detail_words) < 2
+            and not explicit_paths
+            and not explicit_symbols
+        )
+        if generic_improvement_request:
+            try:
+                assessment = self._project_improvement_runtime().assessment(
+                    own_code=True,
+                    refresh=True,
+                )
+                project_root = Path(
+                    self.own_project_root()
+                ).resolve(strict=False)
+
+                for finding in assessment.findings:
+                    finding_paths: list[str] = []
+                    for raw_path in finding.affected_paths:
+                        relative = (
+                            str(raw_path or "")
+                            .strip()
+                            .replace("\\", "/")
+                        )
+                        if (
+                            not relative
+                            or Path(relative).is_absolute()
+                            or self._is_test_path(relative)
+                        ):
+                            continue
+                        try:
+                            candidate = (
+                                project_root / relative
+                            ).resolve(strict=False)
+                            candidate.relative_to(project_root)
+                        except (OSError, ValueError):
+                            continue
+                        if candidate.is_file():
+                            finding_paths.append(relative)
+
+                    if finding_paths:
+                        selected_finding = finding
+                        candidates.extend(dict.fromkeys(finding_paths))
+                        break
+            except Exception as exc:
+                assessment_error = str(exc)
+
+        if (
+            (not action_words or len(detail_words) < 2)
+            and selected_finding is None
+        ):
             question = (
                 "Geliştirme hedefi yeterince somut değil. Hangi davranışın değişmesini "
                 "ve başarılı sonucu nasıl anlayacağımızı tek cümleyle söyler misin?"
@@ -6056,18 +6116,14 @@ class AssistantEngine:
                     "question": question,
                     "candidate_files": [],
                     "acceptance": [],
+                    "assessment_error": assessment_error,
                 })
             except Exception as exc:
                 return f"Kendi-kod planlama sorusu kaydedilemedi: {exc}"
             return question
-        explicit_paths, explicit_symbols = self._explicit_own_code_scope(
-            instruction
-        )
 
-        candidates: list[str] = []
-
-        # Proje k?k?ne yaln?zca kullan?c? a??k bir dosya yolu verdiyse
-        # ihtiya? var. Genel planlarda do?rudan ?a?r? grafi?i adaylar?na ge?.
+        # Proje köküne yalnızca kullanıcı açık bir dosya yolu verdiyse
+        # ihtiyaç var. Genel planlarda doğrudan çağrı grafiği adaylarına geç.
         if explicit_paths:
             try:
                 project_root = Path(
@@ -6106,12 +6162,34 @@ class AssistantEngine:
             "instruction": instruction.strip(),
             "candidate_files": candidates[:6],
             "approved_symbols": list(explicit_symbols),
-            "acceptance": [
-                "Değişiklik yalnızca gerekli üretim dosyalarıyla sınırlı kalmalı.",
-                "Python derleme doğrulaması geçmeli.",
-                "Temiz süreç çalışma zamanı kontrolü geçmeli.",
-                "Değişiklik öncesine göre yeni pytest hatası oluşmamalı.",
-            ],
+            "finding_id": (
+                selected_finding.finding_id
+                if selected_finding is not None else ""
+            ),
+            "finding_title": (
+                selected_finding.title
+                if selected_finding is not None else ""
+            ),
+            "finding_evidence": (
+                [
+                    f"{item.location}: {item.detail}"
+                    for item in selected_finding.evidence
+                ]
+                if selected_finding is not None else []
+            ),
+            "assessment_error": assessment_error,
+            "acceptance": list(dict.fromkeys(
+                list(
+                    selected_finding.acceptance_criteria
+                    if selected_finding is not None else ()
+                )
+                + [
+                    "Değişiklik yalnızca gerekli üretim dosyalarıyla sınırlı kalmalı.",
+                    "Python derleme doğrulaması geçmeli.",
+                    "Temiz süreç çalışma zamanı kontrolü geçmeli.",
+                    "Değişiklik öncesine göre yeni pytest hatası oluşmamalı.",
+                ]
+            )),
         }
         try:
             self._save_own_code_plan(plan)
@@ -6125,11 +6203,17 @@ class AssistantEngine:
                 "sınıf veya fonksiyon adını söylemelisin."
             )
         targets = ", ".join(candidates[:4])
+        finding_text = (
+            f" Seçilen mimari bulgu: {selected_finding.finding_id} — "
+            f"{selected_finding.title}."
+            if selected_finding is not None else ""
+        )
         return (
-            f"Teknik planı hazırladım. Hedef: {instruction.strip()}. "
-            f"Kanıtlı aday dosyalar: {targets}. Başarı ölçütleri: derleme, temiz süreç "
-            "başlatma ve yeni regresyon oluşturmadan test karşılaştırması. "
-            "Henüz patch hazırlamadım. Devam etmek için 'planı onayla' de."
+            f"Teknik planı hazırladım. Hedef: {instruction.strip()}."
+            f"{finding_text} Kanıtlı aday dosyalar: {targets}. "
+            "Başarı ölçütleri: derleme, temiz süreç başlatma ve yeni regresyon "
+            "oluşturmadan test karşılaştırması. Henüz patch hazırlamadım. "
+            "Devam etmek için 'planı onayla' de."
         )
 
     @staticmethod
