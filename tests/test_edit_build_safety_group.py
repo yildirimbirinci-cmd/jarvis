@@ -104,6 +104,31 @@ def test_edit_apply_marks_checkpoint_applied_only_after_success(tmp_path: Path) 
     assert workspace.invalidations == 1
 
 
+def test_edit_apply_invalidates_changed_python_bytecode(tmp_path: Path) -> None:
+    target = tmp_path / "sample.py"
+    target.write_text("value = 1\n", encoding="utf-8")
+    cache_dir = tmp_path / "__pycache__"
+    cache_dir.mkdir()
+    cached = cache_dir / "sample.cpython-311.pyc"
+    unrelated = cache_dir / "other.cpython-311.pyc"
+    legacy = tmp_path / "sample.pyc"
+    cached.write_bytes(b"stale")
+    unrelated.write_bytes(b"keep")
+    legacy.write_bytes(b"stale")
+    workspace = MinimalWorkspace(tmp_path)
+    manager = EditManager(workspace)  # type: ignore[arg-type]
+    manager.pending = EditProposal(
+        "safe update",
+        [ProposedFileChange("sample.py", "test", "value = 1\n", "value = 2\n", True)],
+    )
+
+    manager.apply()
+
+    assert not cached.exists()
+    assert not legacy.exists()
+    assert unrelated.read_bytes() == b"keep"
+
+
 def test_build_manager_rejects_forged_free_form_profile(tmp_path: Path) -> None:
     (tmp_path / "pyproject.toml").write_text("[build-system]\n", encoding="utf-8")
     workspace = MinimalWorkspace(tmp_path)

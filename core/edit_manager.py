@@ -309,6 +309,19 @@ class EditManager:
             handle.flush()
             os.fsync(handle.fileno())
 
+    @staticmethod
+    def _invalidate_python_bytecode(path: Path) -> None:
+        """Remove only bytecode derived from one changed Python source file."""
+        if path.suffix.casefold() not in {".py", ".pyw"}:
+            return
+        candidates = [path.with_suffix(path.suffix + "c")]
+        cache_dir = path.parent / "__pycache__"
+        if cache_dir.is_dir() and not cache_dir.is_symlink():
+            candidates.extend(cache_dir.glob(f"{path.stem}.*.pyc"))
+        for candidate in candidates:
+            if candidate.is_file() or candidate.is_symlink():
+                candidate.unlink()
+
     @classmethod
     def _write_checkpoint_state(cls, checkpoint: Path, state: str) -> None:
         with tempfile.NamedTemporaryFile(
@@ -420,6 +433,7 @@ class EditManager:
 
             for change, target, staged_path in staged:
                 os.replace(staged_path, target)
+                self._invalidate_python_bytecode(target)
                 applied.append(change.path)
             self._write_checkpoint_state(checkpoint, "applied")
         except Exception as exc:
