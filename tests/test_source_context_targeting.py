@@ -24,3 +24,21 @@ def test_symbol_context_centers_complete_target_method(tmp_path: Path) -> None:
     assert "def target" in context
     assert "return result" in context
     assert "VALUE_899" not in context
+
+
+def test_symbol_context_exposes_safe_sibling_insertion_boundary(tmp_path: Path) -> None:
+    source = tmp_path / "workers.py"
+    source.write_text(
+        "class Worker:\n"
+        "    def run(self) -> None:\n"
+        "        self.work()\n"
+        "\n"
+        "class NextWorker:\n"
+        "    pass\n",
+        encoding="utf-8",
+    )
+
+    context = build_symbol_context(source, ("Worker.run",), max_chars=8000)
+
+    assert "GUVENLI SINIF-YARDIMCI METOT SINIRLARI" in context
+    assert "class NextWorker:" in context

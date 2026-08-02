@@ -1082,6 +1082,33 @@ class AssistantEngine:
         def is_noop_error(value: object) -> bool:
             return "Patch işlemi gerçek değişiklik üretmedi" in str(value or "")
 
+        def rejected_operation_detail(
+            payload: object,
+            error: object,
+        ) -> str:
+            """Map the validator's one-based operation number back to JSON."""
+            match = re.search(r"işlem\s+(\d+)", str(error or ""), re.IGNORECASE)
+            if not match or not isinstance(payload, dict):
+                return ""
+            wanted = int(match.group(1))
+            current = 0
+            for file_index, file_row in enumerate(payload.get("files", ()), start=1):
+                if not isinstance(file_row, dict):
+                    continue
+                for operation_index, operation in enumerate(
+                    file_row.get("operations", ()), start=1
+                ):
+                    current += 1
+                    if current != wanted or not isinstance(operation, dict):
+                        continue
+                    return (
+                        "REDDEDILEN JSON YOLU: "
+                        f"files[{file_index - 1}].operations[{operation_index - 1}]\n"
+                        "REDDEDILEN OPERASYON:\n"
+                        + json.dumps(operation, ensure_ascii=False, indent=2)[:8_000]
+                    )
+            return ""
+
         attempts = max(1, min(int(max_attempts), 3))
         previous_response = ""
         previous_error = ""
@@ -1222,6 +1249,7 @@ class AssistantEngine:
             seen_responses.add(response_key)
             previous_response = raw
 
+            payload: object = None
             try:
                 payload = self._validate_own_code_payload_shape(raw)
                 payload = merge_duplicate_operation_rows(payload)
@@ -1244,6 +1272,9 @@ class AssistantEngine:
                 proposal = self.editor.create_proposal(canonical)
             except WorkspaceError as exc:
                 previous_error = str(exc)
+                operation_detail = rejected_operation_detail(payload, exc)
+                if operation_detail:
+                    previous_error += "\n\n" + operation_detail
                 record_raw_attempt(
                     attempt=attempt,
                     raw=raw,
@@ -1447,6 +1478,30 @@ class AssistantEngine:
                 f"İzinli semboller: {', '.join(approved_symbol_rows) or 'dosya içindeki kanıtlı dar kapsam'}\n"
                 "Bu listedeki dosyaların dışına çıkma. Genel mimari taraması yapma. "
                 "Yalnızca çalışma zamanı kanıtında belirtilen darboğazı düzelt."
+            )
+        if approved_symbol_rows:
+            prompt += (
+                "\n\nSEMBOL-KAPSAMLI PATCH KURALI:\n"
+                "Her old/anchor metni yukaridaki HEDEF SEMBOL ve GUVENLI "
+                "SINIF-YARDIMCI METOT SINIRLARI baglamindan birebir alinmali. "
+                "Sadece `def run(self) -> None:` gibi baska siniflarda da bulunan "
+                "genel bir imzayi anchor olarak kullanma. Yeni bir sinif metodu "
+                "fonksiyon imzasinin hemen ardina insert_after ile ekleme; bu onu "
+                "run govdesinin icine koyar. Sinif kardesi yardimci metod icin "
+                "verilen sonraki sinif/modul uyesini insert_before anchor'i yap."
+            )
+        normalized_request = self.command_key(raw_instruction)
+        if (
+            "davranisi degistirmeden" in normalized_request
+            and any(word in normalized_request for word in ("refaktor", "cikar", "ayir"))
+        ):
+            prompt += (
+                "\n\nDAVRANIS-KORUYAN CIKARMA KURALI:\n"
+                "Tasininan bloktaki tum durum atamalari, emit/cagri islemleri, "
+                "beklemeler ve hata dallari korunmali. break ve continue ifadelerini "
+                "sessizce return ile degistirme. Yardimci metod dogrudan ayni dongu "
+                "kontrolunu yapamiyorsa sonucu acik bir kontrol degeriyle cagirana "
+                "dondur ve break/continue kararini run icinde aynen koru."
             )
         voice_domain = any(
             token in self.command_key(raw_instruction)

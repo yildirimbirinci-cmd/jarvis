@@ -389,3 +389,43 @@ def test_duplicate_after_noop_keeps_actionable_validator_error(tmp_path) -> None
     assert len(prompts) == 3
     assert "Patch işlemi gerçek değişiklik üretmedi" in prompts[2]
     assert "NO-OP OPERASYONU TEKRARLAMA" in prompts[2]
+
+
+def test_retry_identifies_exact_rejected_operation_json_path(tmp_path) -> None:
+    engine = _engine(tmp_path)
+    (tmp_path / "app.py").write_text(
+        "class First:\n    def run(self) -> None:\n        pass\n\n"
+        "class WakeWordWorker:\n    def run(self) -> None:\n        pass\n\n"
+        "class Third:\n    def run(self) -> None:\n        pass\n",
+        encoding="utf-8",
+    )
+    invalid = json.dumps({
+        "summary": "helper",
+        "files": [{
+            "path": "app.py",
+            "operations": [
+                {
+                    "op": "replace",
+                    "old": "class WakeWordWorker:\n    def run(self) -> None:\n        pass",
+                    "new": "class WakeWordWorker:\n    def run(self) -> None:\n        self.work()",
+                },
+                {"op": "insert_after", "anchor": "def run(self) -> None:", "content": "\n"},
+            ],
+        }],
+    })
+    prompts: list[str] = []
+
+    def respond(prompt: str, **_kwargs) -> str:
+        prompts.append(prompt)
+        return invalid
+
+    engine._request_code_model_json = respond
+
+    with pytest.raises(WorkspaceError, match="3 kontrollü denemede"):
+        engine._generate_validated_own_code_proposal(
+            "app.py WakeWordWorker.run davranışı değiştirmeden refaktör et"
+        )
+
+    assert "files[0].operations[1]" in prompts[1]
+    assert '"op": "insert_after"' in prompts[1]
+    assert '"anchor": "def run(self) -> None:"' in prompts[1]

@@ -75,3 +75,60 @@ def test_large_unrequested_rewrite_is_rejected() -> None:
 
     assert not result.valid
     assert "yeniden yazılıyor" in result.report()
+
+
+def test_behavior_preserving_extraction_rejects_lost_side_effects() -> None:
+    old = (
+        "class Worker:\n"
+        "    def run(self):\n"
+        "        while True:\n"
+        "            self.engine_end_dialogue.emit()\n"
+        "            self.msleep(250)\n"
+        "            self._next_mode = 'sleep'\n"
+        "            break\n"
+    )
+    new = (
+        "class Worker:\n"
+        "    def run(self):\n"
+        "        while True:\n"
+        "            self._handle()\n"
+        "\n"
+        "    def _handle(self):\n"
+        "        return\n"
+    )
+
+    result = validate_semantic_replacement(
+        "Bloğu davranışı değiştirmeden yardımcı metoda çıkar.",
+        [_change(old, new)],
+    )
+
+    assert not result.valid
+    assert "engine_end_dialogue.emit" in result.report()
+    assert "control:break" in result.report()
+
+
+def test_behavior_preserving_extraction_accepts_moved_operations() -> None:
+    old = (
+        "class Worker:\n"
+        "    def run(self):\n"
+        "        while True:\n"
+        "            self.emit()\n"
+        "            break\n"
+    )
+    new = (
+        "class Worker:\n"
+        "    def run(self):\n"
+        "        while True:\n"
+        "            self._handle()\n"
+        "            break\n"
+        "\n"
+        "    def _handle(self):\n"
+        "        self.emit()\n"
+    )
+
+    result = validate_semantic_replacement(
+        "Bloğu davranışı değiştirmeden yardımcı metoda çıkar.",
+        [_change(old, new)],
+    )
+
+    assert result.valid

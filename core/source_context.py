@@ -11,6 +11,46 @@ def _node_segment(lines: list[str], node: ast.AST) -> str:
     return "".join(lines[start - 1 : end])
 
 
+def _insertion_boundaries(
+    tree: ast.Module,
+    target: ast.AST,
+    lines: list[str],
+) -> str:
+    """Describe exact sibling boundaries without inventing an insertion point."""
+    owner: ast.ClassDef | None = None
+    for candidate in tree.body:
+        if isinstance(candidate, ast.ClassDef) and target in candidate.body:
+            owner = candidate
+            break
+    if owner is None:
+        return ""
+
+    rows = [
+        f"HEDEF SINIF BASLANGICI (bilgi; metod ekleme anchor'i degildir): class {owner.name}",
+    ]
+    try:
+        index = owner.body.index(target)
+    except ValueError:
+        return "\n".join(rows)
+    if index + 1 < len(owner.body):
+        sibling = owner.body[index + 1]
+        rows.append(
+            "SONRAKI SINIF UYESI - yeni yardimci metod bunun ONCESINE "
+            "insert_before ile eklenebilir:\n"
+            + _node_segment(lines, sibling).splitlines()[0]
+        )
+    else:
+        owner_index = tree.body.index(owner)
+        if owner_index + 1 < len(tree.body):
+            following = tree.body[owner_index + 1]
+            rows.append(
+                "HEDEF SINIFTAN SONRAKI MODUL UYESI - yeni yardimci metod bunun "
+                "ONCESINE insert_before ile eklenebilir:\n"
+                + _node_segment(lines, following).splitlines()[0]
+            )
+    return "\n".join(rows)
+
+
 def _module_prelude(tree: ast.Module, lines: list[str], *, limit: int = 5000) -> str:
     pieces: list[str] = []
     used = 0
@@ -109,6 +149,9 @@ def build_symbol_context(
         if len(header) + len(segment) > remaining:
             segment = segment[: max(0, remaining - len(header))]
         sections.append(header + segment)
+        boundaries = _insertion_boundaries(tree, node, lines)
+        if boundaries:
+            sections.append("GUVENLI SINIF-YARDIMCI METOT SINIRLARI:\n" + boundaries)
         remaining = limit - sum(len(item) for item in sections)
         if remaining <= 200:
             break

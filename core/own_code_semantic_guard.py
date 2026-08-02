@@ -9,7 +9,7 @@ import unicodedata
 
 def _normalize(value: object) -> str:
     text = unicodedata.normalize("NFKD", str(value or "").casefold())
-    return "".join(ch for ch in text if not unicodedata.combining(ch))
+    return "".join(ch for ch in text if not unicodedata.combining(ch)).replace("ı", "i")
 
 
 def _signature(node: ast.FunctionDef | ast.AsyncFunctionDef) -> tuple[int, int, int, int, bool, bool]:
@@ -36,6 +36,40 @@ def _public_symbols(tree: ast.Module) -> dict[str, tuple[str, object]]:
                 if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)) and not child.name.startswith("_"):
                     result[f"{node.name}.{child.name}"] = ("method", _signature(child))
     return result
+
+
+def _call_name(node: ast.Call) -> str:
+    parts: list[str] = []
+    value: ast.AST = node.func
+    while isinstance(value, ast.Attribute):
+        parts.append(value.attr)
+        value = value.value
+    if isinstance(value, ast.Name):
+        parts.append(value.id)
+    return ".".join(reversed(parts))
+
+
+def _behavior_inventory(tree: ast.Module) -> dict[str, int]:
+    inventory: dict[str, int] = {}
+    for node in ast.walk(tree):
+        key = ""
+        if isinstance(node, ast.Call):
+            name = _call_name(node)
+            if name:
+                key = "call:" + name
+        elif isinstance(node, ast.Break):
+            key = "control:break"
+        elif isinstance(node, ast.Continue):
+            key = "control:continue"
+        elif isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            for target in targets:
+                if isinstance(target, ast.Attribute) and isinstance(target.value, ast.Name):
+                    assign_key = f"assign:{target.value.id}.{target.attr}"
+                    inventory[assign_key] = inventory.get(assign_key, 0) + 1
+        if key:
+            inventory[key] = inventory.get(key, 0) + 1
+    return inventory
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,6 +102,14 @@ def validate_semantic_replacement(
         word in normalized_instruction
         for word in ("yeniden yaz", "donustur", "refaktor", "mimariyi degistir")
     )
+    preserves_behavior = (
+        any(phrase in normalized_instruction for phrase in (
+            "davranisi degistirmeden", "davranisi koru", "behavior-preserving",
+        ))
+        and any(word in normalized_instruction for word in (
+            "refaktor", "cikar", "ayir", "extract",
+        ))
+    )
     issues: list[str] = []
     for change in tuple(changes or ()):
         path = str(getattr(change, "path", ""))
@@ -85,6 +127,18 @@ def validate_semantic_replacement(
             continue
         old_symbols = _public_symbols(old_tree)
         new_symbols = _public_symbols(new_tree)
+        if preserves_behavior:
+            old_behavior = _behavior_inventory(old_tree)
+            new_behavior = _behavior_inventory(new_tree)
+            lost = sorted(
+                key for key, count in old_behavior.items()
+                if new_behavior.get(key, 0) < count
+            )
+            if lost:
+                issues.append(
+                    f"{path}: davranış-koruyan refaktörde gözlenebilir işlem kaybı "
+                    f"({', '.join(lost[:10])})"
+                )
         removed = sorted(set(old_symbols).difference(new_symbols))
         if removed and not allows_removal:
             issues.append(
