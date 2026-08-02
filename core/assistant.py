@@ -94,6 +94,7 @@ from artmach_assistant.core.own_code_test_cache import (
     save_baseline_cache,
     source_tree_fingerprint,
 )
+from artmach_assistant.core.own_code_worktree import OwnCodeWorktreeValidator
 from artmach_assistant.core.own_code_readiness import assess_readiness
 from artmach_assistant.core.conversation_runtime import ConversationRuntime
 from artmach_assistant.core.refactoring_transaction_history import (
@@ -2045,6 +2046,47 @@ class AssistantEngine:
                 kaynak_kimliği=baseline_cache.fingerprint[:12],
             )
         baseline_failures = self._test_failure_ids(baseline_output)
+        if isinstance(approved_proposal, EditProposal):
+            self._save_own_code_cycle(
+                "isolated_validation",
+                "Taslak geçici Git worktree içinde doğrulanıyor.",
+                failures=sorted(baseline_failures),
+            )
+            try:
+                isolated = OwnCodeWorktreeValidator(
+                    self.own_project_root()
+                ).validate(
+                    approved_proposal,
+                    lambda root: self._validate_own_code_at_root(
+                        root, baseline_failures=baseline_failures
+                    ),
+                )
+            except Exception as exc:
+                self.own_code_history.record(
+                    "geçici worktree doğrulaması başlatılamadı", hata=str(exc)[:700]
+                )
+                self._save_own_code_cycle(
+                    "proposal_failed", f"Geçici worktree doğrulaması başlatılamadı: {exc}",
+                    failures=sorted(baseline_failures),
+                )
+                return (
+                    "Kod değişikliği ana dosyalara uygulanmadı: geçici Git worktree "
+                    f"doğrulaması başlatılamadı. {exc}"
+                )
+            if not isolated.ok:
+                self.own_code_history.record(
+                    "geçici worktree doğrulaması başarısız",
+                    çıktı=isolated.output[-700:],
+                )
+                self._save_own_code_cycle(
+                    "proposal_failed", isolated.output[-1200:],
+                    failures=sorted(baseline_failures),
+                )
+                return (
+                    "Kod değişikliği ana dosyalara uygulanmadı: taslak geçici Git "
+                    "worktree doğrulamasından geçmedi. Hata özeti: "
+                    + isolated.output[-900:]
+                )
         self._save_own_code_cycle(
             "applying",
             "Onaylı değişiklik checkpoint ile uygulanıyor.",
@@ -2245,8 +2287,8 @@ class AssistantEngine:
             + baseline_note
         )
 
-    def _compile_own_code(self) -> tuple[bool, str]:
-        root = self.own_project_root()
+    def _compile_own_code(self, root: Path | None = None) -> tuple[bool, str]:
+        root = Path(root or self.own_project_root())
         command = [sys.executable, "-m", "compileall", "-q", str(root)]
         try:
             completed = subprocess.run(
@@ -2282,8 +2324,8 @@ class AssistantEngine:
             or name.endswith("_test.py")
         )
 
-    def _run_own_tests(self) -> tuple[bool, str]:
-        root = self.own_project_root()
+    def _run_own_tests(self, root: Path | None = None) -> tuple[bool, str]:
+        root = Path(root or self.own_project_root())
         tests = root / "tests"
         if not tests.is_dir():
             return True, "Test klasörü bulunamadı; yalnızca derleme doğrulaması kullanılacak."
@@ -2302,9 +2344,9 @@ class AssistantEngine:
         except Exception as exc:
             return False, f"Pytest başlatılamadı: {exc}"
 
-    def _runtime_health_check(self) -> tuple[bool, str]:
+    def _runtime_health_check(self, root: Path | None = None) -> tuple[bool, str]:
         """Import the executable application surface in a clean process."""
-        root = self.own_project_root()
+        root = Path(root or self.own_project_root())
         script = (
             "import artmach_assistant.__main__; "
             "import artmach_assistant.app; "
@@ -2331,6 +2373,29 @@ class AssistantEngine:
             and "JARVIS_RUNTIME_IMPORT_OK" in completed.stdout
         )
         return success, output
+
+    def _validate_own_code_at_root(
+        self,
+        root: Path,
+        *,
+        baseline_failures: set[str] | None = None,
+    ) -> tuple[bool, str]:
+        """Run the real validation chain against an isolated source root."""
+        compile_ok, compile_output = self._compile_own_code(root)
+        if not compile_ok:
+            return False, compile_output
+        runtime_ok, runtime_output = self._runtime_health_check(root)
+        if not runtime_ok:
+            return False, runtime_output
+        test_ok, test_output = self._run_own_tests(root)
+        output = "\n".join(
+            part for part in (compile_output, runtime_output, test_output) if part.strip()
+        )
+        current_failures = self._test_failure_ids(test_output)
+        known_failures = set(baseline_failures or ())
+        new_failures = current_failures.difference(known_failures)
+        unverifiable_failure = not test_ok and not current_failures
+        return not new_failures and not unverifiable_failure, output
 
     def validate_own_code(self) -> str:
         """Compile Jarvis and run its real pytest suite when available."""

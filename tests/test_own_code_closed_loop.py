@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 
 from artmach_assistant.core import assistant as assistant_module
@@ -197,6 +198,45 @@ def test_preexisting_test_failure_does_not_reject_safe_change() -> None:
 
     assert "yeni hata oluşmadı" in result
     assert "geri alındı" not in result
+
+
+def test_isolated_validation_allows_only_preexisting_test_failures() -> None:
+    engine = object.__new__(AssistantEngine)
+    engine._compile_own_code = lambda _root=None: (True, "")
+    engine._runtime_health_check = lambda _root=None: (
+        True, "JARVIS_RUNTIME_IMPORT_OK"
+    )
+    engine._run_own_tests = lambda _root=None: (
+        False, "FAILED tests/test_old.py::test_old - old"
+    )
+
+    ok, _ = engine._validate_own_code_at_root(
+        Path("isolated"),
+        baseline_failures={"tests/test_old.py::test_old"},
+    )
+
+    assert ok
+
+
+def test_isolated_validation_rejects_new_test_failure() -> None:
+    engine = object.__new__(AssistantEngine)
+    engine._compile_own_code = lambda _root=None: (True, "")
+    engine._runtime_health_check = lambda _root=None: (
+        True, "JARVIS_RUNTIME_IMPORT_OK"
+    )
+    engine._run_own_tests = lambda _root=None: (
+        False,
+        "FAILED tests/test_old.py::test_old - old\n"
+        "FAILED tests/test_new.py::test_new - new",
+    )
+
+    ok, output = engine._validate_own_code_at_root(
+        Path("isolated"),
+        baseline_failures={"tests/test_old.py::test_old"},
+    )
+
+    assert not ok
+    assert "tests/test_new.py::test_new" in output
 
 
 def test_repair_policy_recognizes_test_paths() -> None:
