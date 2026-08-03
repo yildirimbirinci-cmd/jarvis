@@ -7,32 +7,18 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Iterable, Mapping, Sequence
 
-
-_VOICE_SUBSYSTEMS: tuple[tuple[str, tuple[str, ...], tuple[str, ...]], ...] = (
-    ("audio_input", ("mikrofon", "giris", "input", "record", "capture"), ("core/voice_service.py", "core/audio_device_resilience.py", "config.py")),
-    ("audio_output", ("hoparlor", "cikis", "output", "playback", "sample rate"), ("core/voice_service.py", "core/audio_device_resilience.py", "config.py")),
-    ("wake_word", ("wake", "uyandirma", "jarvis", "cervis"), ("app.py", "core/voice_service.py")),
-    ("speech_to_text", ("whisper", "stt", "yanlis alg", "transcri"), ("core/voice_service.py", "core/voice_acceptance_service.py")),
-    ("text_to_speech", ("piper", "tts", "seslend", "konusam"), ("core/voice_service.py", "app.py")),
-    ("owner_verification", ("owner", "sahip", "ses profili", "dogrul"), ("core/voice_service.py", "core/voice_acceptance_service.py")),
-    ("barge_in", ("barge", "araya gir", "dur", "sustur", "kes"), ("app.py", "core/voice_turn_coordinator.py")),
-    ("latency", ("gecik", "latency", "yavas", "beklet"), ("core/voice_service.py", "core/voice_turn_coordinator.py", "core/runtime_instrumentation.py")),
-)
-
-_ERROR_PATTERNS: tuple[tuple[str, str, int], ...] = (
-    ("invalid_sample_rate", r"invalid sample rate|[- ]9997", 95),
-    ("unsupported_audio_api", r"blocking api not supported|[- ]9999|wdm-ks", 92),
-    ("missing_piper_model", r"piper.*(?:model|onnx).*(?:missing|not found|bulunamad)", 88),
-    ("audio_device_missing", r"(?:input|output|microphone|speaker|aygit).*(?:not found|unavailable|bulunamad)", 85),
-    ("owner_rejected", r"owner.*(?:reject|failed)|sahip.*(?:redd|dogrulanamad)", 75),
-    ("whisper_failure", r"whisper.*(?:error|failed|timeout|hata)", 80),
-    ("tts_failure", r"tts.*(?:error|failed|timeout|hata)|seslendirilemedi", 80),
+from .diagnostic_health import DiagnosticHealthSummary, build_health_summary
+from .diagnostic_investigation import DiagnosticInvestigation, build_investigation
+from .diagnostic_registry import (
+    DiagnosticDomainRegistry,
+    DiagnosticDomainSpec,
+    DiagnosticSubsystemSpec,
+    builtin_diagnostic_registry,
+    normalise,
 )
 
 
-def _normalise(value: object) -> str:
-    text = str(value or "").casefold()
-    return " ".join(text.translate(str.maketrans("çğıöşüâîû", "cgiosuaiu")).split())
+_REPAIR_MARKERS = ("duzelt", "gider", "coz", "incele", "analiz", "iyilestir", "optimize", "neden")
 
 
 def _safe_relative(root: Path, value: str) -> str | None:
@@ -52,6 +38,8 @@ class DiagnosticEvidence:
     source: str
     summary: str
     confidence: int
+    domain: str = ""
+    subsystem: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,6 +66,8 @@ class DiagnosticReport:
     evidence: tuple[DiagnosticEvidence, ...]
     findings: tuple[DiagnosticFinding, ...]
     planner_task: Mapping[str, object] | None
+    health: DiagnosticHealthSummary | None = None
+    investigation: DiagnosticInvestigation | None = None
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -89,6 +79,8 @@ class DiagnosticReport:
             "evidence": [asdict(item) for item in self.evidence],
             "findings": [asdict(item) for item in self.findings],
             "planner_task": dict(self.planner_task) if self.planner_task else None,
+            "health": self.health.to_dict() if self.health else None,
+            "investigation": self.investigation.to_dict() if self.investigation else None,
         }
 
     def write(self, path: str | Path) -> Path:
@@ -99,30 +91,35 @@ class DiagnosticReport:
 
 
 class DiagnosticEngine:
-    """Turn broad repair requests into evidence-bound planner tasks.
+    """Evidence-bound, pluggable problem understanding engine."""
 
-    The engine never claims a root cause from keywords alone. A code-changing
-    planner task is emitted only when concrete log/runtime evidence exists.
-    """
-
-    def __init__(self, project_root: str | Path) -> None:
+    def __init__(
+        self,
+        project_root: str | Path,
+        *,
+        registry: DiagnosticDomainRegistry | None = None,
+    ) -> None:
         self.project_root = Path(project_root).expanduser().resolve()
+        self.registry = registry or builtin_diagnostic_registry()
 
-    @staticmethod
-    def recognises_request(text: object) -> bool:
-        key = _normalise(text)
-        repair = any(token in key for token in ("duzelt", "gider", "coz", "incele", "analiz"))
-        domain = any(token in key for token in ("ses", "mikrofon", "hoparlor", "whisper", "piper", "tts", "wake", "uyandirma"))
-        return repair and domain
+    def recognises_request(self, text: object) -> bool:
+        key = normalise(text)
+        return any(marker in key for marker in _REPAIR_MARKERS) and self.registry.detect(key) is not None
 
-    def _requested_subsystems(self, request: str) -> tuple[str, ...]:
-        key = _normalise(request)
-        explicit = [name for name, markers, _ in _VOICE_SUBSYSTEMS if any(marker in key for marker in markers)]
-        if explicit:
-            return tuple(dict.fromkeys(explicit))
-        return tuple(name for name, _, _ in _VOICE_SUBSYSTEMS)
+    def _affected_files(self, subsystems: Sequence[DiagnosticSubsystemSpec]) -> tuple[str, ...]:
+        wanted: list[str] = []
+        for subsystem in subsystems:
+            for value in subsystem.affected_files:
+                relative = _safe_relative(self.project_root, value)
+                if relative and (self.project_root / relative).is_file() and relative not in wanted:
+                    wanted.append(relative)
+        return tuple(wanted)
 
-    def _read_logs(self, log_paths: Iterable[str | Path]) -> tuple[DiagnosticEvidence, ...]:
+    def _read_logs(
+        self,
+        domain: DiagnosticDomainSpec,
+        log_paths: Iterable[str | Path],
+    ) -> tuple[DiagnosticEvidence, ...]:
         evidence: list[DiagnosticEvidence] = []
         for raw_path in log_paths:
             path = Path(raw_path).expanduser()
@@ -138,32 +135,53 @@ class DiagnosticEngine:
                 text = resolved.read_text(encoding="utf-8", errors="replace")[-200_000:]
             except OSError:
                 continue
-            for label, pattern, confidence in _ERROR_PATTERNS:
-                matches = re.findall(pattern, text, flags=re.IGNORECASE)
+            source = resolved.relative_to(self.project_root).as_posix()
+            for pattern in domain.patterns:
+                matches = re.findall(pattern.pattern, text, flags=re.IGNORECASE)
                 if not matches:
                     continue
-                source = resolved.relative_to(self.project_root).as_posix()
-                digest = hashlib.sha256(f"{source}:{label}".encode("utf-8")).hexdigest()[:12]
+                digest = hashlib.sha256(f"{domain.name}:{source}:{pattern.kind}".encode("utf-8")).hexdigest()[:12]
                 evidence.append(DiagnosticEvidence(
                     evidence_id=f"diag-{digest}",
-                    kind=label,
+                    kind=pattern.kind,
                     source=source,
-                    summary=f"{label}: {len(matches)} eşleşme bulundu.",
-                    confidence=confidence,
+                    summary=f"{pattern.kind}: {len(matches)} eşleşme bulundu.",
+                    confidence=pattern.confidence,
+                    domain=domain.name,
+                    subsystem=pattern.subsystem,
                 ))
         return tuple(evidence)
 
-    def _affected_files(self, subsystems: Sequence[str]) -> tuple[str, ...]:
-        wanted: list[str] = []
-        selected = set(subsystems)
-        for name, _, files in _VOICE_SUBSYSTEMS:
-            if name not in selected:
+    def _runtime_evidence(
+        self,
+        domain: DiagnosticDomainSpec,
+        subsystems: Sequence[DiagnosticSubsystemSpec],
+        raw_items: Iterable[Mapping[str, object]],
+    ) -> tuple[DiagnosticEvidence, ...]:
+        allowed_subsystems = {item.name for item in domain.subsystems}
+        result: list[DiagnosticEvidence] = []
+        for item in raw_items:
+            item_domain = str(item.get("domain", domain.name))
+            if item_domain not in ("", domain.name):
                 continue
-            for value in files:
-                relative = _safe_relative(self.project_root, value)
-                if relative and (self.project_root / relative).is_file() and relative not in wanted:
-                    wanted.append(relative)
-        return tuple(wanted)
+            summary = " ".join(str(item.get("summary", "")).split())[:500]
+            if not summary:
+                continue
+            subsystem = str(item.get("subsystem", subsystems[0].name))
+            if subsystem not in allowed_subsystems:
+                subsystem = subsystems[0].name
+            confidence = max(0, min(100, int(item.get("confidence", 70))))
+            evidence_id = str(item.get("evidence_id") or hashlib.sha256(summary.encode("utf-8")).hexdigest()[:12])
+            result.append(DiagnosticEvidence(
+                evidence_id,
+                "runtime",
+                str(item.get("source", "runtime")),
+                summary,
+                confidence,
+                domain.name,
+                subsystem,
+            ))
+        return tuple(result)
 
     def diagnose(
         self,
@@ -173,73 +191,95 @@ class DiagnosticEngine:
         runtime_evidence: Iterable[Mapping[str, object]] = (),
     ) -> DiagnosticReport:
         if not self.recognises_request(request):
-            return DiagnosticReport(1, request, "unknown", "unsupported", (), (), (), None)
+            return DiagnosticReport(1, request, "unknown", "unsupported", (), (), (), None, None, None)
 
-        subsystems = self._requested_subsystems(request)
-        evidence = list(self._read_logs(log_paths))
-        for item in runtime_evidence:
-            summary = " ".join(str(item.get("summary", "")).split())[:500]
-            if not summary:
-                continue
-            raw_confidence = item.get("confidence", 70)
-            confidence = max(0, min(100, int(raw_confidence)))
-            evidence_id = str(item.get("evidence_id") or hashlib.sha256(summary.encode("utf-8")).hexdigest()[:12])
-            evidence.append(DiagnosticEvidence(evidence_id, "runtime", str(item.get("source", "runtime")), summary, confidence))
+        domain = self.registry.detect(request)
+        if domain is None:
+            return DiagnosticReport(1, request, "unknown", "unsupported", (), (), (), None, None, None)
+        subsystem_specs = self.registry.requested_subsystems(domain, request)
+        subsystem_names = tuple(item.name for item in subsystem_specs)
+        evidence = list(self._read_logs(domain, log_paths))
+        evidence.extend(self._runtime_evidence(domain, subsystem_specs, runtime_evidence))
+        affected_specs = list(subsystem_specs)
+        evidence_subsystems = {item.subsystem for item in evidence if item.subsystem}
+        for candidate in domain.subsystems:
+            if candidate.name in evidence_subsystems and candidate not in affected_specs:
+                affected_specs.append(candidate)
+        affected = self._affected_files(affected_specs)
 
-        affected = self._affected_files(subsystems)
         if not evidence:
             finding = DiagnosticFinding(
-                finding_id="voice-measurement-required",
-                subsystem="voice",
-                title="Ses sistemi için ölçüm gerekiyor",
+                finding_id=f"{domain.name}-measurement-required",
+                subsystem=domain.name,
+                title=f"{domain.name} alanı için ölçüm gerekiyor",
                 explanation="İstek alanı belirlendi ancak kök nedeni kanıtlayan log veya runtime bulgusu bulunamadı.",
                 confidence=35,
                 priority=90,
                 affected_files=affected,
                 evidence_ids=(),
-                proposed_action="Önce ses tanılama çalıştır; cihaz, sample-rate, STT, TTS ve gecikme sonuçlarını kaydet.",
+                proposed_action=domain.measurement_action,
                 requires_measurement=True,
             )
-            return DiagnosticReport(1, request, "voice", "needs_evidence", subsystems, (), (finding,), None)
+            health = build_health_summary(domain.name, subsystem_names, ())
+            investigation = build_investigation(
+                domain.name,
+                (),
+                health=health.to_dict(),
+                measurement_action=domain.measurement_action,
+            )
+            return DiagnosticReport(1, request, domain.name, "needs_evidence", subsystem_names, (), (finding,), None, health, investigation)
 
-        best = max(evidence, key=lambda item: item.confidence)
-        kind_to_subsystem = {
-            "invalid_sample_rate": "audio_output",
-            "unsupported_audio_api": "audio_input",
-            "missing_piper_model": "text_to_speech",
-            "audio_device_missing": "audio_input",
-            "owner_rejected": "owner_verification",
-            "whisper_failure": "speech_to_text",
-            "tts_failure": "text_to_speech",
-            "runtime": subsystems[0],
-        }
-        subsystem = kind_to_subsystem.get(best.kind, subsystems[0])
-        finding = DiagnosticFinding(
-            finding_id=f"voice-{best.kind}",
-            subsystem=subsystem,
-            title=f"Ses sistemi kök neden adayı: {best.kind}",
-            explanation=best.summary,
-            confidence=best.confidence,
-            priority=min(100, 50 + best.confidence // 2),
-            affected_files=affected,
-            evidence_ids=tuple(item.evidence_id for item in evidence),
-            proposed_action="Kanıtın işaret ettiği alt sistemi sınırlı değişiklik ve odaklı testlerle düzelt.",
+        health = build_health_summary(domain.name, subsystem_names, evidence)
+        investigation = build_investigation(
+            domain.name,
+            evidence,
+            health=health.to_dict(),
+            measurement_action=domain.measurement_action,
         )
-        planner_task: Mapping[str, object] = {
-            "task_id": f"diagnostic-{hashlib.sha256(request.encode('utf-8')).hexdigest()[:12]}",
-            "state": "solution_found",
-            "title": finding.title,
-            "problem": finding.explanation,
-            "solution": finding.proposed_action,
-            "rationale": "Tanılama görevi yalnız somut log/runtime kanıtına dayanır.",
-            "affected_files": list(finding.affected_files),
-            "test_plan": ["Ses alt sistemi için ilgili odaklı testleri çalıştır.", "Tam regresyonu çalıştır."],
-            "evidence_ids": list(finding.evidence_ids),
-            "risk": "medium",
-            "impact_score": finding.priority,
-            "confidence_score": finding.confidence,
-            "requires_experiment": True,
-            "diagnostic_domain": "voice",
-            "diagnostic_subsystem": finding.subsystem,
-        }
-        return DiagnosticReport(1, request, "voice", "actionable", subsystems, tuple(evidence), (finding,), planner_task)
+        selected = investigation.root_cause or investigation.hypotheses[0]
+        selected_evidence = [
+            item for item in evidence if item.evidence_id in selected.evidence_ids
+        ]
+        best = max(selected_evidence, key=lambda item: item.confidence)
+        finding = DiagnosticFinding(
+            finding_id=f"{domain.name}-{selected.cause}",
+            subsystem=selected.subsystem,
+            title=f"{domain.name} kök neden adayı: {selected.cause}",
+            explanation=selected.explanation,
+            confidence=selected.confidence,
+            priority=min(100, 50 + selected.rank_score // 2),
+            affected_files=affected,
+            evidence_ids=selected.evidence_ids,
+            proposed_action=selected.next_action,
+            requires_measurement=investigation.root_cause is None,
+        )
+        planner_task: Mapping[str, object] | None = None
+        if investigation.root_cause is not None:
+            planner_task = {
+                "task_id": f"diagnostic-{hashlib.sha256(request.encode('utf-8')).hexdigest()[:12]}",
+                "state": "solution_found",
+                "title": finding.title,
+                "problem": finding.explanation,
+                "solution": finding.proposed_action,
+                "rationale": "Tanılama görevi yalnız somut log/runtime kanıtına dayanır.",
+                "affected_files": list(finding.affected_files),
+                "test_plan": list(domain.test_plan),
+                "evidence_ids": list(finding.evidence_ids),
+                "risk": "medium",
+                "impact_score": finding.priority,
+                "confidence_score": finding.confidence,
+                "requires_experiment": True,
+                "diagnostic_domain": domain.name,
+                "diagnostic_subsystem": finding.subsystem,
+            }
+        if planner_task is not None:
+            planner_task = dict(planner_task)
+            planner_task["diagnostic_health"] = health.to_dict()
+            planner_task["diagnostic_investigation"] = investigation.to_dict()
+            status = "actionable"
+        else:
+            status = "investigating"
+        return DiagnosticReport(
+            1, request, domain.name, status, subsystem_names, tuple(evidence),
+            (finding,), planner_task, health, investigation,
+        )

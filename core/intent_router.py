@@ -26,7 +26,7 @@ class IntentDecision:
 
 
 _RULES: tuple[tuple[IntentKind, tuple[str, ...]], ...] = (
-    (IntentKind.DIAGNOSTIC, ("ses sorunlarını gider", "ses sorunlarini gider", "ses sistemini analiz et", "mikrofon sorununu çöz", "mikrofon sorununu coz", "piper hatasını", "piper hatasini", "whisper sorununu", "wake word sorununu")),
+    (IntentKind.DIAGNOSTIC, ("ses sorunlarını gider", "ses sorunlarini gider", "ses sistemini analiz et", "mikrofon sorununu çöz", "mikrofon sorununu coz", "piper hatasını", "piper hatasini", "whisper sorununu", "wake word sorununu", "arayüz donuyor", "arayuz donuyor", "arayüz sorununu", "arayuz sorununu", "git sorununu", "push sorununu", "performans sorununu", "hafıza sorununu", "hafiza sorununu", "kök nedeni", "kok nedeni")),
     (IntentKind.CODE_CHANGE, ("düzelt", "degistir", "değiştir", "patch", "refactor", "kod yaz", "uygula", "yeniden yaz")),
     (IntentKind.RESEARCH, ("araştır", "arastir", "internette", "web", "kaynak bul", "güncel bilgi", "haber")),
     (IntentKind.PROJECT_ANALYSIS, ("analiz", "incele", "tara", "bağımlılık", "bagimlilik", "call graph", "mimari", "proje haritası")),
