@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import hashlib
 import json
@@ -8,13 +8,15 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Mapping
 
+from artmach_assistant.core.knowledge_aware_planner import (
+    KnowledgeAwareSelfImprovementPlanner,
+)
 from artmach_assistant.core.research_journal_closeout import (
     ResearchJournalCloseoutRecord,
     ResearchJournalCloseoutService,
 )
 from artmach_assistant.core.self_improvement_planner import (
     SelfImprovementPlan,
-    SelfImprovementPlanner,
 )
 
 _SCHEMA_VERSION = 1
@@ -106,6 +108,7 @@ class SelfImprovementPipeline:
         project_root: str | Path,
         journal_path: str | Path,
         artifact_root: str | Path,
+        knowledge_repository_path: str | Path | None = None,
     ) -> None:
         self.project_root = (
             Path(project_root).expanduser().resolve(strict=False)
@@ -124,6 +127,13 @@ class SelfImprovementPipeline:
 
         self.closeout_root = self.artifact_root / "journal_closeout"
         self.plan_root = self.artifact_root / "plans"
+        self.knowledge_repository_path = (
+            Path(knowledge_repository_path)
+            .expanduser()
+            .resolve(strict=False)
+            if knowledge_repository_path is not None
+            else self.artifact_root / "knowledge" / "repository.json"
+        )
         self.state_path = (
             self.artifact_root / "self_improvement_pipeline_state.json"
         )
@@ -134,8 +144,13 @@ class SelfImprovementPipeline:
             self.closeout_root,
         )
 
-    def _planner(self) -> SelfImprovementPlanner:
-        return SelfImprovementPlanner(self.project_root)
+    def _planner(
+        self,
+    ) -> KnowledgeAwareSelfImprovementPlanner:
+        return KnowledgeAwareSelfImprovementPlanner(
+            self.project_root,
+            self.knowledge_repository_path,
+        )
 
     def _snapshot_path(
         self,

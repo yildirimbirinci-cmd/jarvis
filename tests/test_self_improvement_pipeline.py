@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import json
 from pathlib import Path
@@ -282,3 +282,49 @@ def test_invalid_saved_state_is_rejected(
 
     with pytest.raises(ValueError, match="invalid"):
         pipeline.load_last_result()
+
+
+def test_pipeline_uses_knowledge_aware_planner(
+    tmp_path: Path,
+) -> None:
+    project = create_project(tmp_path)
+    journal = tmp_path / "journal" / "research.json"
+    artifacts = tmp_path / "artifacts"
+    write_journal(journal)
+
+    pipeline = SelfImprovementPipeline(
+        project,
+        journal,
+        artifacts,
+    )
+    planner = pipeline._planner()
+
+    assert planner.project_root == project.resolve()
+    assert planner.knowledge_repository_path == (
+        artifacts / "knowledge" / "repository.json"
+    ).resolve()
+
+
+def test_pipeline_accepts_shared_knowledge_repository(
+    tmp_path: Path,
+) -> None:
+    project = create_project(tmp_path)
+    journal = tmp_path / "journal" / "research.json"
+    artifacts = tmp_path / "artifacts"
+    repository = tmp_path / "runtime" / "knowledge.json"
+    write_journal(journal)
+
+    pipeline = SelfImprovementPipeline(
+        project,
+        journal,
+        artifacts,
+        knowledge_repository_path=repository,
+    )
+    result = pipeline.run()
+
+    assert result.status == "ready"
+    assert pipeline.knowledge_repository_path == repository.resolve()
+    assert pipeline._planner().knowledge_repository_path == (
+        repository.resolve()
+    )
+
