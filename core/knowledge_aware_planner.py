@@ -221,19 +221,75 @@ def _validation_compatible(
     return bool(candidate_steps & record_steps)
 
 
+def _context_diagnostics(
+    candidate: ImprovementCandidate,
+    record: KnowledgeRecord,
+) -> dict[str, bool]:
+    return {
+        "files": _files_compatible(
+            candidate,
+            record,
+            require_evidence=True,
+        ),
+        "risk": candidate.risk == record.risk,
+        "applicability": _applicability_compatible(
+            candidate,
+            record,
+        ),
+        "validation": _validation_compatible(
+            candidate,
+            record,
+        ),
+    }
+
+
 def _context_compatible(
     candidate: ImprovementCandidate,
     record: KnowledgeRecord,
 ) -> bool:
-    return (
-        candidate.risk == record.risk
-        and _files_compatible(
+    return all(
+        _context_diagnostics(candidate, record).values()
+    )
+
+
+def _context_rejection_warning(
+    candidate: ImprovementCandidate,
+    records: Iterable[KnowledgeRecord],
+) -> str | None:
+    related = tuple(
+        record
+        for record in records
+        if _same_problem(candidate, record)
+        and _same_strategy_family(candidate, record)
+    )
+    if not related:
+        return None
+
+    failures = {
+        "files": 0,
+        "risk": 0,
+        "applicability": 0,
+        "validation": 0,
+    }
+    for record in related:
+        for name, passed in _context_diagnostics(
             candidate,
             record,
-            require_evidence=True,
-        )
-        and _applicability_compatible(candidate, record)
-        and _validation_compatible(candidate, record)
+        ).items():
+            if not passed:
+                failures[name] += 1
+
+    details = ", ".join(
+        f"{name}={count}"
+        for name, count in failures.items()
+        if count > 0
+    )
+    if not details:
+        return None
+
+    return (
+        "strategy family match rejected by context "
+        f"({details}): {candidate.candidate_id}"
     )
 
 
@@ -329,7 +385,13 @@ class KnowledgeAwareSelfImprovementPlanner:
         )
 
         if not family_matches:
-            return candidate, None
+            return (
+                candidate,
+                _context_rejection_warning(
+                    candidate,
+                    records,
+                ),
+            )
 
         exact_successes = tuple(
             record
@@ -463,7 +525,8 @@ class KnowledgeAwareSelfImprovementPlanner:
             f"{failure_count} failed historical observation(s); "
             f"strategy reliability={profile.reliability_score}, "
             f"success rate={profile.success_rate}%, "
-            f"family matches={len(family_matches)}: "
+            f"family matches={len(family_matches)}, "
+            "context=files+risk+applicability+validation: "
             f"{candidate.candidate_id}"
         )
         return adjusted, warning

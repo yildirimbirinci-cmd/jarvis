@@ -654,3 +654,108 @@ def test_family_matching_requires_validation_overlap(
     ).build_plan(snapshot)
 
     assert plan.candidates[0].confidence_score == 60
+
+
+def test_accepted_family_match_reports_context_gates(
+    tmp_path: Path,
+) -> None:
+    project = create_project(tmp_path)
+    snapshot = tmp_path / "snapshot.json"
+    result = tmp_path / "success.json"
+    repository_path = tmp_path / "knowledge.json"
+
+    write_snapshot(
+        snapshot,
+        solution="Memoize deterministic result.",
+    )
+    write_result(
+        result,
+        status="passed",
+        experiment_id="exp1-success",
+        solution="Cache deterministic results.",
+        confidence=90,
+    )
+    KnowledgeRepository(repository_path).add_result(result)
+
+    plan = KnowledgeAwareSelfImprovementPlanner(
+        project,
+        repository_path,
+    ).build_plan(snapshot)
+
+    assert any(
+        "context=files+risk+applicability+validation"
+        in warning
+        for warning in plan.warnings
+    )
+
+
+def test_rejected_family_match_reports_failed_context_gate(
+    tmp_path: Path,
+) -> None:
+    project = create_project(tmp_path)
+    snapshot = tmp_path / "snapshot.json"
+    result = tmp_path / "success.json"
+    repository_path = tmp_path / "knowledge.json"
+
+    write_snapshot(
+        snapshot,
+        solution="Memoize deterministic result.",
+    )
+    write_result(
+        result,
+        status="passed",
+        experiment_id="exp1-success",
+        solution="Cache deterministic results.",
+        confidence=90,
+    )
+    payload = json.loads(result.read_text(encoding="utf-8"))
+    payload["risk"] = "high"
+    result.write_text(json.dumps(payload), encoding="utf-8")
+    KnowledgeRepository(repository_path).add_result(result)
+
+    plan = KnowledgeAwareSelfImprovementPlanner(
+        project,
+        repository_path,
+    ).build_plan(snapshot)
+
+    assert plan.candidates[0].confidence_score == 60
+    assert any(
+        "strategy family match rejected by context"
+        in warning
+        and "risk=1" in warning
+        for warning in plan.warnings
+    )
+
+
+def test_unrelated_knowledge_does_not_emit_context_warning(
+    tmp_path: Path,
+) -> None:
+    project = create_project(tmp_path)
+    snapshot = tmp_path / "snapshot.json"
+    result = tmp_path / "success.json"
+    repository_path = tmp_path / "knowledge.json"
+
+    write_snapshot(
+        snapshot,
+        problem="A separate bottleneck exists.",
+        solution="Memoize deterministic result.",
+    )
+    write_result(
+        result,
+        status="passed",
+        experiment_id="exp1-success",
+        solution="Cache deterministic results.",
+        confidence=90,
+    )
+    KnowledgeRepository(repository_path).add_result(result)
+
+    plan = KnowledgeAwareSelfImprovementPlanner(
+        project,
+        repository_path,
+    ).build_plan(snapshot)
+
+    assert not any(
+        "strategy family match rejected by context"
+        in warning
+        for warning in plan.warnings
+    )
