@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "policy_id": "dap1-voice-night",
+  "title": "Voice system overnight work",
+  "starts_at": "2026-08-03T22:00:00+03:00",
+  "expires_at": "2026-08-04T07:00:00+03:00",
+  "allowed_domains": ["voice"],
+  "allowed_path_prefixes": ["core/voice", "tests/test_voice"],
+  "minimum_trust_score": 90,
+  "maximum_risk_score": 25,
+  "maximum_changed_files": 2,
+  "maximum_commits": 5,
+  "push_allowed": false,
+  "require_trust_recommendation": "approve",
+  "emergency_stop_path": "STOP",
+  "ledger_path": "delegation_ledger.json",
+  "audit_path": "delegation_audit.jsonl"
+}

@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Callable, Mapping
 
 from .approval_gate import PromotionCommitApprovalGate
+from .delegated_approval import DelegatedApprovalRuntime
 from .self_improvement_runtime_cli import run_self_improvement_runtime
 from .verified_experiment_promotion import VerifiedExperimentPromotionRuntime
 
@@ -67,6 +68,7 @@ class RuntimeHandlerRegistry:
         runtime_command: Callable[..., object] = run_self_improvement_runtime,
         promotion_factory: Callable[[str | Path], object] = VerifiedExperimentPromotionRuntime,
         approval_factory: Callable[[str | Path], object] = PromotionCommitApprovalGate,
+        delegated_approval_factory: Callable[[str | Path], object] = DelegatedApprovalRuntime,
     ) -> None:
         if changeset_timeout_seconds <= 0:
             raise ValueError("changeset_timeout_seconds must be positive")
@@ -75,6 +77,7 @@ class RuntimeHandlerRegistry:
         self.runtime_command = runtime_command
         self.promotion_factory = promotion_factory
         self.approval_factory = approval_factory
+        self.delegated_approval_factory = delegated_approval_factory
 
     def cycle(self, payload: Mapping[str, object]) -> HandlerResult:
         project_root = _required_path(payload, "project_root")
@@ -130,6 +133,36 @@ class RuntimeHandlerRegistry:
 
     def approval(self, payload: Mapping[str, object]) -> HandlerResult:
         promotion_path = _required_path(payload, "promotion_result_path")
+        delegated_policy = payload.get("delegated_policy_path")
+        if isinstance(delegated_policy, str) and delegated_policy.strip():
+            domain = str(payload.get("domain", "")).strip().casefold()
+            if not domain:
+                return HandlerResult(
+                    "waiting_approval",
+                    "delegated approval requires an explicit diagnostic domain",
+                    str(promotion_path),
+                    str(payload.get("candidate_id", "")),
+                )
+            runtime = self.delegated_approval_factory(delegated_policy)
+            decision = runtime.execute(
+                promotion_path,
+                domain=domain,
+                message=str(payload.get("commit_message", "Jarvis delegated overnight improvement")),
+                diagnostic_report_path=(
+                    str(payload["diagnostic_report_path"])
+                    if payload.get("diagnostic_report_path")
+                    else None
+                ),
+            )
+            data = _as_mapping(decision)
+            return HandlerResult(
+                str(data.get("status", "waiting_owner")).strip().casefold(),
+                str(data.get("message", "delegated approval finished")),
+                str(promotion_path),
+                str(payload.get("candidate_id", "")),
+                str(data.get("operation_id", "")),
+                str(data.get("audit_path", "")),
+            )
         # Validate that the result is eligible and the repository still exists,
         # but do not create a token or commit without an explicit owner action.
         self.approval_factory(promotion_path)

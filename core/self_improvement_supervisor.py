@@ -92,13 +92,23 @@ class SelfImprovementSupervisor:
             if not result_path:
                 return
             candidate_id = self._field(result, "candidate_id")
+            follow_up = {
+                "experiment_result_path": result_path,
+                "candidate_id": candidate_id,
+                "parent_job_id": running.job_id,
+            }
+            for name in (
+                "delegated_policy_path",
+                "domain",
+                "diagnostic_report_path",
+                "commit_message",
+            ):
+                value = running.payload.get(name)
+                if isinstance(value, str) and value.strip():
+                    follow_up[name] = value
             self.scheduler.enqueue_unique(
                 "promotion",
-                {
-                    "experiment_result_path": result_path,
-                    "candidate_id": candidate_id,
-                    "parent_job_id": running.job_id,
-                },
+                follow_up,
                 dedupe_key=f"promotion:{candidate_id or result_path}",
             )
         elif running.kind == "promotion" and status == "promoted":
@@ -106,13 +116,23 @@ class SelfImprovementSupervisor:
             if not result_path:
                 return
             candidate_id = self._field(result, "candidate_id")
+            follow_up = {
+                "promotion_result_path": result_path,
+                "candidate_id": candidate_id,
+                "parent_job_id": running.job_id,
+            }
+            for name in (
+                "delegated_policy_path",
+                "domain",
+                "diagnostic_report_path",
+                "commit_message",
+            ):
+                value = running.payload.get(name)
+                if isinstance(value, str) and value.strip():
+                    follow_up[name] = value
             self.scheduler.enqueue_unique(
                 "approval",
-                {
-                    "promotion_result_path": result_path,
-                    "candidate_id": candidate_id,
-                    "parent_job_id": running.job_id,
-                },
+                follow_up,
                 dedupe_key=f"approval:{candidate_id or result_path}",
             )
 
