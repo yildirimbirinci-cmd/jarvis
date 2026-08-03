@@ -23,28 +23,28 @@
     "paths": [
       "artmach_assistant\\tests\\test_self_improvement_research.py"
     ],
-    "output": "...............................................                          [100%]\n47 passed in 0.83s\n"
+    "output": "...............................................                          [100%]\n47 passed in 0.87s\n"
   },
   "full_tests": {
-    "ok": false,
-    "returncode": 1,
+    "ok": true,
+    "returncode": 0,
     "counts": {
-      "passed": 1500,
-      "failed": 2,
+      "passed": 1502,
+      "failed": null,
       "errors": null,
       "skipped": 7
     },
-    "output": "........................................................................ [  4%]\n........................................................................ [  9%]\n..............................ss........................................ [ 14%]\n........................................................................ [ 19%]\n........................................................................ [ 23%]\n......................sF................................................ [ 28%]\n........................................................................ [ 33%]\n........................................................................ [ 38%]\n........................................................................ [ 42%]\n........................................................................ [ 47%]\n........................................................................ [ 52%]\n........................................................................ [ 57%]\n......................................................s................. [ 62%]\n.........................................s.............................. [ 66%]\n........................................................................ [ 71%]\n........................................................................ [ 76%]\n........................................................................ [ 81%]\n........................................................................ [ 85%]\n.....................................................................s.. [ 90%]\n.......................................................................F [ 95%]\n.........................................................s...........    [100%]\n================================== FAILURES ===================================\n_____________ test_close_event_waits_for_every_gui_owned_qthread ______________\n\n    def test_close_event_waits_for_every_gui_owned_qthread() -> None:\n        source = APP_PATH.read_text(encoding=\"utf-8\")\n        close_event = source.split(\"    def closeEvent(self, event) -> None:\", 1)[1]\n        close_event = close_event.split(\"\\n\\n\\n# Jarvis turn-aware\", 1)[0]\n    \n>       assert \"self.engine.voice.stop_speaking()\" in close_event\nE       assert 'self.engine.voice.stop_speaking()' in '\\n        \"\"\"Close safely even when startup stopped before all GUI workers existed.\"\"\"\\n        def _attr(name: str, ...exc}\",\\n        )\\n        raise\\n    finally:\\n        if coordinator is not None:\\n            coordinator.close()\\n'\n\nartmach_assistant\\tests\\test_gui_thread_shutdown.py:14: AssertionError\n____ test_cancelled_session_cannot_start_after_output_stream_open_unblocks ____\n\nmonkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x0000000060E5C090>\ntmp_path = WindowsPath('C:/Users/yildi/AppData/Local/Temp/pytest-of-yildi/pytest-463/test_cancelled_session_cannot_0')\n\n    def test_cancelled_session_cannot_start_after_output_stream_open_unblocks(\n        monkeypatch,\n        tmp_path,\n    ) -> None:\n        service, fake = _service(monkeypatch, tmp_path)\n        opening = threading.Event()\n        release = threading.Event()\n        original_output_stream = fake.OutputStream\n    \n        def blocked_output_stream(**kwargs):\n            opening.set()\n            assert release.wait(2.0)\n            return original_output_stream(**kwargs)\n    \n        monkeypatch.setattr(fake, \"OutputStream\", blocked_output_stream)\n        session_id = service.begin_speech_session()\n        cancel_event = service._speech_cancel_event\n        result: dict[str, object] = {}\n    \n        def play() -> None:\n            try:\n                service._play_audio_resilient(\n                    np.ones((2400,), dtype=np.float32),\n                    24000,\n                    3,\n                    session_id=session_id,\n                    cancel_event=cancel_event,\n                )\n            except BaseException as exc:\n                result[\"error\"] = exc\n    \n        worker = threading.Thread(target=play, daemon=True)\n        worker.start()\n>       assert opening.wait(1.0)\nE       assert False\nE        +  where False = wait(1.0)\nE        +    where wait = <threading.Event at 0x60e15310: unset>.wait\n\nartmach_assistant\\tests\\test_voice_audio_device_recovery.py:189: AssertionError\n=========================== short test summary info ===========================\nFAILED artmach_assistant/tests/test_gui_thread_shutdown.py::test_close_event_waits_for_every_gui_owned_qthread\nFAILED artmach_assistant/tests/test_voice_audio_device_recovery.py::test_cancelled_session_cannot_start_after_output_stream_open_unblocks\n2 failed, 1500 passed, 7 skipped in 49.87s\n"
+    "output": "........................................................................ [  4%]\n........................................................................ [  9%]\n..............................ss........................................ [ 14%]\n........................................................................ [ 19%]\n........................................................................ [ 23%]\n......................s................................................. [ 28%]\n........................................................................ [ 33%]\n........................................................................ [ 38%]\n........................................................................ [ 42%]\n........................................................................ [ 47%]\n........................................................................ [ 52%]\n........................................................................ [ 57%]\n......................................................s................. [ 62%]\n.........................................s.............................. [ 66%]\n........................................................................ [ 71%]\n........................................................................ [ 76%]\n........................................................................ [ 81%]\n........................................................................ [ 85%]\n.....................................................................s.. [ 90%]\n........................................................................ [ 95%]\n.........................................................s...........    [100%]\n1502 passed, 7 skipped in 41.45s\n"
   },
   "baseline_comparison": {
-    "ok": false,
+    "ok": true,
     "minimum_passed": 1373,
     "reference_skipped": 7,
-    "actual_passed": 1500,
+    "actual_passed": 1502,
     "actual_skipped": 7,
-    "actual_failed": 2,
+    "actual_failed": 0,
     "actual_errors": 0,
     "note": "Yeni testler eklendiği için passed sayısı baseline'dan yüksek olabilir. Skipped sayısının birebir eşit olması zorunlu değildir; başarısızlık ve collection error olmaması zorunludur."
   },
-  "status": "NOT_COMPLETE"
+  "status": "COMPLETE"
 }
