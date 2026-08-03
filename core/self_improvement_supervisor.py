@@ -80,6 +80,42 @@ class SelfImprovementSupervisor:
             return str(result.get("status", "completed")).strip().casefold()
         return str(getattr(result, "status", "completed")).strip().casefold()
 
+    @staticmethod
+    def _field(result: object, name: str) -> str:
+        if isinstance(result, Mapping):
+            return str(result.get(name, "")).strip()
+        return str(getattr(result, name, "")).strip()
+
+    def _enqueue_follow_up(self, running: ScheduledImprovementJob, result: object, status: str) -> None:
+        if running.kind == "cycle" and status == "completed":
+            result_path = self._field(result, "artifact_path") or self._field(result, "experiment_result_path")
+            if not result_path:
+                return
+            candidate_id = self._field(result, "candidate_id")
+            self.scheduler.enqueue_unique(
+                "promotion",
+                {
+                    "experiment_result_path": result_path,
+                    "candidate_id": candidate_id,
+                    "parent_job_id": running.job_id,
+                },
+                dedupe_key=f"promotion:{candidate_id or result_path}",
+            )
+        elif running.kind == "promotion" and status == "promoted":
+            result_path = self._field(result, "artifact_path") or self._field(result, "promotion_result_path")
+            if not result_path:
+                return
+            candidate_id = self._field(result, "candidate_id")
+            self.scheduler.enqueue_unique(
+                "approval",
+                {
+                    "promotion_result_path": result_path,
+                    "candidate_id": candidate_id,
+                    "parent_job_id": running.job_id,
+                },
+                dedupe_key=f"approval:{candidate_id or result_path}",
+            )
+
     def tick(self) -> SupervisorTickResult:
         job = self.scheduler.next_pending()
         if job is None:
@@ -88,12 +124,13 @@ class SelfImprovementSupervisor:
         try:
             result = self.handlers[running.kind](running.payload)
             status = self._status_of(result)
-            if running.kind == "promotion" and status == "promoted":
-                self.scheduler.finish(running.job_id, "waiting_approval")
-                return SupervisorTickResult("waiting_approval", running.job_id, running.kind, "promotion completed; explicit commit approval is required")
             if status in {"completed", "promoted", "committed"}:
+                self._enqueue_follow_up(running, result, status)
                 self.scheduler.finish(running.job_id, "completed")
                 return SupervisorTickResult("completed", running.job_id, running.kind, status)
+            if status == "waiting_approval":
+                self.scheduler.finish(running.job_id, "waiting_approval")
+                return SupervisorTickResult("waiting_approval", running.job_id, running.kind, "explicit owner approval is required")
             if status == "blocked":
                 self.scheduler.finish(running.job_id, "blocked")
                 return SupervisorTickResult("blocked", running.job_id, running.kind, "job safely blocked")

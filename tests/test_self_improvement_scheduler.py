@@ -36,3 +36,19 @@ def test_scheduler_rejects_unknown_kind(tmp_path: Path) -> None:
         assert "unsupported" in str(exc)
     else:
         raise AssertionError("unknown kind was accepted")
+
+
+def test_enqueue_unique_reuses_existing_transition(tmp_path: Path) -> None:
+    scheduler = SelfImprovementScheduler(tmp_path / "state.json")
+    first = scheduler.enqueue_unique(
+        "promotion",
+        {"experiment_result_path": "one.json"},
+        dedupe_key="promotion:candidate-1",
+    )
+    second = scheduler.enqueue_unique(
+        "promotion",
+        {"experiment_result_path": "two.json"},
+        dedupe_key="promotion:candidate-1",
+    )
+    assert second == first
+    assert len(scheduler.jobs()) == 1

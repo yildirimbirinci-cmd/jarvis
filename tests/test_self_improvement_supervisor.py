@@ -32,14 +32,53 @@ def test_cycle_executes_and_completes(tmp_path: Path) -> None:
     assert seen == [{"trigger_id": "t1"}]
 
 
-def test_promotion_waits_for_explicit_approval(tmp_path: Path) -> None:
-    supervisor = _supervisor(tmp_path)
-    job = supervisor.enqueue_promotion({"result_path": "promotion.json"})
+def test_promotion_enqueues_explicit_approval_job(tmp_path: Path) -> None:
+    supervisor = _supervisor(
+        tmp_path,
+        promotion=lambda payload: SimpleNamespace(
+            status="promoted",
+            artifact_path="promotion.json",
+            candidate_id="candidate-1",
+        ),
+    )
+    job = supervisor.enqueue_promotion({"experiment_result_path": "experiment.json"})
+    result = supervisor.tick()
+    assert result.status == "completed"
+    stored = next(row for row in supervisor.scheduler.jobs() if row.job_id == job.job_id)
+    assert stored.status == "completed"
+    approval = supervisor.scheduler.next_pending()
+    assert approval is not None
+    assert approval.kind == "approval"
+    assert approval.payload["promotion_result_path"] == "promotion.json"
+
+
+def test_cycle_enqueues_one_deduplicated_promotion(tmp_path: Path) -> None:
+    supervisor = _supervisor(
+        tmp_path,
+        cycle=lambda payload: SimpleNamespace(
+            status="completed",
+            artifact_path="experiment.json",
+            candidate_id="candidate-1",
+        ),
+    )
+    supervisor.enqueue_cycle({"trigger_id": "t1"})
+    supervisor.enqueue_cycle({"trigger_id": "t2"})
+    assert supervisor.tick().status == "completed"
+    assert supervisor.tick().status == "completed"
+    promotions = [job for job in supervisor.scheduler.jobs() if job.kind == "promotion"]
+    assert len(promotions) == 1
+
+
+def test_approval_handler_persists_waiting_state(tmp_path: Path) -> None:
+    supervisor = _supervisor(
+        tmp_path,
+        approval=lambda payload: SimpleNamespace(status="waiting_approval"),
+    )
+    job = supervisor.enqueue_approval({"promotion_result_path": "promotion.json"})
     result = supervisor.tick()
     assert result.status == "waiting_approval"
     stored = next(row for row in supervisor.scheduler.jobs() if row.job_id == job.job_id)
     assert stored.status == "waiting_approval"
-    assert supervisor.scheduler.next_pending() is None
 
 
 def test_failed_job_retries_then_fails(tmp_path: Path) -> None:

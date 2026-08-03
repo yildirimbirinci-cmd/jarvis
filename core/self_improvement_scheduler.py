@@ -121,6 +121,25 @@ class SelfImprovementScheduler:
         self._persist()
         return job
 
+
+    def enqueue_unique(
+        self,
+        kind: str,
+        payload: dict[str, object],
+        *,
+        dedupe_key: str,
+    ) -> ScheduledImprovementJob:
+        normalized_kind = str(kind).strip().casefold()
+        normalized_key = str(dedupe_key).strip()
+        if not normalized_key:
+            raise ValueError("dedupe_key must not be empty")
+        for job in self._jobs.values():
+            if job.kind == normalized_kind and str(job.payload.get("dedupe_key", "")) == normalized_key:
+                return job
+        enriched = dict(payload)
+        enriched["dedupe_key"] = normalized_key
+        return self.enqueue(normalized_kind, enriched)
+
     def next_pending(self) -> ScheduledImprovementJob | None:
         pending = [job for job in self._jobs.values() if job.status == "pending"]
         return min(pending, key=lambda item: (item.created_at, item.job_id), default=None)
