@@ -39,6 +39,7 @@ class SelfImprovementSupervisor:
         cycle_handler: JobHandler,
         promotion_handler: JobHandler,
         approval_handler: JobHandler,
+        engineering_handler: JobHandler | None = None,
         idle_seconds: float = 2.0,
         max_attempts: int = 3,
     ) -> None:
@@ -53,6 +54,8 @@ class SelfImprovementSupervisor:
             "promotion": promotion_handler,
             "approval": approval_handler,
         }
+        if engineering_handler is not None:
+            self.handlers["engineering"] = engineering_handler
         self.idle_seconds = float(idle_seconds)
         self.max_attempts = int(max_attempts)
         self._stop_event = threading.Event()
@@ -64,6 +67,11 @@ class SelfImprovementSupervisor:
 
     def stop(self) -> None:
         self._stop_event.set()
+
+    def enqueue_engineering(self, payload: dict[str, object]) -> ScheduledImprovementJob:
+        if "engineering" not in self.handlers:
+            raise RuntimeError("engineering handler is not configured")
+        return self.scheduler.enqueue("engineering", payload)
 
     def enqueue_cycle(self, payload: dict[str, object]) -> ScheduledImprovementJob:
         return self.scheduler.enqueue("cycle", payload)
@@ -142,7 +150,10 @@ class SelfImprovementSupervisor:
             return SupervisorTickResult("idle", "", "", "no pending self-improvement work")
         running = self.scheduler.mark_running(job.job_id)
         try:
-            result = self.handlers[running.kind](running.payload)
+            handler = self.handlers.get(running.kind)
+            if handler is None:
+                raise RuntimeError(f"no handler configured for job kind: {running.kind}")
+            result = handler(running.payload)
             status = self._status_of(result)
             if status in {"completed", "promoted", "committed"}:
                 self._enqueue_follow_up(running, result, status)

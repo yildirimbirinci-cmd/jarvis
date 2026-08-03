@@ -57,7 +57,7 @@ class SelfImprovementScheduler:
     startup. Terminal jobs remain in the state file for auditability.
     """
 
-    ALLOWED_KINDS = {"cycle", "promotion", "approval"}
+    ALLOWED_KINDS = {"engineering", "cycle", "promotion", "approval"}
 
     def __init__(self, state_path: str | Path) -> None:
         self.state_path = Path(state_path).expanduser().resolve(strict=False)

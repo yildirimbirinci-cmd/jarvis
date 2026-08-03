@@ -69,6 +69,7 @@ class RuntimeHandlerRegistry:
         promotion_factory: Callable[[str | Path], object] = VerifiedExperimentPromotionRuntime,
         approval_factory: Callable[[str | Path], object] = PromotionCommitApprovalGate,
         delegated_approval_factory: Callable[[str | Path], object] = DelegatedApprovalRuntime,
+        engineering_step_registry: object | None = None,
     ) -> None:
         if changeset_timeout_seconds <= 0:
             raise ValueError("changeset_timeout_seconds must be positive")
@@ -78,6 +79,7 @@ class RuntimeHandlerRegistry:
         self.promotion_factory = promotion_factory
         self.approval_factory = approval_factory
         self.delegated_approval_factory = delegated_approval_factory
+        self.engineering_step_registry = engineering_step_registry
 
     def cycle(self, payload: Mapping[str, object]) -> HandlerResult:
         project_root = _required_path(payload, "project_root")
@@ -173,9 +175,25 @@ class RuntimeHandlerRegistry:
             str(payload.get("candidate_id", "")),
         )
 
+
+    def engineering(self, payload: Mapping[str, object]) -> HandlerResult:
+        if self.engineering_step_registry is None:
+            return HandlerResult("blocked", "engineering step registry is not configured")
+        result = self.engineering_step_registry.execute(payload)
+        data = _as_mapping(result)
+        return HandlerResult(
+            str(data.get("status", "failed")).strip().casefold(),
+            str(data.get("message", "engineering step finished")),
+            str(data.get("artifact_path", "")),
+            str(payload.get("engineering_step_id", "")),
+        )
+
     def handlers(self) -> dict[str, Callable[[Mapping[str, object]], object]]:
-        return {
+        handlers = {
             "cycle": self.cycle,
             "promotion": self.promotion,
             "approval": self.approval,
         }
+        if self.engineering_step_registry is not None:
+            handlers["engineering"] = self.engineering
+        return handlers
