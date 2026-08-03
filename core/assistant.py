@@ -146,6 +146,7 @@ from artmach_assistant.core.maintenance_advisor import MaintenanceAdvisor, Maint
 from artmach_assistant.core.notification_store import NotificationStore
 from artmach_assistant.core.self_reflection_engine import (
     classify_self_feedback,
+    classify_self_feedback_many,
     choose_reflection_research_result,
     natural_research_start_message,
 )
@@ -3949,8 +3950,8 @@ class AssistantEngine:
         store = getattr(self, "self_improvement_research", None)
         if store is None:
             return
-        task = store.load()
-        if task is None or task.task_id != task_id or task.state not in {"queued", "researching"}:
+        task = store.load(task_id)
+        if task is None or task.state not in {"queued", "researching"}:
             return
         try:
             task = store.update_progress(
@@ -3966,7 +3967,7 @@ class AssistantEngine:
                 task,
                 stage="architecture_evidence",
                 progress=55,
-                status_message="Yavaşlık kanıtını mimari bulgulardan ayırıyorum.",
+                status_message="Araştırma alanına ait kanıtları mimari bulgulardan ayırıyorum.",
             )
             architecture_assessment = self._project_improvement_runtime().assessment(
                 own_code=True,
@@ -3978,7 +3979,7 @@ class AssistantEngine:
                 task,
                 stage="recommendation",
                 progress=80,
-                status_message="En düşük riskli çözümü ve doğrulama yöntemini karşılaştırıyorum.",
+                status_message="Bulguları, belirsizlikleri ve gerekli doğrulamayı karşılaştırıyorum.",
             )
             if not store.is_active(task_id):
                 return
@@ -4057,39 +4058,89 @@ class AssistantEngine:
         store = getattr(self, "self_improvement_research", None)
         if store is None:
             return None
+
+        category_labels = {
+            "performance": "performans",
+            "repetition": "tekrar",
+            "context": "bağlam",
+            "dialogue_quality": "konuşma kalitesi",
+            "voice_stability": "ses kararlılığı",
+        }
+
+        def select_task(*, states: tuple[str, ...] | None = None):
+            tasks = list(store.list_tasks(states=states))
+            if not tasks:
+                return None, ""
+            normalized = self.command_key(text)
+            for task in tasks:
+                if task.task_id.casefold() in text.casefold():
+                    return task, ""
+            requested = classify_self_feedback_many(text)
+            requested_categories = {item.category for item in requested}
+            if requested_categories:
+                matches = [task for task in tasks if task.feedback_category in requested_categories]
+                if len(matches) == 1:
+                    return matches[0], ""
+                if matches:
+                    tasks = matches
+            if len(tasks) == 1:
+                return tasks[0], ""
+            lines = []
+            for task in tasks[-8:]:
+                label = category_labels.get(task.feedback_category, task.feedback_category)
+                lines.append(f"- {task.task_id}: {label} ({task.state})")
+            return None, (
+                "Birden fazla araştırma var. Hangisini kastettiğini kategori veya kimlikle söyle:\n"
+                + "\n".join(lines)
+            )
+
         if asks_to_cancel_self_improvement_research(text):
-            task = store.load()
-            if task is None or task.state not in {"queued", "researching"}:
+            task, ambiguity = select_task(states=("queued", "researching"))
+            if ambiguity:
+                return ambiguity
+            if task is None:
                 return "Şu anda durdurulabilecek aktif bir kendini geliştirme araştırması yok."
             store.cancel(task)
-            return "Araştırmayı durdurdum. Hiçbir dosyayı değiştirmedim."
+            label = category_labels.get(task.feedback_category, task.feedback_category)
+            return f"{label.capitalize()} araştırmasını durdurdum. Hiçbir dosyayı değiştirmedim."
+
         if asks_to_restart_self_improvement_research(text):
-            previous = store.load()
-            if previous is None:
+            task, ambiguity = select_task()
+            if ambiguity:
+                return ambiguity
+            if task is None:
                 return "Yeniden başlatabileceğim önceki bir araştırma yok."
-            if previous.state in {"queued", "researching"}:
-                store.cancel(previous, "Yeni araştırma başlatılmadan önce önceki görev durduruldu.")
-            task = store.start(
-                previous.complaint,
-                feedback_category=previous.feedback_category,
-                reflection_confidence=previous.reflection_confidence,
+            if task.state in {"queued", "researching"}:
+                store.cancel(task, "Yeni araştırma başlatılmadan önce önceki görev durduruldu.")
+            restarted = store.start(
+                task.complaint,
+                feedback_category=task.feedback_category,
+                reflection_confidence=task.reflection_confidence,
             )
             worker = threading.Thread(
                 target=self._run_self_improvement_research,
-                args=(task.task_id,),
-                name=f"jarvis-self-improvement-{task.task_id}",
+                args=(restarted.task_id,),
+                name=f"jarvis-self-improvement-{restarted.task_id}",
                 daemon=True,
             )
             worker.start()
-            return "Araştırmayı baştan başlattım. Önceki sonuçları kesin kabul etmeden kanıtları yeniden inceleyeceğim."
+            label = category_labels.get(restarted.feedback_category, restarted.feedback_category)
+            return (
+                f"{label.capitalize()} araştırmasını {restarted.task_id} kimliğiyle baştan başlattım. "
+                "Önceki sonucu kesin kabul etmeden kanıtları yeniden inceleyeceğim."
+            )
+
         if asks_for_experience_report(text):
             experiences = getattr(self, "self_improvement_experiences", None)
             if experiences is None:
                 return "Henüz geçmiş deneyim kaydım yok."
             return experiences.report()
+
         outcome = parse_experience_outcome(text)
         if outcome is not None:
-            task = store.load()
+            task, ambiguity = select_task(states=("solution_found",))
+            if ambiguity:
+                return ambiguity
             experiences = getattr(self, "self_improvement_experiences", None)
             if task is None or experiences is None:
                 return "Bu geri bildirimi bağlayabileceğim tamamlanmış bir araştırma yok."
@@ -4097,71 +4148,135 @@ class AssistantEngine:
             if recorded is None:
                 return "Bu geri bildirimi bağlayabileceğim deneyim kaydı bulunamadı."
             return (
-                f"Bunu geçmiş deneyimime kaydettim: çözüm {recorded.outcome_label()}. "
+                f"Bunu {task.task_id} araştırmasının deneyimine kaydettim: çözüm {recorded.outcome_label()}. "
                 "Benzer bir sorun tekrar oluşursa bu sonucu karar verirken kullanacağım."
             )
+
         if asks_for_self_improvement_plan(text):
-            task = store.load()
+            task, ambiguity = select_task(states=("solution_found",))
+            if ambiguity:
+                return ambiguity
             if task is None:
-                return "Henüz planlanabilecek bir kendini geliştirme araştırması yok."
-            if task.state != "solution_found":
-                return "Plan hazırlayabilmem için araştırmanın tamamlanması gerekiyor. " + task.status_report()
+                return "Henüz planlanabilecek tamamlanmış bir kendini geliştirme araştırması yok."
             if not task.plan_options:
                 task = store.prepare_plan(task)
             return task.plan_report()
+
         if asks_for_self_improvement_journal(text):
-            task = store.load()
+            task, ambiguity = select_task()
+            if ambiguity:
+                return ambiguity
             if task is None:
                 return "Henüz başlatılmış bir kendini geliştirme araştırması yok."
             return task.journal_report()
+
         if asks_for_self_improvement_technical_details(text):
-            task = store.load()
+            task, ambiguity = select_task()
+            if ambiguity:
+                return ambiguity
             if task is None:
                 return "Henüz başlatılmış bir kendini geliştirme araştırması yok."
             return task.technical_report()
+
         if asks_for_self_improvement_status(text):
-            task = store.load()
+            task, ambiguity = select_task(states=("queued", "researching", "solution_found", "failed", "cancelled"))
+            if ambiguity:
+                return ambiguity
             if task is None:
                 return "Henüz başlatılmış bir kendini geliştirme araştırması yok."
-            return task.status_report()
+            label = category_labels.get(task.feedback_category, task.feedback_category)
+            return f"{task.task_id} — {label}: {task.status_report()}"
+
         if asks_for_self_improvement_result(text):
-            task = store.load()
+            task, ambiguity = select_task(states=("solution_found", "failed", "cancelled", "queued", "researching"))
+            if ambiguity:
+                return ambiguity
             if task is None:
                 return "Henüz başlatılmış bir kendini geliştirme araştırması yok."
-            return task.user_report()
-        feedback = classify_self_feedback(text)
-        if feedback is None and not looks_like_self_improvement_complaint(text):
+            label = category_labels.get(task.feedback_category, task.feedback_category)
+            return f"{task.task_id} — {label} araştırması\n\n{task.user_report()}"
+
+        feedbacks = classify_self_feedback_many(text)
+        if not feedbacks:
+            feedback = classify_self_feedback(text)
+            if feedback is not None:
+                feedbacks = (feedback,)
+        if not feedbacks and not looks_like_self_improvement_complaint(text):
             return None
-        current = store.load()
-        if current is not None and current.state in {"queued", "researching"}:
-            return current.status_report()
-        task = store.start(
-            text,
-            feedback_category=(feedback.category if feedback is not None else "performance"),
-            reflection_confidence=(feedback.confidence if feedback is not None else 0.75),
-        )
-        worker = threading.Thread(
-            target=self._run_self_improvement_research,
-            args=(task.task_id,),
-            name=f"jarvis-self-improvement-{task.task_id}",
-            daemon=True,
-        )
-        worker.start()
+        if not feedbacks:
+            feedbacks = ()
+
+        active_by_category = {task.feedback_category: task for task in store.active_tasks()}
+        started = []
+        reused = []
+        if feedbacks:
+            for feedback in feedbacks:
+                existing = active_by_category.get(feedback.category)
+                if existing is not None:
+                    reused.append(existing)
+                    continue
+                task = store.start(
+                    text,
+                    feedback_category=feedback.category,
+                    reflection_confidence=feedback.confidence,
+                )
+                started.append((task, feedback))
+                worker = threading.Thread(
+                    target=self._run_self_improvement_research,
+                    args=(task.task_id,),
+                    name=f"jarvis-self-improvement-{task.task_id}",
+                    daemon=True,
+                )
+                worker.start()
+        else:
+            existing = active_by_category.get("performance")
+            if existing is not None:
+                reused.append(existing)
+            else:
+                task = store.start(text, feedback_category="performance", reflection_confidence=0.75)
+                started.append((task, None))
+                worker = threading.Thread(
+                    target=self._run_self_improvement_research, args=(task.task_id,),
+                    name=f"jarvis-self-improvement-{task.task_id}", daemon=True,
+                )
+                worker.start()
+
+        if reused and not started:
+            if len(reused) == 1:
+                return reused[0].status_report()
+            return "Bu alanlardaki araştırmalar zaten devam ediyor:\n" + "\n".join(
+                f"- {task.task_id}: {category_labels.get(task.feedback_category, task.feedback_category)}"
+                for task in reused
+            )
+
+        all_tasks = [task for task, _feedback in started] + reused
         self._remember_action_context(
             "self_improvement_research",
             "Kullanıcı geri bildirimi araştırılıyor",
-            task.user_report(),
+            ", ".join(task.task_id for task in all_tasks),
         )
+        if len(all_tasks) > 1:
+            lines = [
+                f"- {task.task_id}: {category_labels.get(task.feedback_category, task.feedback_category)}"
+                for task in all_tasks
+            ]
+            return (
+                f"{len(all_tasks)} ayrı araştırmayı birbirine karıştırmadan başlattım:\n"
+                + "\n".join(lines)
+                + "\nHer araştırmanın durumu, günlüğü ve sonucu ayrı tutulacak. "
+                "Sonuç hazır olduğunda sana bildireceğim; şimdilik kodumu değiştirmeyeceğim."
+            )
+
+        task = all_tasks[0]
+        feedback = started[0][1] if started else None
         if feedback is not None:
             message = natural_research_start_message(feedback)
             if task.experience_context:
                 message += " " + task.experience_context
-            return message
+            return f"{task.task_id}: {message}"
         return (
-            "Haklısın. Bunun nedenini henüz bilmiyorum; araştırma görevini başlattım. "
-            "Normal sohbeti, kendi kodumu geliştirme işlemlerini ve ses işlemlerini "
-            "birbirine karıştırmadan ayrı ayrı inceleyeceğim. Sonuç hazır olduğunda "
-            "sana bildireceğim. Şimdilik kodumu değiştirmeyeceğim."
+            f"{task.task_id}: Haklısın. Bunun nedenini henüz bilmiyorum; araştırma görevini başlattım. "
+            "Sonuç hazır olduğunda sana bildireceğim. Şimdilik kodumu değiştirmeyeceğim."
         )
 
     def _maintenance_request(self, text: str) -> str | None:

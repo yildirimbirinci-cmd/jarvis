@@ -25,6 +25,7 @@ _CATEGORY_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
             "yavassin", "yavasladin", "yavas dusun", "agirlastin",
             "agir calis", "bekletiyorsun", "gec cevap", "uzun dusun",
             "eskisi kadar akici degil", "fazla suruyor", "uzun suruyor",
+            "performans", "performansin",
         ),
     ),
     (
@@ -45,6 +46,7 @@ _CATEGORY_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
         "dialogue_quality",
         (
             "dogal konusmuyorsun", "eskisi kadar dogal degil",
+            "konusma kalitesi", "konusma kaliten", "diyalog kalitesi",
             "robot gibi", "anlasilir konus", "fazla teknik konus",
             "seni anlamiyorum", "cevabin anlasilmiyor",
         ),
@@ -105,6 +107,35 @@ def classify_self_feedback(text: object) -> SelfReflectionFeedback | None:
         research_scope=_SCOPES[best_category],
     )
 
+
+
+def classify_self_feedback_many(text: object) -> tuple[SelfReflectionFeedback, ...]:
+    """Return every distinct self-feedback category present in one message.
+
+    A single user turn may intentionally request separate investigations, for
+    example performance and dialogue quality.  The legacy classifier keeps
+    returning only the strongest category for backward compatibility.
+    """
+    normalized = _normalize(text)
+    if not normalized:
+        return ()
+    external_markers = ("internetim", "bilgisayarim", "telefonum", "oyun", "site", "wifi")
+    if any(marker in normalized for marker in external_markers):
+        return ()
+    results: list[SelfReflectionFeedback] = []
+    for category, markers in _CATEGORY_RULES:
+        score = sum(1 for marker in markers if marker in normalized)
+        if score <= 0:
+            continue
+        confidence = min(0.99, 0.72 + (0.09 * score))
+        results.append(SelfReflectionFeedback(
+            category=category,
+            confidence=confidence,
+            complaint=" ".join(str(text or "").split())[:2000],
+            acknowledgement=_ACKNOWLEDGEMENTS[category],
+            research_scope=_SCOPES[category],
+        ))
+    return tuple(results)
 
 def natural_research_start_message(feedback: SelfReflectionFeedback) -> str:
     return (

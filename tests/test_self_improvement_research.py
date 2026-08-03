@@ -61,7 +61,8 @@ def test_store_round_trip_and_plain_language_report(tmp_path: Path) -> None:
     assert loaded == completed
     report = loaded.user_report()
     assert "Ne buldum:" in report
-    assert "Önerdiğim çözüm:" in report
+    assert "Araştırmanın işaret ettiği yaklaşım:" in report
+    assert "çözüm seçmedim" in report
     assert "henüz hiçbir dosyayı değiştirmedim" in report
     assert "cyclomatic" not in report
 
@@ -445,3 +446,59 @@ def test_duplicate_runtime_findings_are_collapsed() -> None:
     assert result["evidence_ids"] == ("DUP",)
     assert any("Tekrar sayısı: 9" in item for item in result["technical_details"])
     assert not any("Tekrar sayısı: 4" in item for item in result["technical_details"])
+
+
+def test_multiple_feedback_categories_are_extracted_from_one_message() -> None:
+    feedbacks = reflection_module.classify_self_feedback_many(
+        "Aynı anda iki araştırma başlat. Birincisi performansın. "
+        "İkincisi konuşma kaliten."
+    )
+    assert [item.category for item in feedbacks] == ["performance", "dialogue_quality"]
+
+
+def test_store_keeps_multiple_research_tasks_separate(tmp_path: Path) -> None:
+    store = SelfImprovementResearchStore(tmp_path / "research.json")
+    performance = store.start(
+        "Performansını araştır.", feedback_category="performance", reflection_confidence=0.9
+    )
+    dialogue = store.start(
+        "Konuşma kaliteni araştır.", feedback_category="dialogue_quality", reflection_confidence=0.9
+    )
+    assert performance.task_id != dialogue.task_id
+    assert store.load(performance.task_id) == performance
+    assert store.load(dialogue.task_id) == dialogue
+    assert {task.feedback_category for task in store.active_tasks()} == {
+        "performance", "dialogue_quality"
+    }
+
+
+def test_progress_of_one_research_does_not_overwrite_the_other(tmp_path: Path) -> None:
+    store = SelfImprovementResearchStore(tmp_path / "research.json")
+    performance = store.start("Performansını araştır.", feedback_category="performance")
+    dialogue = store.start("Konuşma kaliteni araştır.", feedback_category="dialogue_quality")
+    updated = store.update_progress(
+        performance, stage="runtime", progress=55, status_message="Performansı ölçüyorum."
+    )
+    assert store.load(updated.task_id).progress == 55
+    untouched = store.load(dialogue.task_id)
+    assert untouched is not None
+    assert untouched.progress == 0
+    assert untouched.feedback_category == "dialogue_quality"
+
+
+def test_research_report_does_not_claim_solution_selection_or_plan(tmp_path: Path) -> None:
+    store = SelfImprovementResearchStore(tmp_path / "research.json")
+    task = store.start("Konuşma kaliteni araştır.", feedback_category="dialogue_quality")
+    completed = store.complete(
+        task,
+        summary="Teknik ayrıntılar ana cevaba karışıyor.",
+        cause="Sunum katmanları ayrılmamış olabilir.",
+        solution="Günlük dil ve teknik ayrıntıyı ayrı sunmak değerlendirilebilir.",
+        benefit="Daha anlaşılır cevaplar.",
+        risk="Aşırı sadeleştirme.",
+    )
+    report = completed.user_report()
+    assert "çözüm seçmedim" in report
+    assert "plan veya patch üretmedim" in report
+    assert "Seçtiğimiz çözüm" not in report
+    assert "Uygulama yaklaşımı" not in report

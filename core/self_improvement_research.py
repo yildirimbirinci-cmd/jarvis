@@ -297,11 +297,12 @@ class SelfImprovementResearchTask:
             "Araştırmayı tamamladım.\n\n"
             f"Ne buldum: {self.summary}\n"
             f"Bunun anlamı: {self.cause}\n"
-            f"Önerdiğim çözüm: {self.solution}\n"
-            f"Beklenen fayda: {self.benefit}\n"
-            f"Risk: {self.risk}\n\n"
-            "henüz hiçbir dosyayı değiştirmedim. Bu çözüm için plan hazırlamamı "
-            "isteyebilirsin. Teknik kayıtları görmek için 'teknik ayrıntıları göster' de."
+            f"Araştırmanın işaret ettiği yaklaşım: {self.solution}\n"
+            f"Olası fayda: {self.benefit}\n"
+            f"Belirsizlik veya risk: {self.risk}\n\n"
+            "Bu yalnızca araştırma sonucudur; çözüm seçmedim, plan veya patch üretmedim ve "
+            "henüz hiçbir dosyayı değiştirmedim. Plan istersen Self Improvement Planner ayrı olarak çalışır. "
+            "Teknik kayıtları görmek için 'teknik ayrıntıları göster' de."
         )
 
     def plan_report(self) -> str:
@@ -370,8 +371,85 @@ class SelfImprovementResearchStore:
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path).expanduser().resolve(strict=False)
         self.history_path = self.path.with_name(self.path.stem + "_history.json")
+        self.tasks_path = self.path.with_name(self.path.stem + "_tasks.json")
         self.experience_store = None
         self._lock = threading.RLock()
+
+    def _load_tasks(self) -> list[SelfImprovementResearchTask]:
+        if not self.tasks_path.exists():
+            current = self._load_current_only()
+            return [current] if current is not None else []
+        try:
+            if self.tasks_path.stat().st_size > self.MAX_BYTES * 4:
+                return []
+            payload = json.loads(self.tasks_path.read_text(encoding="utf-8"))
+            if not isinstance(payload, list):
+                return []
+            tasks: list[SelfImprovementResearchTask] = []
+            for item in payload[-50:]:
+                if not isinstance(item, dict):
+                    continue
+                try:
+                    task = SelfImprovementResearchTask.from_dict(item)
+                except (ValueError, TypeError):
+                    continue
+                if task.task_id and task.created_at:
+                    tasks.append(task)
+            return tasks
+        except (OSError, ValueError, TypeError, UnicodeError):
+            return []
+
+    def _save_tasks(self, tasks: Iterable[SelfImprovementResearchTask]) -> None:
+        deduplicated: dict[str, SelfImprovementResearchTask] = {}
+        for task in tasks:
+            if task.task_id:
+                deduplicated[task.task_id] = task
+        ordered = sorted(deduplicated.values(), key=lambda item: item.created_at)[-50:]
+        encoded = json.dumps(
+            [task.to_dict() for task in ordered],
+            ensure_ascii=False, indent=2, allow_nan=False,
+        ).encode("utf-8")
+        self.tasks_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="wb", dir=self.tasks_path.parent,
+                prefix=f".{self.tasks_path.name}.", suffix=".tmp", delete=False,
+            ) as handle:
+                handle.write(encoded)
+                handle.write(b"\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+                temporary = Path(handle.name)
+            os.replace(temporary, self.tasks_path)
+            temporary = None
+        finally:
+            if temporary is not None and temporary.exists():
+                temporary.unlink(missing_ok=True)
+
+    def _load_current_only(self) -> SelfImprovementResearchTask | None:
+        if not self.path.exists():
+            return None
+        try:
+            if self.path.stat().st_size > self.MAX_BYTES:
+                return None
+            payload = json.loads(self.path.read_text(encoding="utf-8"))
+            if not isinstance(payload, dict):
+                return None
+            task = SelfImprovementResearchTask.from_dict(payload)
+            return task if task.task_id and task.created_at else None
+        except (OSError, ValueError, TypeError, UnicodeError):
+            return None
+
+    def list_tasks(self, *, states: Iterable[str] | None = None) -> tuple[SelfImprovementResearchTask, ...]:
+        allowed = set(states or ())
+        tasks = self._load_tasks()
+        if allowed:
+            tasks = [task for task in tasks if task.state in allowed]
+        return tuple(sorted(tasks, key=lambda item: item.created_at))
+
+    def active_tasks(self) -> tuple[SelfImprovementResearchTask, ...]:
+        return self.list_tasks(states=("queued", "researching"))
 
     def _load_history(self) -> list[SelfImprovementResearchTask]:
         if not self.history_path.exists():
@@ -435,19 +513,14 @@ class SelfImprovementResearchStore:
         ranked.sort(key=lambda item: item[0], reverse=True)
         return tuple(task for score, task in ranked if score >= 0.20)[:limit]
 
-    def load(self) -> SelfImprovementResearchTask | None:
-        if not self.path.exists():
-            return None
-        try:
-            if self.path.stat().st_size > self.MAX_BYTES:
-                return None
-            payload = json.loads(self.path.read_text(encoding="utf-8"))
-            if not isinstance(payload, dict):
-                return None
-            task = SelfImprovementResearchTask.from_dict(payload)
-            return task if task.task_id and task.created_at else None
-        except (OSError, ValueError, TypeError, UnicodeError):
-            return None
+    def load(self, task_id: str | None = None) -> SelfImprovementResearchTask | None:
+        if task_id:
+            for task in self._load_tasks():
+                if task.task_id == task_id:
+                    return task
+            current = self._load_current_only()
+            return current if current is not None and current.task_id == task_id else None
+        return self._load_current_only()
 
     def save(self, task: SelfImprovementResearchTask) -> None:
         if task.state not in _ALLOWED_STATES:
@@ -478,6 +551,9 @@ class SelfImprovementResearchStore:
             finally:
                 if temporary is not None and temporary.exists():
                     temporary.unlink(missing_ok=True)
+            tasks = [item for item in self._load_tasks() if item.task_id != task.task_id]
+            tasks.append(task)
+            self._save_tasks(tasks)
 
     def start(
         self, complaint: str, *, feedback_category: str = "performance",
@@ -561,7 +637,7 @@ class SelfImprovementResearchStore:
             evidence_ids=tuple(dict.fromkeys(str(item) for item in evidence_ids if item))[:20],
             technical_details=tuple(dict.fromkeys(str(item) for item in technical_details if item))[:30],
             hypotheses=tuple(dict.fromkeys(str(item) for item in hypotheses if item))[:12],
-            journal_entries=task.journal_entries + (f"{_now()} — Araştırma tamamlandı ve çözüm seçildi.",),
+            journal_entries=task.journal_entries + (f"{_now()} — Araştırma tamamlandı; bulgular ve belirsizlikler kaydedildi.",),
             error="",
         )
         self.save(completed)
@@ -629,8 +705,8 @@ class SelfImprovementResearchStore:
         return cancelled
 
     def is_active(self, task_id: str) -> bool:
-        current = self.load()
-        return bool(current is not None and current.task_id == task_id and current.state in {"queued", "researching"})
+        current = self.load(task_id)
+        return bool(current is not None and current.state in {"queued", "researching"})
 
     def fail(self, task: SelfImprovementResearchTask, error: object) -> SelfImprovementResearchTask:
         failed = replace(
