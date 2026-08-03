@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 from pathlib import Path
 
 from artmach_assistant.core.autonomous_improvement_loop import (
@@ -714,3 +715,156 @@ def test_runtime_pipeline_uses_shared_repository(
         runtime_root / "knowledge" / "repository.json"
     ).resolve()
 
+
+def test_diagnostics_influence_automatic_candidate_ranking(
+    tmp_path: Path,
+) -> None:
+    project = create_project(tmp_path)
+    journal = tmp_path / "journal" / "research.json"
+    runtime_root = tmp_path / "runtime"
+    write_journal(journal)
+
+    runtime = SelfImprovementLoopRuntime(
+        project,
+        journal,
+        runtime_root,
+    )
+    plan_path = runtime_root / "plan.json"
+    plan_path.parent.mkdir(parents=True)
+    plan_path.write_text(
+        json.dumps(
+            {
+                "candidates": [
+                    {
+                        "candidate_id": "plain",
+                        "priority_score": 80,
+                        "confidence_score": 90,
+                        "requires_experiment": True,
+                    },
+                    {
+                        "candidate_id": "learned",
+                        "priority_score": 75,
+                        "confidence_score": 85,
+                        "requires_experiment": True,
+                    },
+                ],
+                "diagnostics": [
+                    {
+                        "candidate_id": "learned",
+                        "accepted": True,
+                        "reliability_score": 100,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    runtime._pipeline_result = SimpleNamespace(
+        plan_path=str(plan_path),
+    )
+
+    assert runtime._select_candidate_id() == "learned"
+
+
+def test_rejected_diagnostic_penalises_automatic_ranking(
+    tmp_path: Path,
+) -> None:
+    project = create_project(tmp_path)
+    journal = tmp_path / "journal" / "research.json"
+    runtime_root = tmp_path / "runtime"
+    write_journal(journal)
+
+    runtime = SelfImprovementLoopRuntime(
+        project,
+        journal,
+        runtime_root,
+    )
+    plan_path = runtime_root / "plan.json"
+    plan_path.parent.mkdir(parents=True)
+    plan_path.write_text(
+        json.dumps(
+            {
+                "candidates": [
+                    {
+                        "candidate_id": "rejected",
+                        "priority_score": 85,
+                        "confidence_score": 95,
+                        "requires_experiment": True,
+                    },
+                    {
+                        "candidate_id": "safe",
+                        "priority_score": 80,
+                        "confidence_score": 80,
+                        "requires_experiment": True,
+                    },
+                ],
+                "diagnostics": [
+                    {
+                        "candidate_id": "rejected",
+                        "accepted": False,
+                        "reliability_score": 90,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    runtime._pipeline_result = SimpleNamespace(
+        plan_path=str(plan_path),
+    )
+
+    assert runtime._select_candidate_id() == "safe"
+
+
+def test_explicit_candidate_ignores_diagnostic_ranking(
+    tmp_path: Path,
+) -> None:
+    project = create_project(tmp_path)
+    journal = tmp_path / "journal" / "research.json"
+    runtime_root = tmp_path / "runtime"
+    write_journal(journal)
+
+    runtime = SelfImprovementLoopRuntime(
+        project,
+        journal,
+        runtime_root,
+        candidate_id="requested",
+    )
+    plan_path = runtime_root / "plan.json"
+    plan_path.parent.mkdir(parents=True)
+    plan_path.write_text(
+        json.dumps(
+            {
+                "candidates": [
+                    {
+                        "candidate_id": "requested",
+                        "priority_score": 10,
+                        "confidence_score": 10,
+                        "requires_experiment": True,
+                    },
+                    {
+                        "candidate_id": "other",
+                        "priority_score": 100,
+                        "confidence_score": 100,
+                        "requires_experiment": True,
+                    },
+                ],
+                "diagnostics": [
+                    {
+                        "candidate_id": "other",
+                        "accepted": True,
+                        "reliability_score": 100,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    runtime._pipeline_result = SimpleNamespace(
+        plan_path=str(plan_path),
+    )
+
+    assert runtime._select_candidate_id() == "requested"

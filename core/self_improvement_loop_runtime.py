@@ -333,9 +333,9 @@ class SelfImprovementLoopRuntime:
             ),
         )
 
-    def _load_plan_candidates(
+    def _load_plan_payload(
         self,
-    ) -> list[dict[str, object]]:
+    ) -> dict[str, object]:
         result = self._pipeline_result
 
         if result is None:
@@ -375,18 +375,68 @@ class SelfImprovementLoopRuntime:
                 "self-improvement plan must be an object"
             )
 
-        candidates = payload.get("candidates")
+        return payload
 
+    def _load_plan_candidates(
+        self,
+    ) -> list[dict[str, object]]:
+        candidates = self._load_plan_payload().get(
+            "candidates"
+        )
         if not isinstance(candidates, list):
             raise ValueError(
                 "self-improvement candidates must be a list"
             )
-
         return [
             row
             for row in candidates
             if isinstance(row, dict)
         ]
+
+    @staticmethod
+    def _diagnostic_rank_adjustment(
+        diagnostic: dict[str, object] | None,
+    ) -> int:
+        if diagnostic is None:
+            return 0
+
+        accepted = diagnostic.get("accepted")
+        try:
+            reliability = int(
+                diagnostic.get("reliability_score", 0)
+                or 0
+            )
+        except (TypeError, ValueError):
+            reliability = 0
+
+        reliability = max(0, min(100, reliability))
+        if accepted is True:
+            return min(10, reliability // 10)
+        if accepted is False:
+            return -10
+        return 0
+
+    def _plan_diagnostics(
+        self,
+    ) -> dict[str, dict[str, object]]:
+        diagnostics = self._load_plan_payload().get(
+            "diagnostics",
+            [],
+        )
+        if not isinstance(diagnostics, list):
+            return {}
+
+        indexed: dict[str, dict[str, object]] = {}
+        for row in diagnostics:
+            if not isinstance(row, dict):
+                continue
+            candidate_id = _normalise_text(
+                row.get("candidate_id"),
+                limit=200,
+            )
+            if candidate_id and candidate_id not in indexed:
+                indexed[candidate_id] = row
+        return indexed
 
     def _select_candidate_id(self) -> str:
         candidates = self._load_plan_candidates()
@@ -420,16 +470,40 @@ class SelfImprovementLoopRuntime:
                 "no candidate requires an experiment"
             )
 
+        diagnostics = self._plan_diagnostics()
+
+        def selection_key(
+            row: dict[str, object],
+        ) -> tuple[int, int, str]:
+            candidate_id = _normalise_text(
+                row.get("candidate_id"),
+                limit=200,
+            )
+            try:
+                priority = int(
+                    row.get("priority_score", 0) or 0
+                )
+            except (TypeError, ValueError):
+                priority = 0
+            try:
+                confidence = int(
+                    row.get("confidence_score", 0) or 0
+                )
+            except (TypeError, ValueError):
+                confidence = 0
+
+            adjustment = self._diagnostic_rank_adjustment(
+                diagnostics.get(candidate_id)
+            )
+            return (
+                priority + adjustment,
+                confidence,
+                candidate_id,
+            )
+
         selected = max(
             experiment_candidates,
-            key=lambda row: (
-                int(row.get("priority_score", 0) or 0),
-                int(row.get("confidence_score", 0) or 0),
-                _normalise_text(
-                    row.get("candidate_id"),
-                    limit=200,
-                ),
-            ),
+            key=selection_key,
         )
 
         candidate_id = _normalise_text(
