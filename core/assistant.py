@@ -154,6 +154,12 @@ from artmach_assistant.core.self_improvement_experience import (
     asks_for_experience_report,
     parse_experience_outcome,
 )
+from artmach_assistant.core.time_budget_engine import (
+    TimeBudgetStore,
+    asks_for_time_estimate,
+    asks_for_time_plan,
+    parse_time_budget,
+)
 from artmach_assistant.core.self_improvement_research import (
     SelfImprovementResearchStore,
     asks_for_self_improvement_journal,
@@ -382,6 +388,9 @@ class AssistantEngine:
             DATA_DIR / "diagnostics" / "self_improvement_experiences.json"
         )
         self.self_improvement_research.experience_store = self.self_improvement_experiences
+        self.time_budget = TimeBudgetStore(
+            DATA_DIR / "diagnostics" / "time_budget.json"
+        )
         self.maintenance_advisor = MaintenanceAdvisor(
             DATA_DIR / "maintenance" / "state.json",
             self.notifications,
@@ -3998,6 +4007,43 @@ class AssistantEngine:
                 "Kendini geliştirme araştırması tamamlanamadı",
                 failed.user_report(),
             )
+
+    def _time_budget_request(self, text: str) -> str | None:
+        store = getattr(self, "time_budget", None)
+        if store is None:
+            return None
+        if asks_for_time_plan(text):
+            plan = store.load()
+            if plan is None:
+                return "Henüz hazırlanmış bir süre tahmini veya zaman planı yok."
+            return plan.budget_report() if plan.budget_minutes else plan.estimate_report()
+        budget = parse_time_budget(text)
+        if budget is not None:
+            plan = store.apply_budget(budget)
+            if plan is None:
+                return (
+                    "Bu süreyi hangi görev için kullanacağımı henüz bilmiyorum. "
+                    "Önce görevi söyleyip 'bunu yapman ne kadar sürer?' diye sorabilirsin."
+                )
+            return plan.budget_report()
+        if not asks_for_time_estimate(text):
+            return None
+        context = getattr(self, "last_action_context", None) or {}
+        target = str(context.get("target", "") or "").strip()
+        detail = str(context.get("detail", "") or "").strip()
+        task = target or detail
+        if not task:
+            cleaned = re.sub(
+                r"\b(?:bunu|bu isi|bu gorevi)?\s*(?:yapman|tamamlaman)?\s*ne kadar surer\b[?.!]*",
+                "", self.command_key(text),
+            ).strip()
+            task = cleaned or "Son konuşmadaki görev"
+        plan = store.estimate(task, complexity_hint=detail)
+        self._remember_action_context(
+            "time_budget_estimate", task,
+            f"Muhtemel süre: {plan.estimate_likely_minutes} dakika",
+        )
+        return plan.estimate_report()
 
     def _self_improvement_research_request(self, text: str) -> str | None:
         store = getattr(self, "self_improvement_research", None)
@@ -8515,6 +8561,10 @@ class AssistantEngine:
         # A self-improvement complaint or result request must outrank generic
         # follow-ups to an older local action. Otherwise words such as
         # "neden" and "açık" can be misread as "ne açtın".
+        time_budget = self._time_budget_request(text)
+        if time_budget is not None:
+            return time_budget
+
         self_improvement_research = self._self_improvement_research_request(text)
         if self_improvement_research is not None:
             return self_improvement_research
