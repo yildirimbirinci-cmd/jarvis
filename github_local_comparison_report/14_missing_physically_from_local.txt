@@ -1,0 +1,1 @@
+﻿"tart = text.find(\357\200\242    def prepare_own_code_plan(self, instruction\357\200\272 str) -\357\200\276 str\357\200\272n\357\200\242)"
