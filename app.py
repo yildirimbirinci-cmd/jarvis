@@ -32,6 +32,9 @@ from artmach_assistant.core.crash_reporter import install_crash_reporting
 from artmach_assistant.core.intent_router import IntentDecision, IntentRouter
 from artmach_assistant.core.notification_store import NotificationStore
 from artmach_assistant.core.runtime_session import RuntimeSession
+from artmach_assistant.core.self_improvement_lifecycle import (
+    SelfImprovementApplicationLifecycle,
+)
 from artmach_assistant.core.runtime_recovery import recovery_notice
 from artmach_assistant.core.single_instance import SingleInstanceCoordinator
 from artmach_assistant.core.task_orchestrator import CancellationToken, TaskOrchestrator
@@ -2666,6 +2669,7 @@ def main(
     install_crash_reporting(DATA_DIR / "logs" / "crashes")
     mode = "smoke" if smoke_test else ("background" if background else "desktop")
     coordinator: SingleInstanceCoordinator | None = None
+    self_improvement_lifecycle: SelfImprovementApplicationLifecycle | None = None
     if not smoke_test:
         coordinator = SingleInstanceCoordinator(port=47631)
         if not coordinator.acquire():
@@ -2702,6 +2706,31 @@ def main(
         if coordinator is not None:
             coordinator.set_show_callback(window.external_show_requested.emit)
         window.statusBar().showMessage(constitution_status, 8000)
+        if not smoke_test:
+            try:
+                self_improvement_lifecycle = (
+                    SelfImprovementApplicationLifecycle.create_default(
+                        project_root=Path(__file__).resolve().parent,
+                        data_root=DATA_DIR,
+                        model_config=window.config,
+                    )
+                )
+                lifecycle_status = self_improvement_lifecycle.start()
+                window.self_improvement_lifecycle = self_improvement_lifecycle
+                window.statusBar().showMessage(
+                    f"{constitution_status} | Self-improvement: "
+                    f"{lifecycle_status.status}",
+                    10000,
+                )
+                app.aboutToQuit.connect(self_improvement_lifecycle.stop)
+            except Exception as exc:
+                window.self_improvement_lifecycle = None
+                logger = getattr(window, "log", None)
+                if callable(logger):
+                    logger(
+                        "Self-improvement lifecycle başlatılamadı; "
+                        f"ana uygulama devam ediyor: {type(exc).__name__}: {exc}"
+                    )
         if smoke_test or not window.background_mode:
             if window._restore_maximized and not smoke_test:
                 window.showMaximized()
@@ -2721,5 +2750,7 @@ def main(
         )
         raise
     finally:
+        if self_improvement_lifecycle is not None:
+            self_improvement_lifecycle.stop()
         if coordinator is not None:
             coordinator.close()

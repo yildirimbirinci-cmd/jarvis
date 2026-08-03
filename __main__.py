@@ -286,6 +286,11 @@ def _parse_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
         type=Path,
         help="Destek ZIP dosyasının kaydedileceği özel yol.",
     )
+    parser.add_argument(
+        "--self-improvement-status",
+        action="store_true",
+        help="Sürekli self-improvement supervisor ve kuyruk durumunu JSON olarak gösterir.",
+    )
     return parser.parse_known_args(argv)
 
 
@@ -304,6 +309,7 @@ def main(argv: list[str] | None = None) -> int:
             bool(args.self_develop),
             args.self_develop_check,
             bool(args.self_develop_handoff),
+            args.self_improvement_status,
         )
     )
     if selected_modes > 1:
@@ -402,6 +408,32 @@ def main(argv: list[str] | None = None) -> int:
         )
         print(result.output)
         return result.exit_code
+
+    if args.self_improvement_status:
+        if remaining or args.quiet_tests or args.diagnostics_json or args.background:
+            print("Self-improvement durum modu ek argüman kabul etmez.", file=sys.stderr)
+            return 2
+        from artmach_assistant.config import DATA_DIR
+        from artmach_assistant.core.self_improvement_lifecycle import (
+            SelfImprovementApplicationLifecycle,
+        )
+
+        status_path = (
+            DATA_DIR
+            / "self_improvement"
+            / "runtime"
+            / "application_lifecycle_status.json"
+        )
+        payload = SelfImprovementApplicationLifecycle.read_status(status_path)
+        if payload is None:
+            payload = {
+                "schema_version": 1,
+                "status": "not_started",
+                "status_path": str(status_path),
+                "message": "self-improvement lifecycle has not written status yet",
+            }
+        print(json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=False))
+        return 0
 
     if args.support_bundle:
         if remaining or args.quiet_tests or args.diagnostics_json or args.background:
