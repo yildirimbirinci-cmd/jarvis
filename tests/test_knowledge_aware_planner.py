@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import json
 from pathlib import Path
@@ -401,3 +401,33 @@ def test_plan_id_changes_when_knowledge_changes(
     after = planner.build_plan(snapshot)
 
     assert before.plan_id != after.plan_id
+
+
+def test_warning_reports_strategy_reliability(
+    tmp_path: Path,
+) -> None:
+    project = create_project(tmp_path)
+    snapshot = tmp_path / "snapshot.json"
+    result = tmp_path / "success.json"
+    repository_path = tmp_path / "knowledge.json"
+
+    write_snapshot(snapshot)
+    write_result(
+        result,
+        status="passed",
+        experiment_id="exp1-success",
+        confidence=90,
+    )
+    KnowledgeRepository(repository_path).add_result(result)
+
+    plan = KnowledgeAwareSelfImprovementPlanner(
+        project,
+        repository_path,
+    ).build_plan(snapshot)
+
+    assert any(
+        "strategy reliability=" in warning
+        and "success rate=100%" in warning
+        for warning in plan.warnings
+    )
+

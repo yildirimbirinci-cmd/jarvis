@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import json
 from pathlib import Path
@@ -211,3 +211,48 @@ def test_search_limit_must_be_positive(tmp_path: Path) -> None:
         KnowledgeRepository(
             tmp_path / "knowledge.json"
         ).search("anything", limit=0)
+
+
+def test_reliability_profile_uses_observations_and_tests(
+    tmp_path: Path,
+) -> None:
+    first = tmp_path / "first.json"
+    second = tmp_path / "second.json"
+    failure = tmp_path / "failure.json"
+    repository = KnowledgeRepository(
+        tmp_path / "knowledge.json"
+    )
+
+    write_result(first, experiment_id="exp1-one")
+    write_result(second, experiment_id="exp1-two")
+    write_result(
+        failure,
+        status="failed",
+        experiment_id="exp1-failed",
+        message="compile failed",
+    )
+    repository.add_result(first)
+    repository.add_result(second)
+    repository.add_result(failure)
+
+    profile = repository.reliability_profile(
+        repository.list_records()
+    )
+
+    assert profile.total_observations == 3
+    assert profile.successful_observations == 2
+    assert profile.failed_observations == 1
+    assert profile.success_rate == 67
+    assert profile.test_evidence_score > 0
+    assert 0 < profile.reliability_score <= 100
+
+
+def test_empty_reliability_profile_is_zeroed(
+    tmp_path: Path,
+) -> None:
+    profile = KnowledgeRepository.reliability_profile(())
+
+    assert profile.total_observations == 0
+    assert profile.success_rate == 0
+    assert profile.reliability_score == 0
+

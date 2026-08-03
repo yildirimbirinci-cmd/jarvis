@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import hashlib
 import json
@@ -129,6 +129,17 @@ class KnowledgeSearchResult:
     record: KnowledgeRecord
     score: int
     matched_terms: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class StrategyReliabilityProfile:
+    total_observations: int
+    successful_observations: int
+    failed_observations: int
+    success_rate: int
+    average_success_confidence: int
+    test_evidence_score: int
+    reliability_score: int
 
 
 class KnowledgeRepository:
@@ -529,6 +540,86 @@ class KnowledgeRepository:
             record
             for record in records
             if record.outcome == normalized
+        )
+
+    @staticmethod
+    def reliability_profile(
+        records: Sequence[KnowledgeRecord],
+    ) -> StrategyReliabilityProfile:
+        success_records = tuple(
+            record
+            for record in records
+            if record.outcome == "success"
+        )
+        failure_records = tuple(
+            record
+            for record in records
+            if record.outcome == "failure"
+        )
+        successful = sum(
+            max(1, record.observation_count)
+            for record in success_records
+        )
+        failed = sum(
+            max(1, record.observation_count)
+            for record in failure_records
+        )
+        total = successful + failed
+
+        if total <= 0:
+            return StrategyReliabilityProfile(
+                total_observations=0,
+                successful_observations=0,
+                failed_observations=0,
+                success_rate=0,
+                average_success_confidence=0,
+                test_evidence_score=0,
+                reliability_score=0,
+            )
+
+        success_rate = round(successful * 100 / total)
+
+        if successful > 0:
+            average_confidence = round(
+                sum(
+                    record.confidence_score
+                    * max(1, record.observation_count)
+                    for record in success_records
+                )
+                / successful
+            )
+            focused = max(
+                record.focused_tests_passed
+                for record in success_records
+            )
+            full = max(
+                record.full_tests_passed
+                for record in success_records
+            )
+            test_evidence = min(
+                100,
+                30
+                + min(20, focused) * 2
+                + min(30, full // 50),
+            )
+        else:
+            average_confidence = 0
+            test_evidence = 0
+
+        reliability = round(
+            success_rate * 0.5
+            + average_confidence * 0.3
+            + test_evidence * 0.2
+        )
+
+        return StrategyReliabilityProfile(
+            total_observations=total,
+            successful_observations=successful,
+            failed_observations=failed,
+            success_rate=success_rate,
+            average_success_confidence=average_confidence,
+            test_evidence_score=test_evidence,
+            reliability_score=max(0, min(100, reliability)),
         )
 
     def search(

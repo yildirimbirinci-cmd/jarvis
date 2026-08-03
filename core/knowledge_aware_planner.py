@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import hashlib
 import json
@@ -163,12 +163,11 @@ class KnowledgeAwareSelfImprovementPlanner:
             if record.outcome == "failure"
         )
 
-        success_count = self._observation_total(
-            successes
+        profile = self.repository.reliability_profile(
+            matches
         )
-        failure_count = self._observation_total(
-            failures
-        )
+        success_count = profile.successful_observations
+        failure_count = profile.failed_observations
 
         if failure_count > 0 and success_count == 0:
             return (
@@ -192,13 +191,25 @@ class KnowledgeAwareSelfImprovementPlanner:
             / success_count
         )
 
+        evidence_bonus = min(
+            5,
+            profile.test_evidence_score // 20,
+        )
+        reliability_bonus = max(
+            0,
+            (profile.reliability_score - 50) // 10,
+        )
         success_bonus = min(
             self.MAX_SCORE_BONUS,
-            5 + max(0, success_count - 1) * 3,
+            5
+            + max(0, success_count - 1) * 3
+            + evidence_bonus
+            + reliability_bonus,
         )
         failure_penalty = min(
-            15,
-            failure_count * 5,
+            20,
+            failure_count * 5
+            + max(0, 50 - profile.success_rate) // 10,
         )
 
         confidence_score = max(
@@ -252,7 +263,9 @@ class KnowledgeAwareSelfImprovementPlanner:
         warning = (
             "candidate scores were informed by "
             f"{success_count} successful and "
-            f"{failure_count} failed historical observation(s): "
+            f"{failure_count} failed historical observation(s); "
+            f"strategy reliability={profile.reliability_score}, "
+            f"success rate={profile.success_rate}%: "
             f"{candidate.candidate_id}"
         )
         return adjusted, warning
