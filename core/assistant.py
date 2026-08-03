@@ -144,6 +144,12 @@ from artmach_assistant.core.runtime_observability import (
 )
 from artmach_assistant.core.maintenance_advisor import MaintenanceAdvisor, MaintenanceReview
 from artmach_assistant.core.notification_store import NotificationStore
+from artmach_assistant.core.self_improvement_research import (
+    SelfImprovementResearchStore,
+    asks_for_self_improvement_result,
+    choose_speed_research_result,
+    looks_like_self_improvement_complaint,
+)
 from artmach_assistant.core.project_development_memory import ProjectDevelopmentMemory
 from artmach_assistant.core.project_development_planner import (
     DevelopmentPlan,
@@ -354,6 +360,9 @@ class AssistantEngine:
             },
         )
         self.notifications = NotificationStore(DATA_DIR / "ui" / "notifications.json")
+        self.self_improvement_research = SelfImprovementResearchStore(
+            DATA_DIR / "diagnostics" / "self_improvement_research.json"
+        )
         self.maintenance_advisor = MaintenanceAdvisor(
             DATA_DIR / "maintenance" / "state.json",
             self.notifications,
@@ -3905,6 +3914,85 @@ class AssistantEngine:
             )
         except Exception:
             return ""
+
+    def _run_self_improvement_research(self, task_id: str) -> None:
+        store = getattr(self, "self_improvement_research", None)
+        if store is None:
+            return
+        task = store.load()
+        if task is None or task.task_id != task_id or task.state != "researching":
+            return
+        try:
+            runtime_report = self.runtime_health_assessment(own_code=True)
+            architecture_assessment = self._project_improvement_runtime().assessment(
+                own_code=True,
+                refresh=True,
+            )
+            result = choose_speed_research_result(
+                runtime_report, architecture_assessment
+            )
+            completed = store.complete(task, **result)
+            notifications = getattr(self, "notifications", None)
+            if notifications is not None:
+                notifications.append(
+                    "Yavaşlık araştırmasını tamamladım. Sonucu anlaşılır biçimde "
+                    "dinlemek için 'ne buldun' diyebilirsin.",
+                    level="info",
+                )
+            self._remember_action_context(
+                "self_improvement_research",
+                "Yavaşlık araştırması tamamlandı",
+                completed.user_report(),
+            )
+        except Exception as exc:
+            failed = store.fail(task, exc)
+            notifications = getattr(self, "notifications", None)
+            if notifications is not None:
+                notifications.append(
+                    "Yavaşlık araştırmasını tamamlayamadım. Ayrıntı için "
+                    "'ne buldun' diyebilirsin.",
+                    level="warning",
+                )
+            self._remember_action_context(
+                "self_improvement_research",
+                "Yavaşlık araştırması tamamlanamadı",
+                failed.user_report(),
+            )
+
+    def _self_improvement_research_request(self, text: str) -> str | None:
+        store = getattr(self, "self_improvement_research", None)
+        if store is None:
+            return None
+        if asks_for_self_improvement_result(text):
+            task = store.load()
+            if task is None:
+                return "Henüz başlatılmış bir kendini geliştirme araştırması yok."
+            return task.user_report()
+        if not looks_like_self_improvement_complaint(text):
+            return None
+        current = store.load()
+        if current is not None and current.state == "researching":
+            return current.user_report()
+        task = store.start(text)
+        worker = threading.Thread(
+            target=self._run_self_improvement_research,
+            args=(task.task_id,),
+            name=f"jarvis-self-improvement-{task.task_id}",
+            daemon=True,
+        )
+        worker.start()
+        self._remember_action_context(
+            "self_improvement_research",
+            "Yavaşlık şikâyeti araştırılıyor",
+            task.user_report(),
+        )
+        return (
+            "Haklısın. Yavaşlığın hangi aşamada oluştuğunu araştıracağım. "
+            "Komut yönlendirme, bağlam hazırlama, model çağrısı ve cevap işleme "
+            "sürelerini mevcut kayıtlarla karşılaştıracağım. Çözüm bulduğumda "
+            "sana teknik terimlere boğmadan bildireceğim. Onayın olmadan kodumu "
+            "değiştirmeyeceğim."
+        )
 
     def _maintenance_request(self, text: str) -> str | None:
         normalized = self.command_key(text)
@@ -8343,6 +8431,9 @@ class AssistantEngine:
 
         # Explicit RUN identifiers take precedence over every older plan and
         # over the general dialogue model.
+        self_improvement_research = self._self_improvement_research_request(text)
+        if self_improvement_research is not None:
+            return self_improvement_research
         maintenance = self._maintenance_request(text)
         if maintenance is not None:
             return maintenance
