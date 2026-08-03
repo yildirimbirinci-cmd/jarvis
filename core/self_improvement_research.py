@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Iterable
 
 _ALLOWED_STATES = {"queued", "researching", "solution_found", "failed", "cancelled"}
+_EXPERIMENT_STATES = {"requested", "accepted", "running", "completed", "failed", "cancelled"}
 
 
 def _now() -> str:
@@ -143,6 +144,20 @@ def asks_for_self_improvement_status(text: object) -> bool:
     )
 
 
+def asks_for_research_experiment_status(text: object) -> bool:
+    normalized = _normalize(text)
+    return any(
+        marker in normalized
+        for marker in (
+            "deney talebi ne durumda",
+            "olcum talebi ne durumda",
+            "hangi olcumu bekliyorsun",
+            "deney gerekiyor mu",
+            "ek olcum gerekiyor mu",
+        )
+    )
+
+
 def asks_for_self_improvement_journal(text: object) -> bool:
     normalized = _normalize(text)
     return any(
@@ -237,6 +252,66 @@ def source_quality_label(url: str) -> str:
     return "belirsiz"
 
 
+
+
+@dataclass(frozen=True, slots=True)
+class ResearchExperimentRequest:
+    request_id: str
+    research_task_id: str
+    experiment_type: str
+    reason: str
+    target: str
+    expected_outputs: tuple[str, ...]
+    success_criteria: tuple[str, ...]
+    safety_constraints: tuple[str, ...]
+    created_at: str
+    state: str = "requested"
+    owner: str = "ExperimentRunner"
+    result_reference: str = ""
+    error: str = ""
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "request_id": self.request_id,
+            "research_task_id": self.research_task_id,
+            "experiment_type": self.experiment_type,
+            "reason": self.reason,
+            "target": self.target,
+            "expected_outputs": list(self.expected_outputs),
+            "success_criteria": list(self.success_criteria),
+            "safety_constraints": list(self.safety_constraints),
+            "created_at": self.created_at,
+            "state": self.state,
+            "owner": self.owner,
+            "result_reference": self.result_reference,
+            "error": self.error,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, object]) -> "ResearchExperimentRequest":
+        state = str(payload.get("state", "requested"))
+        if state not in _EXPERIMENT_STATES:
+            raise ValueError("invalid experiment request state")
+        request = cls(
+            request_id=str(payload.get("request_id", "")),
+            research_task_id=str(payload.get("research_task_id", "")),
+            experiment_type=str(payload.get("experiment_type", "")),
+            reason=str(payload.get("reason", "")),
+            target=str(payload.get("target", "")),
+            expected_outputs=tuple(str(item) for item in payload.get("expected_outputs", ()) if item),
+            success_criteria=tuple(str(item) for item in payload.get("success_criteria", ()) if item),
+            safety_constraints=tuple(str(item) for item in payload.get("safety_constraints", ()) if item),
+            created_at=str(payload.get("created_at", "")),
+            state=state,
+            owner=str(payload.get("owner", "ExperimentRunner")),
+            result_reference=str(payload.get("result_reference", "")),
+            error=str(payload.get("error", "")),
+        )
+        if not request.request_id or not request.research_task_id or not request.experiment_type:
+            raise ValueError("incomplete experiment request")
+        return request
+
+
 @dataclass(frozen=True, slots=True)
 class SelfImprovementResearchTask:
     task_id: str
@@ -281,6 +356,10 @@ class SelfImprovementResearchTask:
     evidence_conflicts: tuple[str, ...] = ()
     external_research_state: str = "not_needed"
     external_research_reason: str = ""
+    experiment_request_id: str = ""
+    experiment_request_state: str = ""
+    experiment_request_reason: str = ""
+    experiment_result_reference: str = ""
     error: str = ""
 
     def to_dict(self) -> dict[str, object]:
@@ -352,6 +431,10 @@ class SelfImprovementResearchTask:
             evidence_conflicts=tuple(str(item) for item in payload.get("evidence_conflicts", ()) if item),
             external_research_state=str(payload.get("external_research_state", "not_needed")),
             external_research_reason=str(payload.get("external_research_reason", "")),
+            experiment_request_id=str(payload.get("experiment_request_id", "")),
+            experiment_request_state=str(payload.get("experiment_request_state", "")),
+            experiment_request_reason=str(payload.get("experiment_request_reason", "")),
+            experiment_result_reference=str(payload.get("experiment_result_reference", "")),
             error=str(payload.get("error", "")),
         )
 
@@ -362,6 +445,13 @@ class SelfImprovementResearchTask:
             return "Araştırma tamamlanamadı. Ayrıntı için 'ne buldun' diyebilirsin."
         if self.state == "cancelled":
             return "Araştırma durduruldu. Yeniden başlatmamı istersen 'baştan araştır' diyebilirsin."
+        if self.experiment_request_state in {"requested", "accepted", "running"}:
+            return (
+                "Araştırma için ek ölçüm gerekiyor. "
+                f"Deney talebi {self.experiment_request_id or 'oluşturuldu'} durumunda: "
+                f"{self.experiment_request_state}. Research Engine deneyi çalıştırmıyor; "
+                "sonucu Experiment Runner'dan bekliyor. Henüz kodumu değiştirmedim."
+            )
         message = self.status_message or "Yavaşlığın hangi aşamada oluştuğunu inceliyorum."
         return f"Araştırma devam ediyor. %{self.progress}: {message} Henüz kodumu değiştirmedim."
 
@@ -470,6 +560,7 @@ class SelfImprovementResearchStore:
         self.path = Path(path).expanduser().resolve(strict=False)
         self.history_path = self.path.with_name(self.path.stem + "_history.json")
         self.tasks_path = self.path.with_name(self.path.stem + "_tasks.json")
+        self.experiments_path = self.path.with_name(self.path.stem + "_experiment_requests.json")
         self.experience_store = None
         self._lock = threading.RLock()
 
@@ -826,6 +917,168 @@ class SelfImprovementResearchStore:
                 f"{len(task.evidence_conflicts)} çelişki kaydedildi. Teknik ayrıntılarda ayrı gösteriliyor."
             )
         return "Yerel kanıt yeterli göründüğü için bu araştırmada dış kaynak zorunlu değil."
+
+    def _load_experiment_requests(self) -> list[ResearchExperimentRequest]:
+        if not self.experiments_path.exists():
+            return []
+        try:
+            if self.experiments_path.stat().st_size > self.MAX_BYTES * 4:
+                return []
+            payload = json.loads(self.experiments_path.read_text(encoding="utf-8"))
+            if not isinstance(payload, list):
+                return []
+            requests: list[ResearchExperimentRequest] = []
+            for item in payload[-100:]:
+                if not isinstance(item, dict):
+                    continue
+                try:
+                    requests.append(ResearchExperimentRequest.from_dict(item))
+                except (ValueError, TypeError):
+                    continue
+            return requests
+        except (OSError, ValueError, TypeError, UnicodeError):
+            return []
+
+    def _save_experiment_requests(self, requests: Iterable[ResearchExperimentRequest]) -> None:
+        deduplicated = {item.request_id: item for item in requests if item.request_id}
+        ordered = sorted(deduplicated.values(), key=lambda item: item.created_at)[-100:]
+        encoded = json.dumps(
+            [item.to_dict() for item in ordered], ensure_ascii=False, indent=2, allow_nan=False
+        ).encode("utf-8")
+        self.experiments_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="wb", dir=self.experiments_path.parent,
+                prefix=f".{self.experiments_path.name}.", suffix=".tmp", delete=False,
+            ) as handle:
+                handle.write(encoded)
+                handle.write(b"\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+                temporary = Path(handle.name)
+            os.replace(temporary, self.experiments_path)
+            temporary = None
+        finally:
+            if temporary is not None and temporary.exists():
+                temporary.unlink(missing_ok=True)
+
+    def list_experiment_requests(
+        self, *, research_task_id: str | None = None
+    ) -> tuple[ResearchExperimentRequest, ...]:
+        requests = self._load_experiment_requests()
+        if research_task_id:
+            requests = [item for item in requests if item.research_task_id == research_task_id]
+        return tuple(requests)
+
+    def request_measurement_experiment(
+        self,
+        task: SelfImprovementResearchTask,
+        *,
+        reason: str,
+        target: str,
+        expected_outputs: Iterable[str],
+        success_criteria: Iterable[str],
+        safety_constraints: Iterable[str] = (),
+        experiment_type: str = "latency_measurement",
+    ) -> tuple[SelfImprovementResearchTask, ResearchExperimentRequest]:
+        if task.state in {"cancelled", "failed"}:
+            raise ValueError("inactive research cannot request an experiment")
+        normalized_type = str(experiment_type or "").strip()[:120]
+        normalized_target = str(target or "").strip()[:500]
+        normalized_reason = " ".join(str(reason or "").split())[:2000]
+        if not normalized_type or not normalized_target or not normalized_reason:
+            raise ValueError("experiment request requires type, target and reason")
+        outputs = tuple(dict.fromkeys(str(item) for item in expected_outputs if item))[:20]
+        criteria = tuple(dict.fromkeys(str(item) for item in success_criteria if item))[:20]
+        constraints = tuple(dict.fromkeys(str(item) for item in safety_constraints if item))[:20]
+        if not outputs or not criteria:
+            raise ValueError("experiment request requires outputs and success criteria")
+        existing = [
+            item for item in self._load_experiment_requests()
+            if item.research_task_id == task.task_id
+            and item.experiment_type == normalized_type
+            and _normalize(item.target) == _normalize(normalized_target)
+            and item.state not in {"failed", "cancelled"}
+        ]
+        if existing:
+            request = existing[-1]
+        else:
+            request = ResearchExperimentRequest(
+                request_id="EXP-" + uuid.uuid4().hex[:10].upper(),
+                research_task_id=task.task_id,
+                experiment_type=normalized_type,
+                reason=normalized_reason,
+                target=normalized_target,
+                expected_outputs=outputs,
+                success_criteria=criteria,
+                safety_constraints=constraints or (
+                    "Gerçek kaynak dosyalarını değiştirme.",
+                    "Ölçümü izole veya salt-okunur çalıştır.",
+                    "Sonucu araştırma kimliğiyle ilişkilendir.",
+                ),
+                created_at=_now(),
+            )
+            requests = self._load_experiment_requests()
+            requests.append(request)
+            self._save_experiment_requests(requests)
+        updated = replace(
+            task,
+            state="researching",
+            stage="experiment_required",
+            progress=min(max(task.progress, 70), 95),
+            status_message="Araştırmayı tamamlamak için ölçüm sonucu bekleniyor.",
+            experiment_request_id=request.request_id,
+            experiment_request_state=request.state,
+            experiment_request_reason=request.reason,
+            journal_entries=task.journal_entries + (
+                f"{_now()} — Deney talebi oluşturuldu: {request.request_id} ({request.experiment_type}).",
+            ),
+        )
+        self.save(updated)
+        return updated, request
+
+    def update_experiment_request(
+        self, request: ResearchExperimentRequest, *, state: str,
+        result_reference: str = "", error: str = "",
+    ) -> ResearchExperimentRequest:
+        if state not in _EXPERIMENT_STATES:
+            raise ValueError("invalid experiment request state")
+        updated = replace(
+            request, state=state, result_reference=str(result_reference or "")[:1000],
+            error=str(error or "")[:2000],
+        )
+        requests = [item for item in self._load_experiment_requests() if item.request_id != request.request_id]
+        requests.append(updated)
+        self._save_experiment_requests(requests)
+        task = self.load(request.research_task_id)
+        if task is not None:
+            task_update = replace(
+                task,
+                experiment_request_state=state,
+                experiment_result_reference=updated.result_reference,
+                stage=("experiment_result_ready" if state == "completed" else task.stage),
+                status_message=(
+                    "Ölçüm sonucu araştırma değerlendirmesi için hazır."
+                    if state == "completed" else task.status_message
+                ),
+                journal_entries=task.journal_entries + (
+                    f"{_now()} — Deney talebi {request.request_id}: {state}.",
+                ),
+            )
+            self.save(task_update)
+        return updated
+
+    def experiment_request_report(self, task: SelfImprovementResearchTask) -> str:
+        if not task.experiment_request_id:
+            return "Bu araştırma için deney veya ek ölçüm talebi oluşturulmadı."
+        state = task.experiment_request_state or "requested"
+        return (
+            f"Deney talebi: {task.experiment_request_id}. Durum: {state}. "
+            f"Neden: {task.experiment_request_reason or 'ek ölçüm gerekiyor'}. "
+            "Talebin sahibi ExperimentRunner'dır; Research Engine deneyi çalıştırmaz, "
+            "patch üretmez ve gerçek dosyaları değiştirmez."
+        )
 
     def prepare_plan(self, task: SelfImprovementResearchTask) -> SelfImprovementResearchTask:
         if task.state != "solution_found":

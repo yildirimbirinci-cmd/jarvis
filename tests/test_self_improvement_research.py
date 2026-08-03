@@ -633,3 +633,107 @@ def test_denying_external_research_keeps_local_only_contract(tmp_path: Path) -> 
     denied = store.set_external_research_permission(completed, allowed=False)
     assert denied.external_research_state == "denied"
     assert "yalnızca yerel kanıt" in store.external_research_report(denied)
+
+
+def test_measurement_request_is_persistent_and_owned_by_experiment_runner(tmp_path: Path) -> None:
+    store = SelfImprovementResearchStore(tmp_path / "research.json")
+    task = store.start("Yanıt süresinin hangi aşamada uzadığını araştır.")
+    updated, request = store.request_measurement_experiment(
+        task,
+        reason="Yerel kayıtlar alt aşamayı ayırmaya yetmiyor.",
+        target="TaskOrchestrator.execute_task",
+        expected_outputs=("stage_latency_ms", "repeat_count"),
+        success_criteria=("Aynı senaryo üç kez ölçülmeli.",),
+    )
+    assert request.owner == "ExperimentRunner"
+    assert request.state == "requested"
+    assert updated.stage == "experiment_required"
+    assert updated.experiment_request_id == request.request_id
+    assert store.experiments_path.exists()
+    loaded = store.list_experiment_requests(research_task_id=task.task_id)
+    assert loaded == (request,)
+
+
+def test_same_measurement_request_is_not_duplicated(tmp_path: Path) -> None:
+    store = SelfImprovementResearchStore(tmp_path / "research.json")
+    task = store.start("Yanıt süresini araştır.")
+    first_task, first = store.request_measurement_experiment(
+        task,
+        reason="Alt aşama ölçümü gerekli.",
+        target="AssistantEngine.handle_local_command",
+        expected_outputs=("latency_ms",),
+        success_criteria=("Üç tekrar alınmalı.",),
+    )
+    second_task, second = store.request_measurement_experiment(
+        first_task,
+        reason="Alt aşama ölçümü gerekli.",
+        target="AssistantEngine.handle_local_command",
+        expected_outputs=("latency_ms",),
+        success_criteria=("Üç tekrar alınmalı.",),
+    )
+    assert second.request_id == first.request_id
+    assert second_task.experiment_request_id == first.request_id
+    assert len(store.list_experiment_requests(research_task_id=task.task_id)) == 1
+
+
+def test_research_waits_for_experiment_without_running_or_patching(tmp_path: Path) -> None:
+    store = SelfImprovementResearchStore(tmp_path / "research.json")
+    task = store.start("Yavaşlığı araştır.")
+    task, request = store.request_measurement_experiment(
+        task,
+        reason="Kök neden için ölçüm eksik.",
+        target="LocalDialogueManager.respond",
+        expected_outputs=("median_latency_ms",),
+        success_criteria=("Önce ve sonra aynı senaryo ölçülmeli.",),
+    )
+    status = task.status_report()
+    report = store.experiment_request_report(task)
+    assert "Experiment Runner'dan bekliyor" in status
+    assert "Research Engine deneyi çalıştırmaz" in report
+    assert "patch üretmez" in report
+
+
+def test_completed_experiment_result_is_linked_back_to_research(tmp_path: Path) -> None:
+    store = SelfImprovementResearchStore(tmp_path / "research.json")
+    task = store.start("Yavaşlığı araştır.")
+    task, request = store.request_measurement_experiment(
+        task,
+        reason="Süre dağılımı eksik.",
+        target="TaskOrchestrator.execute_task",
+        expected_outputs=("latency.json",),
+        success_criteria=("Sonuç araştırma kimliğiyle saklanmalı.",),
+    )
+    completed = store.update_experiment_request(
+        request, state="completed", result_reference="diagnostics/EXP-result.json"
+    )
+    assert completed.state == "completed"
+    loaded_task = store.load(task.task_id)
+    assert loaded_task is not None
+    assert loaded_task.experiment_request_state == "completed"
+    assert loaded_task.experiment_result_reference == "diagnostics/EXP-result.json"
+    assert loaded_task.stage == "experiment_result_ready"
+
+
+def test_cancelled_or_failed_research_cannot_request_experiment(tmp_path: Path) -> None:
+    store = SelfImprovementResearchStore(tmp_path / "research.json")
+    task = store.start("Yavaşlığı araştır.")
+    failed = module.replace(task, state="failed", error="kanıt yok")
+    store.save(failed)
+    try:
+        store.request_measurement_experiment(
+            failed,
+            reason="Ölçüm gerekli.",
+            target="x",
+            expected_outputs=("y",),
+            success_criteria=("z",),
+        )
+    except ValueError as exc:
+        assert "inactive" in str(exc)
+    else:
+        raise AssertionError("inactive research must not request experiments")
+
+
+def test_experiment_status_question_is_recognized() -> None:
+    assert module.asks_for_research_experiment_status("Ölçüm talebi ne durumda?")
+    assert module.asks_for_research_experiment_status("Hangi ölçümü bekliyorsun?")
+    assert not module.asks_for_research_experiment_status("Araştırma günlüğünü göster.")

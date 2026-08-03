@@ -168,6 +168,7 @@ from artmach_assistant.core.self_improvement_research import (
     asks_for_self_improvement_plan,
     asks_for_self_improvement_result,
     asks_for_self_improvement_status,
+    asks_for_research_experiment_status,
     asks_for_self_improvement_technical_details,
     asks_about_external_research,
     grants_external_research_permission,
@@ -4035,6 +4036,37 @@ class AssistantEngine:
                 architecture_assessment,
                 speed_result_factory=choose_speed_research_result,
             )
+            evidence_ids = tuple(result.get("evidence_ids", ()) or ())
+            if not evidence_ids:
+                target_paths = tuple(result.get("affected_paths", ()) or ())
+                target = ", ".join(target_paths[:3]) or task.feedback_category
+                waiting, _request = store.request_measurement_experiment(
+                    task,
+                    reason=(
+                        "Yerel kanıt araştırmanın kök nedenini güvenilir biçimde ayırmaya yetmedi."
+                    ),
+                    target=target,
+                    expected_outputs=(
+                        "Aşama bazlı süre ölçümleri",
+                        "Tekrar sayısı ve bekleme dağılımı",
+                        "Araştırma kimliğine bağlı ölçüm sonucu",
+                    ),
+                    success_criteria=tuple(result.get("validation", ()) or ()) or (
+                        "Aynı kullanıcı senaryosu en az üç kez ölçülmeli.",
+                        "Ölçüm sonucu araştırma kimliğiyle kaydedilmeli.",
+                    ),
+                    safety_constraints=(
+                        "Gerçek kaynak dosyalarını değiştirme.",
+                        "Ölçümü salt-okunur veya izole süreçte çalıştır.",
+                        "Research Engine yalnızca sonucu beklesin; deneyi çalıştırmasın.",
+                    ),
+                )
+                self._remember_action_context(
+                    "self_improvement_research",
+                    "Kendini geliştirme araştırması ölçüm bekliyor",
+                    store.experiment_request_report(waiting),
+                )
+                return
             completed = store.complete(task, **result)
             self._emit_self_improvement_notification(completed)
             self._remember_action_context(
@@ -4300,6 +4332,14 @@ class AssistantEngine:
             if task is None:
                 return "Henüz başlatılmış bir kendini geliştirme araştırması yok."
             return task.technical_report()
+
+        if asks_for_research_experiment_status(text):
+            task, ambiguity = select_task(states=("queued", "researching", "solution_found", "failed", "cancelled"))
+            if ambiguity:
+                return ambiguity
+            if task is None:
+                return "Henüz deney veya ölçüm talebi bağlayabileceğim bir araştırma yok."
+            return store.experiment_request_report(task)
 
         if asks_for_self_improvement_status(text):
             task, ambiguity = select_task(states=("queued", "researching", "solution_found", "failed", "cancelled"))
