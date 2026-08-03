@@ -217,6 +217,11 @@ class SelfImprovementResearchTask:
     plan_created_at: str = ""
     feedback_category: str = "performance"
     reflection_confidence: float = 0.0
+    notification_state: str = "none"
+    notification_id: str = ""
+    notified_at: str = ""
+    failure_kind: str = ""
+    next_step: str = ""
     error: str = ""
 
     def to_dict(self) -> dict[str, object]:
@@ -269,6 +274,11 @@ class SelfImprovementResearchTask:
             plan_created_at=str(payload.get("plan_created_at", "")),
             feedback_category=str(payload.get("feedback_category", "performance")),
             reflection_confidence=max(0.0, min(1.0, float(payload.get("reflection_confidence", 0.0) or 0.0))),
+            notification_state=str(payload.get("notification_state", "none")),
+            notification_id=str(payload.get("notification_id", "")),
+            notified_at=str(payload.get("notified_at", "")),
+            failure_kind=str(payload.get("failure_kind", "")),
+            next_step=str(payload.get("next_step", "")),
             error=str(payload.get("error", "")),
         )
 
@@ -288,10 +298,13 @@ class SelfImprovementResearchTask:
         if self.state == "cancelled":
             return "Araştırmayı kullanıcı isteğiyle durdurdum. Hiçbir dosyayı değiştirmedim."
         if self.state == "failed":
+            reason = self.error or "Yeterli ve güvenilir kanıt toplanamadı."
+            next_step = self.next_step or "Daha dar kapsamlı ölçüm veya ek çalışma zamanı kaydı gerekiyor."
             return (
-                "Araştırmayı tamamlayamadım. "
-                + (self.error or "Yeterli kanıt toplanamadı.")
-                + " Kodumu değiştirmedim."
+                "Araştırmayı güvenilir bir sonuca ulaştıramadım. "
+                f"Neden: {reason} "
+                f"Sonraki güvenli adım: {next_step} "
+                "Bir kök neden uydurmadım ve kodumu değiştirmedim."
             )
         return (
             "Araştırmayı tamamladım.\n\n"
@@ -638,6 +651,11 @@ class SelfImprovementResearchStore:
             technical_details=tuple(dict.fromkeys(str(item) for item in technical_details if item))[:30],
             hypotheses=tuple(dict.fromkeys(str(item) for item in hypotheses if item))[:12],
             journal_entries=task.journal_entries + (f"{_now()} — Araştırma tamamlandı; bulgular ve belirsizlikler kaydedildi.",),
+            notification_state="pending",
+            notification_id="",
+            notified_at="",
+            failure_kind="",
+            next_step="",
             error="",
         )
         self.save(completed)
@@ -708,16 +726,58 @@ class SelfImprovementResearchStore:
         current = self.load(task_id)
         return bool(current is not None and current.state in {"queued", "researching"})
 
-    def fail(self, task: SelfImprovementResearchTask, error: object) -> SelfImprovementResearchTask:
+    def fail(
+        self,
+        task: SelfImprovementResearchTask,
+        error: object,
+        *,
+        failure_kind: str = "execution_error",
+        next_step: str = "Araştırmayı daha dar kapsamla yeniden çalıştır ve eksik ölçümü topla.",
+    ) -> SelfImprovementResearchTask:
+        raw = " ".join(str(error or "").split())
+        safe_error = raw[:500] if raw else "Araştırma sırasında beklenmeyen bir teknik sorun oluştu."
         failed = replace(
             task,
             state="failed",
             completed_at=_now(),
-            error=" ".join(str(error or "").split())[:2000],
-            journal_entries=task.journal_entries + (f"{_now()} — Araştırma hata nedeniyle tamamlanamadı.",),
+            stage="failed",
+            progress=100,
+            status_message="Araştırma güvenilir bir sonuca ulaştırılamadı.",
+            notification_state="pending",
+            notification_id="",
+            notified_at="",
+            failure_kind=str(failure_kind).strip()[:80],
+            next_step=" ".join(str(next_step or "").split())[:1000],
+            error=safe_error,
+            journal_entries=task.journal_entries + (f"{_now()} — Araştırma güvenilir bir sonuca ulaşmadan durdu.",),
         )
         self.save(failed)
         return failed
+
+    def mark_notification_sent(
+        self, task: SelfImprovementResearchTask, notification_id: str
+    ) -> SelfImprovementResearchTask:
+        updated = replace(
+            task,
+            notification_state="sent",
+            notification_id=str(notification_id or "").strip(),
+            notified_at=_now(),
+        )
+        self.save(updated)
+        return updated
+
+    def mark_notification_read(self, task: SelfImprovementResearchTask) -> SelfImprovementResearchTask:
+        if task.notification_state == "read":
+            return task
+        updated = replace(task, notification_state="read")
+        self.save(updated)
+        return updated
+
+    def pending_notifications(self) -> tuple[SelfImprovementResearchTask, ...]:
+        return tuple(
+            task for task in self.list_tasks(states=("solution_found", "failed"))
+            if task.notification_state == "pending"
+        )
 
 
 def choose_speed_research_result(runtime_report: object, architecture_assessment: object) -> dict[str, object]:

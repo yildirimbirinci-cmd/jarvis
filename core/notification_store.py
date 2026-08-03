@@ -75,12 +75,29 @@ class NotificationStore:
             self._write(items)
             return notification
 
+    def unread(self) -> tuple[Notification, ...]:
+        return tuple(item for item in self.load() if not item.read)
+
+    def mark_read(self, notification_id: str) -> bool:
+        target = str(notification_id or "").strip()
+        if not target:
+            return False
+        with self._lock:
+            changed = False
+            items: list[Notification] = []
+            for item in self.load():
+                if item.id == target and not item.read:
+                    items.append(Notification(**{**asdict(item), "read": True}))
+                    changed = True
+                else:
+                    items.append(item)
+            if changed:
+                self._write(items)
+            return changed
+
     def mark_all_read(self) -> None:
         with self._lock:
-            items = [
-                Notification(**{**asdict(item), "read": True})
-                for item in self.load()
-            ]
+            items = [Notification(**{**asdict(item), "read": True}) for item in self.load()]
             self._write(items)
 
     def clear(self) -> None:
@@ -92,20 +109,10 @@ class NotificationStore:
         temporary: Path | None = None
         try:
             with tempfile.NamedTemporaryFile(
-                mode="w",
-                encoding="utf-8",
-                dir=self.path.parent,
-                prefix=f".{self.path.name}.",
-                suffix=".tmp",
-                delete=False,
+                mode="w", encoding="utf-8", dir=self.path.parent,
+                prefix=f".{self.path.name}.", suffix=".tmp", delete=False,
             ) as handle:
-                json.dump(
-                    [asdict(item) for item in items],
-                    handle,
-                    ensure_ascii=False,
-                    indent=2,
-                    allow_nan=False,
-                )
+                json.dump([asdict(item) for item in items], handle, ensure_ascii=False, indent=2, allow_nan=False)
                 handle.write("\n")
                 handle.flush()
                 os.fsync(handle.fileno())
@@ -114,4 +121,4 @@ class NotificationStore:
             temporary = None
         finally:
             if temporary is not None and temporary.exists():
-                temporary.unlink()
+                temporary.unlink(missing_ok=True)

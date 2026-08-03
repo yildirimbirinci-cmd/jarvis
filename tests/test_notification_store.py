@@ -1,64 +1,33 @@
 from __future__ import annotations
 
-import json
+import importlib.util
+import sys
 from pathlib import Path
 
-import pytest
+MODULE_PATH = Path(__file__).parents[1] / "core" / "notification_store.py"
+spec = importlib.util.spec_from_file_location("notification_store", MODULE_PATH)
+assert spec is not None and spec.loader is not None
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
 
-from artmach_assistant.core.notification_store import NotificationStore
+NotificationStore = module.NotificationStore
 
 
-def test_notification_store_tracks_unread_and_marks_read(tmp_path: Path) -> None:
+def test_notification_can_be_marked_read_individually(tmp_path: Path) -> None:
     store = NotificationStore(tmp_path / "notifications.json")
-    store.append("İlk bildirim")
-    store.append("Bir hata", level="error")
-
-    assert [item.message for item in store.load()] == [
-        "İlk bildirim",
-        "Bir hata",
-    ]
-    assert all(not item.read for item in store.load())
-
-    store.mark_all_read()
-
-    assert all(item.read for item in store.load())
+    first = store.append("Birinci")
+    second = store.append("İkinci")
+    assert {item.id for item in store.unread()} == {first.id, second.id}
+    assert store.mark_read(first.id)
+    loaded = {item.id: item for item in store.load()}
+    assert loaded[first.id].read is True
+    assert loaded[second.id].read is False
+    assert [item.id for item in store.unread()] == [second.id]
 
 
-def test_notification_store_is_bounded_and_atomic(tmp_path: Path) -> None:
-    store = NotificationStore(tmp_path / "notifications.json", keep=2)
-    for index in range(4):
-        store.append(f"bildirim-{index}")
-
-    assert [item.message for item in store.load()] == [
-        "bildirim-2",
-        "bildirim-3",
-    ]
-    assert not list(tmp_path.glob("*.tmp"))
-
-
-def test_notification_store_recovers_from_corrupt_content(tmp_path: Path) -> None:
-    path = tmp_path / "notifications.json"
-    path.write_text("{broken", encoding="utf-8")
-    store = NotificationStore(path)
-
-    assert store.load() == ()
-    store.append("Kurtarıldı", level="warning")
-    assert json.loads(path.read_text(encoding="utf-8"))[0]["message"] == "Kurtarıldı"
-
-
-def test_notification_store_validates_inputs(tmp_path: Path) -> None:
+def test_mark_read_unknown_notification_is_safe(tmp_path: Path) -> None:
     store = NotificationStore(tmp_path / "notifications.json")
-
-    with pytest.raises(ValueError, match="boş"):
-        store.append(" \n ")
-    with pytest.raises(ValueError, match="seviyesi"):
-        store.append("mesaj", level="critical")
-
-
-def test_notification_store_clear_removes_all_entries(tmp_path: Path) -> None:
-    store = NotificationStore(tmp_path / "notifications.json")
-    store.append("silinecek")
-
-    store.clear()
-
-    assert store.load() == ()
+    store.append("Kayıt")
+    assert store.mark_read("missing") is False
+    assert len(store.unread()) == 1

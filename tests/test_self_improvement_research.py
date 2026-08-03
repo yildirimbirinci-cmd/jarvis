@@ -502,3 +502,57 @@ def test_research_report_does_not_claim_solution_selection_or_plan(tmp_path: Pat
     assert "plan veya patch üretmedim" in report
     assert "Seçtiğimiz çözüm" not in report
     assert "Uygulama yaklaşımı" not in report
+
+
+def test_completed_research_notification_lifecycle_is_persistent(tmp_path: Path) -> None:
+    store = SelfImprovementResearchStore(tmp_path / "research.json")
+    task = store.start("Cevapların yavaş, nedenini araştır.")
+    completed = store.complete(
+        task,
+        summary="Ölçüm gerekli.",
+        cause="Kök neden henüz kanıtlanmadı.",
+        solution="Aşama sürelerini ölç.",
+        benefit="Yanlış optimizasyonu önler.",
+        risk="Düşük.",
+    )
+    assert completed.notification_state == "pending"
+    assert store.pending_notifications() == (completed,)
+
+    sent = store.mark_notification_sent(completed, "NOTIFY-1")
+    assert sent.notification_state == "sent"
+    assert sent.notification_id == "NOTIFY-1"
+    assert store.pending_notifications() == ()
+
+    read = store.mark_notification_read(sent)
+    assert read.notification_state == "read"
+    assert store.load(read.task_id) == read
+
+
+def test_legacy_completed_research_does_not_create_duplicate_notification(tmp_path: Path) -> None:
+    store = SelfImprovementResearchStore(tmp_path / "research.json")
+    task = store.start("Eski araştırma")
+    legacy = module.replace(
+        task,
+        state="solution_found",
+        completed_at=module._now(),
+        notification_state="none",
+    )
+    store.save(legacy)
+    assert store.pending_notifications() == ()
+
+
+def test_failed_research_reports_uncertainty_and_next_step(tmp_path: Path) -> None:
+    store = SelfImprovementResearchStore(tmp_path / "research.json")
+    task = store.start("Konuşma kalitesini araştır.", feedback_category="dialogue_quality")
+    failed = store.fail(
+        task,
+        RuntimeError("ölçüm kaydı okunamadı"),
+        failure_kind="insufficient_evidence",
+        next_step="Konuşma örneklerini ayrı oturumlarda ölç.",
+    )
+    report = failed.user_report()
+    assert failed.notification_state == "pending"
+    assert failed.failure_kind == "insufficient_evidence"
+    assert "Bir kök neden uydurmadım" in report
+    assert "Konuşma örneklerini" in report
+    assert "kodumu değiştirmedim" in report

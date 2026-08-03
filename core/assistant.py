@@ -391,6 +391,7 @@ class AssistantEngine:
             DATA_DIR / "diagnostics" / "self_improvement_experiences.json"
         )
         self.self_improvement_research.experience_store = self.self_improvement_experiences
+        self._reconcile_self_improvement_notifications()
         self.time_budget = TimeBudgetStore(
             DATA_DIR / "diagnostics" / "time_budget.json"
         )
@@ -3946,6 +3947,47 @@ class AssistantEngine:
         except Exception:
             return ""
 
+    def _emit_self_improvement_notification(self, task) -> None:
+        store = getattr(self, "self_improvement_research", None)
+        notifications = getattr(self, "notifications", None)
+        if store is None or notifications is None or task is None:
+            return
+        if getattr(task, "notification_state", "none") != "pending":
+            return
+        category_labels = {
+            "performance": "Performans",
+            "repetition": "Tekrar",
+            "context": "Bağlam",
+            "dialogue_quality": "Konuşma kalitesi",
+            "voice_stability": "Ses kararlılığı",
+        }
+        label = category_labels.get(getattr(task, "feedback_category", ""), "Kendini geliştirme")
+        if task.state == "solution_found":
+            message = (
+                f"{label} araştırması tamamlandı ({task.task_id}). "
+                "Sonucu dinlemek için kategori adını veya araştırma kimliğini söyleyerek 'ne buldun' diyebilirsin."
+            )
+            level = "info"
+        else:
+            message = (
+                f"{label} araştırması güvenilir bir sonuca ulaşamadı ({task.task_id}). "
+                "Eksik kanıtı ve sonraki güvenli adımı görmek için kategori adını veya araştırma kimliğini söyleyerek 'ne buldun' diyebilirsin."
+            )
+            level = "warning"
+        notification = notifications.append(message, level=level)
+        store.mark_notification_sent(task, notification.id)
+
+    def _reconcile_self_improvement_notifications(self) -> None:
+        store = getattr(self, "self_improvement_research", None)
+        if store is None:
+            return
+        for task in store.pending_notifications():
+            try:
+                self._emit_self_improvement_notification(task)
+            except Exception:
+                # Bildirim yazılamasa bile uygulama başlangıcı ve araştırma kaydı korunur.
+                continue
+
     def _run_self_improvement_research(self, task_id: str) -> None:
         store = getattr(self, "self_improvement_research", None)
         if store is None:
@@ -3990,13 +4032,7 @@ class AssistantEngine:
                 speed_result_factory=choose_speed_research_result,
             )
             completed = store.complete(task, **result)
-            notifications = getattr(self, "notifications", None)
-            if notifications is not None:
-                notifications.append(
-                    "Kendimi geliştirme araştırmasını tamamladım. Sonucu anlaşılır biçimde "
-                    "dinlemek için 'ne buldun' diyebilirsin.",
-                    level="info",
-                )
+            self._emit_self_improvement_notification(completed)
             self._remember_action_context(
                 "self_improvement_research",
                 "Kendini geliştirme araştırması tamamlandı",
@@ -4004,13 +4040,7 @@ class AssistantEngine:
             )
         except Exception as exc:
             failed = store.fail(task, exc)
-            notifications = getattr(self, "notifications", None)
-            if notifications is not None:
-                notifications.append(
-                    "Kendimi geliştirme araştırmasını tamamlayamadım. Ayrıntı için "
-                    "'ne buldun' diyebilirsin.",
-                    level="warning",
-                )
+            self._emit_self_improvement_notification(failed)
             self._remember_action_context(
                 "self_improvement_research",
                 "Kendini geliştirme araştırması tamamlanamadı",
@@ -4194,6 +4224,14 @@ class AssistantEngine:
             if task is None:
                 return "Henüz başlatılmış bir kendini geliştirme araştırması yok."
             label = category_labels.get(task.feedback_category, task.feedback_category)
+            notifications = getattr(self, "notifications", None)
+            if task.notification_id and notifications is not None:
+                try:
+                    notifications.mark_read(task.notification_id)
+                except Exception:
+                    pass
+            if task.notification_state == "sent":
+                task = store.mark_notification_read(task)
             return f"{task.task_id} — {label} araştırması\n\n{task.user_report()}"
 
         feedbacks = classify_self_feedback_many(text)
