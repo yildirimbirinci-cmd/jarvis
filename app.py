@@ -166,6 +166,7 @@ class BargeInWorker(QThread):
 
     def run(self) -> None:
         self.status.emit("Diyalog kesme dinleyicisi hazır; 'dur' diyebilirsin.")
+        consecutive_failures = 0
         while not self.isInterruptionRequested():
             if not self.voice.has_owner_voice_profile():
                 self.msleep(200)
@@ -180,16 +181,24 @@ class BargeInWorker(QThread):
                     self.device_index,
                     max_seconds=self.CAPTURE_SECONDS,
                     cancel_check=self.isInterruptionRequested,
-                    wake_mode=False,
                     silence_stop_seconds=self.SILENCE_STOP_SECONDS,
                     wait_for_speech_seconds=self.WAIT_FOR_SPEECH_SECONDS,
                     min_capture_seconds=0.30,
                 )
+                consecutive_failures = 0
             except InterruptedError:
                 return
             except Exception as exc:
-                self.status.emit(f"Kesme sesi alınamadı: {exc}")
-                self.msleep(80)
+                consecutive_failures += 1
+                if consecutive_failures == 1:
+                    self.status.emit(f"Kesme sesi alınamadı: {exc}")
+                if consecutive_failures >= 3:
+                    self.status.emit(
+                        "Diyalog kesme dinleyicisi art arda üç hata nedeniyle "
+                        "güvenli biçimde durduruldu; ana konuşma akışı devam ediyor."
+                    )
+                    return
+                self.msleep(250)
                 continue
             # Use the threshold that was calibrated for this owner's saved
             # profile.  Forcing 0.82 here rejected the same owner whose wake
