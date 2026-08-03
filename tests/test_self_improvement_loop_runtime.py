@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import json
 from pathlib import Path
@@ -399,3 +399,257 @@ def test_loop_state_is_persisted(
 
     assert stored["runs"][0]["run_id"] == created.run_id
     assert stored["runs"][0]["status"] == "blocked"
+
+
+def write_phase2_project(
+    tmp_path: Path,
+) -> Path:
+    project = tmp_path / "phase2-project"
+    (project / "core").mkdir(parents=True)
+    (project / "tests").mkdir()
+
+    (project / "core" / "example.py").write_text(
+        "VALUE = 1\n",
+        encoding="utf-8",
+    )
+    (project / "tests" / "test_example.py").write_text(
+        "from core.example import VALUE\n\n"
+        "def test_value():\n"
+        "    assert VALUE == 2\n",
+        encoding="utf-8",
+    )
+    return project
+
+
+def write_phase2_journal(
+    path: Path,
+) -> None:
+    task = {
+        "task_id": "phase2-task",
+        "created_at": "2026-08-03T09:00:00+00:00",
+        "state": "solution_found",
+        "title": "Update isolated value",
+        "problem": "VALUE remains one.",
+        "solution": "Change VALUE to two.",
+        "rationale": "The focused test expects two.",
+        "affected_files": [
+            "core/example.py",
+            "tests/test_example.py",
+        ],
+        "test_plan": [
+            "Run tests/test_example.py.",
+            "Run the complete workspace tests.",
+        ],
+        "evidence_ids": ["phase2-evidence"],
+        "risk": "low",
+        "impact_score": 80,
+        "confidence_score": 90,
+        "requires_experiment": True,
+    }
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(task),
+        encoding="utf-8",
+    )
+
+    stem = path.stem
+    (path.parent / f"{stem}_tasks.json").write_text(
+        json.dumps([task]),
+        encoding="utf-8",
+    )
+    (path.parent / f"{stem}_history.json").write_text(
+        json.dumps(
+            [
+                {
+                    "task_id": "phase2-task",
+                    "state": "solution_found",
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (
+        path.parent
+        / f"{stem}_experiment_requests.json"
+    ).write_text("[]", encoding="utf-8")
+
+
+def write_phase2_changeset(
+    path: Path,
+    *,
+    replacement: str = "VALUE = 2",
+) -> None:
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "title": "Update isolated value",
+                "problem_pattern": "VALUE remains one.",
+                "solution_pattern": "Change VALUE to two.",
+                "applicability": [
+                    "Isolated Python constant update"
+                ],
+                "constraints": [
+                    "Do not modify the original project"
+                ],
+                "validation_steps": [
+                    "Run focused tests.",
+                    "Run complete workspace tests.",
+                ],
+                "confidence_score": 90,
+                "operations": [
+                    {
+                        "type": "replace_exact",
+                        "path": "core/example.py",
+                        "old": "VALUE = 1",
+                        "new": replacement,
+                        "expected_count": 1,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_phase2_executes_and_builds_knowledge(
+    tmp_path: Path,
+) -> None:
+    project = write_phase2_project(tmp_path)
+    journal = tmp_path / "phase2-journal" / "research.json"
+    changeset = tmp_path / "changeset.json"
+    runtime_root = tmp_path / "phase2-runtime"
+    write_phase2_journal(journal)
+    write_phase2_changeset(changeset)
+
+    source = project / "core" / "example.py"
+    before = source.read_bytes()
+
+    result = SelfImprovementLoopRuntime(
+        project,
+        journal,
+        runtime_root,
+        experiment_changeset_path=changeset,
+        focused_test_targets=[
+            "tests/test_example.py",
+        ],
+        full_test_targets=[
+            "tests",
+        ],
+    ).run(
+        make_trigger(
+            allow_experiment=True,
+            digest="c" * 64,
+        )
+    )
+
+    assert result.status == "completed"
+    assert result.completed_stage_count == 5
+    assert result.stages[-2].stage == "experiment"
+    assert result.stages[-2].status == "completed"
+    assert result.stages[-1].stage == "knowledge"
+    assert result.stages[-1].status == "completed"
+    assert source.read_bytes() == before
+
+    experiment_dirs = list(
+        (runtime_root / "experiments").glob("exp1-*")
+    )
+    assert len(experiment_dirs) == 1
+
+    stored_result = json.loads(
+        (
+            experiment_dirs[0]
+            / "experiment_result.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert stored_result["status"] == "passed"
+    assert stored_result["focused_tests_passed"] == 1
+    assert stored_result["full_tests_passed"] == 1
+
+
+def test_phase2_failed_change_stops_before_knowledge(
+    tmp_path: Path,
+) -> None:
+    project = write_phase2_project(tmp_path)
+    journal = tmp_path / "phase2-journal" / "research.json"
+    changeset = tmp_path / "broken-changeset.json"
+    write_phase2_journal(journal)
+    write_phase2_changeset(
+        changeset,
+        replacement="def broken(:",
+    )
+
+    result = SelfImprovementLoopRuntime(
+        project,
+        journal,
+        tmp_path / "broken-runtime",
+        experiment_changeset_path=changeset,
+        focused_test_targets=[
+            "tests/test_example.py",
+        ],
+        full_test_targets=[
+            "tests",
+        ],
+    ).run(
+        make_trigger(
+            allow_experiment=True,
+            digest="d" * 64,
+        )
+    )
+
+    assert result.status == "failed"
+    assert result.stages[-1].stage == "experiment"
+    assert result.stages[-1].status == "failed"
+    assert all(
+        stage.stage != "knowledge"
+        for stage in result.stages
+    )
+
+
+def test_phase2_requires_positive_timeout(
+    tmp_path: Path,
+) -> None:
+    project = write_phase2_project(tmp_path)
+    journal = tmp_path / "phase2-journal" / "research.json"
+    write_phase2_journal(journal)
+
+    try:
+        SelfImprovementLoopRuntime(
+            project,
+            journal,
+            tmp_path / "runtime",
+            experiment_timeout_seconds=0,
+        )
+    except ValueError as exc:
+        assert "positive" in str(exc)
+    else:
+        raise AssertionError(
+            "non-positive timeout was accepted"
+        )
+
+
+def test_phase1_behavior_remains_without_changeset(
+    tmp_path: Path,
+) -> None:
+    project = create_project(tmp_path)
+    journal = tmp_path / "journal" / "research.json"
+    write_journal(journal)
+
+    result = SelfImprovementLoopRuntime(
+        project,
+        journal,
+        tmp_path / "phase1-compatible-runtime",
+    ).run(
+        make_trigger(
+            allow_experiment=True,
+            digest="e" * 64,
+        )
+    )
+
+    assert result.status == "blocked"
+    assert result.stages[-2].stage == "experiment"
+    assert result.stages[-2].status == "completed"
+    assert result.stages[-1].stage == "knowledge"
+    assert result.stages[-1].status == "blocked"
+

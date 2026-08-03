@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import json
 import os
@@ -6,6 +6,10 @@ import tempfile
 from pathlib import Path
 from typing import Sequence
 
+from artmach_assistant.core.experiment_executor import (
+    ExperimentExecutionResult,
+    ExperimentExecutor,
+)
 from artmach_assistant.core.autonomous_improvement_loop import (
     AutonomousImprovementLoop,
     ImprovementLoopResult,
@@ -97,6 +101,10 @@ class SelfImprovementLoopRuntime:
         *,
         candidate_id: str | None = None,
         experiment_result_paths: Sequence[str | Path] = (),
+        experiment_changeset_path: str | Path | None = None,
+        focused_test_targets: Sequence[str] = (),
+        full_test_targets: Sequence[str] = (),
+        experiment_timeout_seconds: int = 120,
     ) -> None:
         self.project_root = (
             Path(project_root)
@@ -132,6 +140,37 @@ class SelfImprovementLoopRuntime:
             Path(value).expanduser().resolve(strict=False)
             for value in experiment_result_paths
         )
+        self.experiment_changeset_path = (
+            Path(experiment_changeset_path)
+            .expanduser()
+            .resolve(strict=False)
+            if experiment_changeset_path is not None
+            else None
+        )
+        self.focused_test_targets = tuple(
+            _normalise_text(value, limit=500)
+            for value in focused_test_targets
+            if _normalise_text(value, limit=500)
+        )
+        self.full_test_targets = tuple(
+            _normalise_text(value, limit=500)
+            for value in full_test_targets
+            if _normalise_text(value, limit=500)
+        )
+
+        try:
+            self.experiment_timeout_seconds = int(
+                experiment_timeout_seconds
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "experiment timeout must be an integer"
+            ) from exc
+
+        if self.experiment_timeout_seconds <= 0:
+            raise ValueError(
+                "experiment timeout must be positive"
+            )
 
         self.pipeline_root = (
             self.runtime_root / "pipeline"
@@ -153,6 +192,9 @@ class SelfImprovementLoopRuntime:
             ExperimentPreparationResult | None
         ) = None
         self._preparation_path: Path | None = None
+        self._execution_result: (
+            ExperimentExecutionResult | None
+        ) = None
 
     def _write_stage_artifact(
         self,
@@ -437,12 +479,52 @@ class SelfImprovementLoopRuntime:
                 message=preparation.message,
             )
 
+        if self.experiment_changeset_path is None:
+            return StageResult(
+                stage="experiment",
+                status="completed",
+                artifact_path=str(artifact),
+                artifact_id=preparation.experiment_id,
+                message=preparation.message,
+            )
+
+        execution = ExperimentExecutor(
+            preparation.workspace_path
+        ).execute(
+            self.experiment_changeset_path,
+            focused_test_targets=(
+                self.focused_test_targets
+            ),
+            full_test_targets=(
+                self.full_test_targets
+            ),
+            timeout_seconds=(
+                self.experiment_timeout_seconds
+            ),
+        )
+        self._execution_result = execution
+
+        execution_artifact = self._write_stage_artifact(
+            workspace,
+            "experiment_execution",
+            execution.to_dict(),
+        )
+
+        if execution.status != "passed":
+            return StageResult(
+                stage="experiment",
+                status="failed",
+                artifact_path=str(execution_artifact),
+                artifact_id=execution.experiment_id,
+                message=execution.message,
+            )
+
         return StageResult(
             stage="experiment",
             status="completed",
-            artifact_path=str(artifact),
-            artifact_id=preparation.experiment_id,
-            message=preparation.message,
+            artifact_path=str(execution_artifact),
+            artifact_id=execution.experiment_id,
+            message=execution.message,
         )
 
     def _knowledge_handler(
@@ -479,7 +561,14 @@ class SelfImprovementLoopRuntime:
                 ),
             )
 
-        if not self.experiment_result_paths:
+        result_paths = self.experiment_result_paths
+
+        if self._execution_result is not None:
+            result_paths = (
+                Path(self._execution_result.result_path),
+            )
+
+        if not result_paths:
             artifact = self._write_stage_artifact(
                 workspace,
                 "knowledge_waiting",
@@ -510,7 +599,7 @@ class SelfImprovementLoopRuntime:
         )
         built: KnowledgeBuildBridgeResult = bridge.build(
             preparation_path,
-            self.experiment_result_paths,
+            result_paths,
         )
 
         artifact = self._write_stage_artifact(
