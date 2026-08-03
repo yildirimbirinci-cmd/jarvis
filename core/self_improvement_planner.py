@@ -1,8 +1,10 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import os
+import re
 import tempfile
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -158,6 +160,8 @@ class SelfImprovementPlanner:
 
     MAX_SNAPSHOT_BYTES = 8 * 1024 * 1024
     MAX_CANDIDATES = 128
+    MAX_SYMBOL_SCAN_FILES = 4000
+    MAX_SYMBOL_SOURCE_BYTES = 2 * 1024 * 1024
 
     def __init__(
         self,
@@ -216,6 +220,190 @@ class SelfImprovementPlanner:
 
         return resolved.relative_to(self.project_root).as_posix()
 
+    @staticmethod
+    def _symbol_chains(
+        task: Mapping[str, object],
+    ) -> tuple[tuple[str, ...], ...]:
+        values: list[str] = []
+
+        for field in (
+            "title",
+            "problem",
+            "query",
+            "goal",
+            "summary",
+            "rationale",
+            "reasoning",
+            "solution",
+            "proposed_solution",
+            "recommendation",
+            "conclusion",
+            "result",
+        ):
+            value = _normalise_text(task.get(field))
+
+            if value:
+                values.append(value)
+
+        pattern = re.compile(
+            r"\b[A-Za-z_][A-Za-z0-9_]*"
+            r"(?:\.[A-Za-z_][A-Za-z0-9_]*)+\b"
+        )
+
+        chains: list[tuple[str, ...]] = []
+        seen: set[tuple[str, ...]] = set()
+
+        for value in values:
+            for match in pattern.findall(value):
+                parts = tuple(
+                    part
+                    for part in match.split(".")
+                    if part
+                )
+
+                if len(parts) < 2 or parts in seen:
+                    continue
+
+                seen.add(parts)
+                chains.append(parts)
+
+        return tuple(chains)
+
+    @staticmethod
+    def _snake_case(value: str) -> str:
+        first = re.sub(
+            r"(.)([A-Z][a-z]+)",
+            r"\1_\2",
+            value,
+        )
+        return re.sub(
+            r"([a-z0-9])([A-Z])",
+            r"\1_\2",
+            first,
+        ).casefold()
+
+    @staticmethod
+    def _declared_symbols(
+        source: str,
+    ) -> tuple[set[str], set[str]]:
+        try:
+            tree = ast.parse(source)
+        except (SyntaxError, ValueError):
+            return set(), set()
+
+        classes: set[str] = set()
+        functions: set[str] = set()
+
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ClassDef):
+                classes.add(node.name.casefold())
+            elif isinstance(
+                node,
+                (ast.FunctionDef, ast.AsyncFunctionDef),
+            ):
+                functions.add(node.name.casefold())
+
+        return classes, functions
+
+    def _infer_affected_files(
+        self,
+        task: Mapping[str, object],
+    ) -> tuple[str, ...]:
+        chains = self._symbol_chains(task)
+
+        if not chains:
+            return ()
+
+        candidates: list[Path] = []
+
+        for root in self.allowed_roots:
+            if not root.is_dir():
+                continue
+
+            for path in root.rglob("*.py"):
+                if len(candidates) >= self.MAX_SYMBOL_SCAN_FILES:
+                    break
+
+                if path.is_symlink() or not path.is_file():
+                    continue
+
+                try:
+                    if path.stat().st_size > self.MAX_SYMBOL_SOURCE_BYTES:
+                        continue
+                except OSError:
+                    continue
+
+                candidates.append(path)
+
+            if len(candidates) >= self.MAX_SYMBOL_SCAN_FILES:
+                break
+
+        scores: dict[str, int] = {}
+
+        for source_path in candidates:
+            try:
+                source = source_path.read_text(
+                    encoding="utf-8-sig"
+                )
+            except (OSError, UnicodeError):
+                continue
+
+            classes, functions = self._declared_symbols(source)
+
+            if not classes and not functions:
+                continue
+
+            stem = source_path.stem.casefold()
+
+            for chain in chains:
+                lowered = tuple(
+                    part.casefold()
+                    for part in chain
+                )
+                root_symbol = lowered[0]
+                remaining = lowered[1:]
+                score = 0
+
+                if root_symbol in classes:
+                    score += 10
+
+                if self._snake_case(chain[0]) == stem:
+                    score += 6
+
+                for symbol in remaining:
+                    if symbol in functions:
+                        score += 2
+
+                if score <= 0:
+                    continue
+
+                relative = source_path.resolve(
+                    strict=False
+                ).relative_to(
+                    self.project_root
+                ).as_posix()
+
+                scores[relative] = max(
+                    scores.get(relative, 0),
+                    score,
+                )
+
+        if not scores:
+            return ()
+
+        highest = max(scores.values())
+        winners = sorted(
+            path
+            for path, score in scores.items()
+            if score == highest
+        )
+
+        # Never guess when the best match is ambiguous.
+        if len(winners) != 1:
+            return ()
+
+        return tuple(winners)
+
     def _affected_files(self, task: Mapping[str, object]) -> tuple[str, ...]:
         raw_values: list[object] = []
 
@@ -250,7 +438,10 @@ class SelfImprovementPlanner:
             seen.add(key)
             result.append(resolved)
 
-        return tuple(sorted(result))
+        if result:
+            return tuple(sorted(result))
+
+        return self._infer_affected_files(task)
 
     @staticmethod
     def _first_text(task: Mapping[str, object], fields: Iterable[str]) -> str:

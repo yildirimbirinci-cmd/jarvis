@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import json
 from pathlib import Path
@@ -210,3 +210,124 @@ def test_rejects_oversized_snapshot(tmp_path: Path, monkeypatch: pytest.MonkeyPa
 
     with pytest.raises(ValueError, match="size limit"):
         planner.build_plan(snapshot)
+
+
+def test_infers_file_from_qualified_symbol_chain(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    (project / "core").mkdir(parents=True)
+    (project / "tests").mkdir()
+
+    source = project / "core" / "task_orchestrator.py"
+    source.write_text(
+        """
+class TaskOrchestrator:
+    def wrap(self):
+        return self
+
+    def execute(self):
+        return None
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    snapshot = tmp_path / "snapshot.json"
+    write_snapshot(
+        snapshot,
+        [
+            valid_task(
+                problem=(
+                    "Measured slowdown in "
+                    "TaskOrchestrator.wrap.execute."
+                ),
+                affected_files=[],
+            )
+        ],
+    )
+
+    plan = SelfImprovementPlanner(project).build_plan(
+        snapshot
+    )
+
+    assert plan.candidate_count == 1
+    assert plan.candidates[0].affected_files == (
+        "core/task_orchestrator.py",
+    )
+
+
+def test_does_not_guess_ambiguous_symbol_file(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    (project / "core").mkdir(parents=True)
+
+    for name in ("first.py", "second.py"):
+        (project / "core" / name).write_text(
+            """
+class TaskOrchestrator:
+    def execute(self):
+        return None
+""".strip()
+            + "\n",
+            encoding="utf-8",
+        )
+
+    snapshot = tmp_path / "snapshot.json"
+    write_snapshot(
+        snapshot,
+        [
+            valid_task(
+                problem="TaskOrchestrator.execute is slow.",
+                affected_files=[],
+            )
+        ],
+    )
+
+    plan = SelfImprovementPlanner(project).build_plan(
+        snapshot
+    )
+
+    assert plan.candidates[0].affected_files == ()
+
+
+def test_explicit_affected_file_precedes_symbol_inference(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    (project / "core").mkdir(parents=True)
+
+    (project / "core" / "task_orchestrator.py").write_text(
+        """
+class TaskOrchestrator:
+    def execute(self):
+        return None
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    (project / "core" / "explicit.py").write_text(
+        "VALUE = 1\n",
+        encoding="utf-8",
+    )
+
+    snapshot = tmp_path / "snapshot.json"
+    write_snapshot(
+        snapshot,
+        [
+            valid_task(
+                problem="TaskOrchestrator.execute is slow.",
+                affected_files=["core/explicit.py"],
+            )
+        ],
+    )
+
+    plan = SelfImprovementPlanner(project).build_plan(
+        snapshot
+    )
+
+    assert plan.candidates[0].affected_files == (
+        "core/explicit.py",
+    )
+
