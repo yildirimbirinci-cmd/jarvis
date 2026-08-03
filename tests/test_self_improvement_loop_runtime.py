@@ -1,0 +1,401 @@
+﻿from __future__ import annotations
+
+import json
+from pathlib import Path
+
+from artmach_assistant.core.autonomous_improvement_loop import (
+    ImprovementTrigger,
+)
+from artmach_assistant.core.self_improvement_loop_runtime import (
+    SelfImprovementLoopRuntime,
+)
+
+
+def create_project(tmp_path: Path) -> Path:
+    project = tmp_path / "project"
+    (project / "core").mkdir(parents=True)
+    (project / "tests").mkdir()
+    (project / "indexing").mkdir()
+
+    (project / "core" / "example.py").write_text(
+        "VALUE = 1\n",
+        encoding="utf-8",
+    )
+    return project
+
+
+def write_journal(
+    path: Path,
+    *,
+    state: str = "solution_found",
+    requires_experiment: bool = True,
+) -> None:
+    task = {
+        "task_id": "task-1",
+        "created_at": "2026-08-03T08:00:00+00:00",
+        "state": state,
+        "title": "Reduce repeated analysis",
+        "problem": "Equivalent input is analysed repeatedly.",
+        "solution": "Cache results using a content digest.",
+        "rationale": "Repeated work increases latency.",
+        "affected_files": ["core/example.py"],
+        "test_plan": [
+            "Run focused tests.",
+            "Run complete regression tests.",
+        ],
+        "evidence_ids": ["evidence-1"],
+        "risk": "medium",
+        "impact_score": 80,
+        "confidence_score": 90,
+        "requires_experiment": requires_experiment,
+    }
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(task),
+        encoding="utf-8",
+    )
+
+    stem = path.stem
+    (path.parent / f"{stem}_tasks.json").write_text(
+        json.dumps([task]),
+        encoding="utf-8",
+    )
+    (path.parent / f"{stem}_history.json").write_text(
+        json.dumps(
+            [{"task_id": "task-1", "state": state}]
+        ),
+        encoding="utf-8",
+    )
+    (
+        path.parent
+        / f"{stem}_experiment_requests.json"
+    ).write_text("[]", encoding="utf-8")
+
+
+def make_trigger(
+    *,
+    allow_experiment: bool,
+    digest: str = "a" * 64,
+) -> ImprovementTrigger:
+    return ImprovementTrigger(
+        trigger_id="integration-trigger",
+        reason="Verified Research Journal is ready.",
+        source_digest=digest,
+        allow_experiment=allow_experiment,
+    )
+
+
+def write_result(
+    path: Path,
+    *,
+    experiment_id: str,
+    candidate_id: str,
+) -> None:
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "experiment_id": experiment_id,
+                "candidate_id": candidate_id,
+                "status": "passed",
+                "title": "Cache repeated analysis",
+                "problem_pattern": (
+                    "Equivalent input is analysed repeatedly."
+                ),
+                "solution_pattern": (
+                    "Cache results using a content digest."
+                ),
+                "applicability": [
+                    "Deterministic analysis operations"
+                ],
+                "constraints": [
+                    "Invalidate cache after source changes"
+                ],
+                "validation_steps": [
+                    "Run focused tests.",
+                    "Run complete regression tests.",
+                ],
+                "risk": "medium",
+                "confidence_score": 90,
+                "focused_tests_passed": 10,
+                "full_tests_passed": 1594,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_real_chain_stops_without_experiment_permission(
+    tmp_path: Path,
+) -> None:
+    project = create_project(tmp_path)
+    journal = tmp_path / "journal" / "research.json"
+    write_journal(journal)
+
+    result = SelfImprovementLoopRuntime(
+        project,
+        journal,
+        tmp_path / "runtime",
+    ).run(
+        make_trigger(allow_experiment=False)
+    )
+
+    assert result.status == "blocked"
+    assert [
+        stage.stage for stage in result.stages
+    ] == [
+        "research",
+        "journal",
+        "planning",
+        "experiment",
+        "knowledge",
+    ]
+    assert result.stages[-2].status == "skipped"
+    assert result.stages[-1].status == "blocked"
+    assert "prepared experiment" in result.stages[-1].message
+
+
+def test_real_chain_prepares_experiment_then_waits(
+    tmp_path: Path,
+) -> None:
+    project = create_project(tmp_path)
+    journal = tmp_path / "journal" / "research.json"
+    runtime_root = tmp_path / "runtime"
+    write_journal(journal)
+
+    result = SelfImprovementLoopRuntime(
+        project,
+        journal,
+        runtime_root,
+    ).run(
+        make_trigger(allow_experiment=True)
+    )
+
+    assert result.status == "blocked"
+    assert result.completed_stage_count == 4
+    assert result.stages[-1].stage == "knowledge"
+    assert "verified experiment result" in (
+        result.stages[-1].message
+    )
+    assert (
+        runtime_root / "experiments"
+    ).is_dir()
+
+
+def test_full_real_chain_builds_knowledge(
+    tmp_path: Path,
+) -> None:
+    project = create_project(tmp_path)
+    journal = tmp_path / "journal" / "research.json"
+    first_runtime = tmp_path / "first-runtime"
+    write_journal(journal)
+
+    first = SelfImprovementLoopRuntime(
+        project,
+        journal,
+        first_runtime,
+    ).run(
+        make_trigger(allow_experiment=True)
+    )
+
+    experiment_stage = next(
+        stage
+        for stage in first.stages
+        if stage.stage == "experiment"
+    )
+    preparation = json.loads(
+        Path(experiment_stage.artifact_path).read_text(
+            encoding="utf-8"
+        )
+    )
+
+    result_path = tmp_path / "result.json"
+    write_result(
+        result_path,
+        experiment_id=preparation["experiment_id"],
+        candidate_id=preparation["candidate_id"],
+    )
+
+    second_runtime = tmp_path / "second-runtime"
+    completed = SelfImprovementLoopRuntime(
+        project,
+        journal,
+        second_runtime,
+        experiment_result_paths=[result_path],
+    ).run(
+        make_trigger(
+            allow_experiment=True,
+            digest="b" * 64,
+        )
+    )
+
+    assert completed.status == "completed"
+    assert completed.completed_stage_count == 5
+    assert completed.stages[-1].stage == "knowledge"
+    assert completed.stages[-1].status == "completed"
+
+
+def test_missing_journal_blocks_first_stage(
+    tmp_path: Path,
+) -> None:
+    project = create_project(tmp_path)
+
+    result = SelfImprovementLoopRuntime(
+        project,
+        tmp_path / "missing.json",
+        tmp_path / "runtime",
+    ).run(
+        make_trigger(allow_experiment=True)
+    )
+
+    assert result.status == "blocked"
+    assert len(result.stages) == 1
+    assert result.stages[0].stage == "research"
+
+
+def test_failed_journal_produces_no_plan(
+    tmp_path: Path,
+) -> None:
+    project = create_project(tmp_path)
+    journal = tmp_path / "journal" / "research.json"
+    write_journal(journal, state="failed")
+
+    result = SelfImprovementLoopRuntime(
+        project,
+        journal,
+        tmp_path / "runtime",
+    ).run(
+        make_trigger(allow_experiment=True)
+    )
+
+    assert result.status == "blocked"
+    assert result.stages[-1].stage == "planning"
+    assert "no safe" in result.stages[-1].message
+
+
+def test_source_file_is_never_modified(
+    tmp_path: Path,
+) -> None:
+    project = create_project(tmp_path)
+    source = project / "core" / "example.py"
+    before = source.read_bytes()
+    journal = tmp_path / "journal" / "research.json"
+    write_journal(journal)
+
+    SelfImprovementLoopRuntime(
+        project,
+        journal,
+        tmp_path / "runtime",
+    ).run(
+        make_trigger(allow_experiment=True)
+    )
+
+    assert source.read_bytes() == before
+
+
+def test_duplicate_trigger_is_rejected(
+    tmp_path: Path,
+) -> None:
+    project = create_project(tmp_path)
+    journal = tmp_path / "journal" / "research.json"
+    runtime_root = tmp_path / "runtime"
+    write_journal(journal)
+
+    runtime = SelfImprovementLoopRuntime(
+        project,
+        journal,
+        runtime_root,
+    )
+    runtime.run(
+        make_trigger(allow_experiment=True)
+    )
+
+    try:
+        runtime.run(
+            make_trigger(allow_experiment=True)
+        )
+    except ValueError as exc:
+        assert "already processed" in str(exc)
+    else:
+        raise AssertionError(
+            "duplicate trigger was not rejected"
+        )
+
+
+def test_automatically_selects_experiment_candidate(
+    tmp_path: Path,
+) -> None:
+    project = create_project(tmp_path)
+    journal = tmp_path / "journal" / "research.json"
+    write_journal(journal)
+
+    result = SelfImprovementLoopRuntime(
+        project,
+        journal,
+        tmp_path / "runtime",
+    ).run(
+        make_trigger(allow_experiment=True)
+    )
+
+    experiment = next(
+        stage
+        for stage in result.stages
+        if stage.stage == "experiment"
+    )
+    stored = json.loads(
+        Path(experiment.artifact_path).read_text(
+            encoding="utf-8"
+        )
+    )
+
+    assert stored["candidate_id"].startswith("sip1-")
+    assert stored["status"] == "prepared"
+
+
+def test_explicit_unknown_candidate_fails_safely(
+    tmp_path: Path,
+) -> None:
+    project = create_project(tmp_path)
+    journal = tmp_path / "journal" / "research.json"
+    write_journal(journal)
+
+    result = SelfImprovementLoopRuntime(
+        project,
+        journal,
+        tmp_path / "runtime",
+        candidate_id="unknown",
+    ).run(
+        make_trigger(allow_experiment=True)
+    )
+
+    assert result.status == "failed"
+    assert result.stages[-1].stage == "experiment"
+    assert "not found" in result.stages[-1].message
+
+
+def test_loop_state_is_persisted(
+    tmp_path: Path,
+) -> None:
+    project = create_project(tmp_path)
+    journal = tmp_path / "journal" / "research.json"
+    runtime_root = tmp_path / "runtime"
+    write_journal(journal)
+
+    created = SelfImprovementLoopRuntime(
+        project,
+        journal,
+        runtime_root,
+    ).run(
+        make_trigger(allow_experiment=True)
+    )
+
+    stored = json.loads(
+        (
+            runtime_root
+            / "autonomous_loop_state.json"
+        ).read_text(encoding="utf-8")
+    )
+
+    assert stored["runs"][0]["run_id"] == created.run_id
+    assert stored["runs"][0]["status"] == "blocked"
