@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import json
 from pathlib import Path
@@ -259,3 +259,54 @@ def test_status_rejects_invalid_state(
     assert result.exit_code == 1
     assert result.status == "failed"
     assert "Durum okunamadı" in result.output
+
+
+def test_prepare_wires_real_changeset_model_when_config_is_supplied(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    project = create_project(tmp_path)
+    journal = tmp_path / "journal" / "research.json"
+    write_journal(journal)
+    captured = {}
+
+    class FakeModel:
+        def __init__(self, config, **kwargs):
+            captured["config"] = config
+            captured["model_kwargs"] = kwargs
+
+    class FakeRuntime:
+        def __init__(self, *_args, **kwargs):
+            captured["runtime_kwargs"] = kwargs
+
+        def run(self, _trigger):
+            return SimpleNamespace(
+                run_id="run-1",
+                status="blocked",
+                completed_stage_count=0,
+                stages=(),
+            )
+
+    from types import SimpleNamespace
+    import artmach_assistant.core.self_improvement_runtime_cli as cli
+
+    monkeypatch.setattr(cli, "OllamaChangesetModel", FakeModel)
+    monkeypatch.setattr(cli, "SelfImprovementLoopRuntime", FakeRuntime)
+    config = SimpleNamespace(
+        ollama_url="http://127.0.0.1:11434",
+        code_model="safe-coder",
+    )
+
+    result = cli.run_self_improvement_runtime(
+        "prepare",
+        project_root=project,
+        journal_path=journal,
+        runtime_root=tmp_path / "runtime",
+        model_config=config,
+        changeset_timeout_seconds=33,
+    )
+
+    assert result.exit_code == 0
+    assert captured["config"] is config
+    assert captured["model_kwargs"]["timeout_seconds"] == 33
+    assert captured["runtime_kwargs"]["changeset_model"].__class__ is FakeModel

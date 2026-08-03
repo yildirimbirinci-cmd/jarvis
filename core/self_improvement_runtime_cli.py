@@ -1,14 +1,15 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import hashlib
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Sequence
+from typing import Callable, Sequence
 
 from artmach_assistant.core.autonomous_improvement_loop import (
     ImprovementTrigger,
 )
+from artmach_assistant.core.ollama_changeset_model import OllamaChangesetModel
 from artmach_assistant.core.self_improvement_loop_runtime import (
     SelfImprovementLoopRuntime,
 )
@@ -143,6 +144,9 @@ def run_self_improvement_runtime(
     candidate_id: str | None = None,
     experiment_result_paths: Sequence[str | Path] = (),
     trigger_id: str = "manual-self-improvement",
+    model_config: object | None = None,
+    changeset_timeout_seconds: float = 120.0,
+    cancel_check: Callable[[], bool] | None = None,
 ) -> RuntimeCommandResult:
     action = _normalise_text(
         command,
@@ -297,6 +301,15 @@ def run_self_improvement_runtime(
     )
 
     try:
+        changeset_model = (
+            OllamaChangesetModel(
+                model_config,
+                timeout_seconds=changeset_timeout_seconds,
+                cancel_check=cancel_check,
+            )
+            if model_config is not None and action in {"prepare", "complete"}
+            else None
+        )
         result = SelfImprovementLoopRuntime(
             project,
             journal,
@@ -307,6 +320,7 @@ def run_self_improvement_runtime(
                 if action == "complete"
                 else ()
             ),
+            changeset_model=changeset_model,
         ).run(trigger)
     except Exception as exc:
         return RuntimeCommandResult(
