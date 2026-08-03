@@ -31,6 +31,7 @@ from artmach_assistant.core.constitution import ConstitutionError, ConstitutionR
 from artmach_assistant.core.crash_reporter import install_crash_reporting
 from artmach_assistant.core.intent_router import IntentDecision, IntentRouter
 from artmach_assistant.core.notification_store import NotificationStore
+from artmach_assistant.core.trust_inbox import TrustApprovalInbox
 from artmach_assistant.core.runtime_session import RuntimeSession
 from artmach_assistant.core.self_improvement_lifecycle import (
     SelfImprovementApplicationLifecycle,
@@ -843,6 +844,23 @@ class MainWindow(QMainWindow):
         self.memory_output.setPlaceholderText("Proje hafızası burada görünecek.")
         memory_layout.addWidget(self.memory_output, 1)
         self.tabs.addTab(memory_tab, "Proje Hafızası")
+        approval_tab = QWidget()
+        approval_layout = QVBoxLayout(approval_tab)
+        approval_top = QHBoxLayout()
+        approval_top.addWidget(QLabel("GÜVEN VE ONAY MERKEZİ"))
+        approval_top.addStretch(1)
+        approval_refresh = QPushButton("Yenile")
+        approval_refresh.clicked.connect(self.refresh_trust_approval_panel)
+        approval_top.addWidget(approval_refresh)
+        approval_layout.addLayout(approval_top)
+        self.trust_approval_output = QPlainTextEdit()
+        self.trust_approval_output.setReadOnly(True)
+        self.trust_approval_output.setFont(QFont("Consolas", 9))
+        self.trust_approval_output.setPlaceholderText("Henüz güven raporu yok.")
+        approval_layout.addWidget(self.trust_approval_output, 1)
+        self.tabs.addTab(approval_tab, "Onay Merkezi")
+        QTimer.singleShot(0, self.refresh_trust_approval_panel)
+
 
         build_tab = QWidget()
         build_layout = QVBoxLayout(build_tab)
@@ -1876,6 +1894,17 @@ class MainWindow(QMainWindow):
         self._update_tts_controls()
         self.voice_log("Ses ayarları kaydedildi.")
         self.statusBar().showMessage("Ses ayarları kaydedildi", 3000)
+
+    def refresh_trust_approval_panel(self) -> None:
+        try:
+            inbox = TrustApprovalInbox((
+                DATA_DIR / "self_improvement",
+                Path(self.engine.own_project_root()) / ".self_improvement_runtime",
+                Path(self.engine.own_project_root()) / ".self_improvement_validation",
+            ))
+            self.trust_approval_output.setPlainText(inbox.render_text())
+        except Exception as exc:
+            self.trust_approval_output.setPlainText(f"Onay raporları okunamadı: {exc}")
 
     def start_wake_word(self) -> None:
         if self.wake_worker and self.wake_worker.isRunning():

@@ -145,6 +145,7 @@ from artmach_assistant.core.runtime_observability import (
 )
 from artmach_assistant.core.maintenance_advisor import MaintenanceAdvisor, MaintenanceReview
 from artmach_assistant.core.notification_store import NotificationStore
+from artmach_assistant.core.trust_inbox import TrustApprovalInbox
 from artmach_assistant.core.self_reflection_engine import (
     classify_self_feedback,
     classify_self_feedback_many,
@@ -392,6 +393,11 @@ class AssistantEngine:
             },
         )
         self.notifications = NotificationStore(DATA_DIR / "ui" / "notifications.json")
+        self.trust_approval_inbox = TrustApprovalInbox((
+            DATA_DIR / "self_improvement",
+            self.own_project_root() / ".self_improvement_runtime",
+            self.own_project_root() / ".self_improvement_validation",
+        ))
         self.self_improvement_research = SelfImprovementResearchStore(
             DATA_DIR / "diagnostics" / "self_improvement_research.json"
         )
@@ -8887,6 +8893,38 @@ class AssistantEngine:
         self.dialogue.remember(text, response)
         return response
 
+    def _trust_approval_report_request(self, text: str) -> str | None:
+        normalized = self.command_key(text)
+        list_phrases = {
+            "bekleyen onaylari goster", "onay raporlarini goster",
+            "guven raporlarini goster", "degisiklik onaylarini goster",
+        }
+        read_phrases = {
+            "onay raporunu oku", "son onay raporunu oku",
+            "guven raporunu oku", "son guven raporunu oku",
+        }
+        if normalized in list_phrases:
+            return self.trust_approval_inbox.render_text()
+        if normalized in read_phrases:
+            latest = self.trust_approval_inbox.latest()
+            if latest is None:
+                return "Okunacak güven raporu bulunamadı."
+            return latest.voice_summary or latest.short_summary or latest.headline
+        if normalized in {"bu degisikligi onayla", "degisikligi onayla"}:
+            latest = self.trust_approval_inbox.latest()
+            if latest is None:
+                return "Onaylanacak güven raporu bulunamadı."
+            return (
+                "Sesli kısa komutla commit onayı vermiyorum. "
+                "Raporu incele ve approval gate tarafından üretilen tek kullanımlık kimliği açıkça söyle."
+            )
+        if normalized in {"bu degisikligi reddet", "degisikligi reddet", "bu degisikligi beklet"}:
+            return (
+                "Bu komut raporu değiştirmez. Güvenli iptal için ilgili onay kimliğini kullanarak "
+                "commit önerisini iptal etmelisin."
+            )
+        return None
+
     def handle_local_command(self, raw_text: str) -> str:
         """Komutu yalnızca yerel kurallarla işler; hiçbir LLM veya ağ servisine göndermez."""
         text = self.normalize_address(raw_text)
@@ -8967,6 +9005,10 @@ class AssistantEngine:
         time_budget = self._time_budget_request(text)
         if time_budget is not None:
             return time_budget
+
+        trust_approval = self._trust_approval_report_request(text)
+        if trust_approval is not None:
+            return trust_approval
 
         self_improvement_runtime = self._self_improvement_runtime_request(text)
         if self_improvement_runtime is not None:
