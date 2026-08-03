@@ -860,3 +860,122 @@ def test_written_plan_contains_diagnostics(
     payload = json.loads(output.read_text(encoding="utf-8"))
     assert isinstance(payload["diagnostics"], list)
     assert payload["diagnostics"]
+
+
+def test_repository_health_increases_matching_candidate_score(
+    tmp_path: Path,
+) -> None:
+    from artmach_assistant.core.repository_health_knowledge import (
+        RepositoryHealthKnowledgeRepository,
+    )
+
+    project = create_project(tmp_path)
+    snapshot = tmp_path / "snapshot.json"
+    result = tmp_path / "success.json"
+    maintenance = tmp_path / "maintenance.json"
+    repository_path = tmp_path / "knowledge.json"
+    health_path = tmp_path / "health.json"
+
+    write_snapshot(snapshot)
+    write_result(
+        result,
+        status="passed",
+        experiment_id="exp1-health-success",
+        confidence=90,
+    )
+    maintenance.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "maintenance_id": "hamr1-health-success",
+                "status": "completed",
+                "health_before": 70,
+                "health_after": 82,
+                "health_delta": 12,
+                "health_trend": "improving",
+            }
+        ),
+        encoding="utf-8",
+    )
+    RepositoryHealthKnowledgeRepository(
+        repository_path,
+        health_path,
+    ).add_result(result, maintenance)
+
+    without_health = KnowledgeAwareSelfImprovementPlanner(
+        project,
+        repository_path,
+    ).build_plan(snapshot)
+    with_health = KnowledgeAwareSelfImprovementPlanner(
+        project,
+        repository_path,
+        health_path,
+    ).build_plan(snapshot)
+
+    assert (
+        with_health.candidates[0].priority_score
+        > without_health.candidates[0].priority_score
+    )
+    diagnostic = with_health.diagnostics[0]
+    assert diagnostic["average_health_delta"] == 12
+    assert diagnostic["health_score_adjustment"] > 0
+
+
+def test_declining_repository_health_penalises_candidate(
+    tmp_path: Path,
+) -> None:
+    from artmach_assistant.core.repository_health_knowledge import (
+        RepositoryHealthKnowledgeRepository,
+    )
+
+    project = create_project(tmp_path)
+    snapshot = tmp_path / "snapshot.json"
+    result = tmp_path / "success.json"
+    maintenance = tmp_path / "maintenance.json"
+    repository_path = tmp_path / "knowledge.json"
+    health_path = tmp_path / "health.json"
+
+    write_snapshot(snapshot)
+    write_result(
+        result,
+        status="passed",
+        experiment_id="exp1-health-decline",
+        confidence=90,
+    )
+    maintenance.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "maintenance_id": "hamr1-health-decline",
+                "status": "failed",
+                "health_before": 80,
+                "health_after": 70,
+                "health_delta": -10,
+                "health_trend": "declining",
+            }
+        ),
+        encoding="utf-8",
+    )
+    RepositoryHealthKnowledgeRepository(
+        repository_path,
+        health_path,
+    ).add_result(result, maintenance)
+
+    without_health = KnowledgeAwareSelfImprovementPlanner(
+        project,
+        repository_path,
+    ).build_plan(snapshot)
+    with_health = KnowledgeAwareSelfImprovementPlanner(
+        project,
+        repository_path,
+        health_path,
+    ).build_plan(snapshot)
+
+    assert (
+        with_health.candidates[0].priority_score
+        < without_health.candidates[0].priority_score
+    )
+    assert (
+        with_health.diagnostics[0]["health_score_adjustment"]
+        < 0
+    )

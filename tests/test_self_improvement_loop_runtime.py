@@ -1098,3 +1098,67 @@ def test_knowledge_repository_accepts_enriched_result(
         ).read_text(encoding="utf-8")
     )
     assert len(repository["records"]) == 1
+
+
+def test_knowledge_stage_persists_repository_health_sidecar(
+    tmp_path: Path,
+) -> None:
+    project = write_phase2_project(tmp_path)
+    journal = tmp_path / "health-journal" / "research.json"
+    changeset = tmp_path / "changeset.json"
+    maintenance = tmp_path / "maintenance.json"
+    runtime_root = tmp_path / "health-runtime"
+    write_phase2_journal(journal)
+    write_phase2_changeset(changeset)
+    maintenance.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "maintenance_id": "hamr1-runtime-health",
+                "status": "completed",
+                "health_before": 75,
+                "health_after": 84,
+                "health_delta": 9,
+                "health_trend": "improving",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = SelfImprovementLoopRuntime(
+        project,
+        journal,
+        runtime_root,
+        maintenance_result_paths=[maintenance],
+        experiment_changeset_path=changeset,
+        focused_test_targets=["tests/test_example.py"],
+        full_test_targets=["tests"],
+    ).run(
+        make_trigger(
+            allow_experiment=True,
+            digest="c" * 64,
+        )
+    )
+
+    assert result.status == "completed"
+    health_store = json.loads(
+        (
+            runtime_root
+            / "knowledge"
+            / "repository_health.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert len(health_store["records"]) == 1
+    assert health_store["records"][0]["health_delta"] == 9
+
+    knowledge_stage = next(
+        stage
+        for stage in result.stages
+        if stage.stage == "knowledge"
+    )
+    artifact = json.loads(
+        Path(knowledge_stage.artifact_path).read_text(
+            encoding="utf-8"
+        )
+    )
+    assert len(artifact["repository_health_records"]) == 1

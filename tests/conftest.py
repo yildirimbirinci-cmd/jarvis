@@ -11,11 +11,13 @@ import pytest
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 REPOSITORY_ROOT = PACKAGE_ROOT.parent
+TEST_ROOT = Path(__file__).resolve().parent
 
-# Support both import styles used by the project and historical tests:
+# Support project imports and historical direct imports between test modules:
 #   import indexing
 #   import artmach_assistant.indexing
-for path in (REPOSITORY_ROOT, PACKAGE_ROOT):
+#   import test_some_historical_helper
+for path in (TEST_ROOT, REPOSITORY_ROOT, PACKAGE_ROOT):
     value = str(path)
     if value not in sys.path:
         sys.path.insert(0, value)
@@ -87,7 +89,6 @@ def load_module(name: str, relative: str):
 # Some historical tests install temporary dependency stubs under real project
 # module names.  Pytest imports every test module during collection, so those
 # stubs must not leak into later modules and make the suite order-dependent.
-_MODULE_SNAPSHOTS: dict[str, dict[str, object]] = {}
 _PACKAGE_PREFIXES = ("artmach_assistant", "core", "indexing")
 
 
@@ -122,17 +123,22 @@ def _restore_project_modules(snapshot: dict[str, object]) -> None:
     importlib.invalidate_caches()
 
 
+# Capture one clean module state after conftest initialization.  Collection
+# must always return to this baseline; taking a fresh snapshot for every test
+# module can preserve temporary dependency stubs installed by an earlier
+# module and make later imports order-dependent.
+_COLLECTION_BASELINE = _snapshot_project_modules()
+
+
 def pytest_collectstart(collector) -> None:
     if collector.__class__.__name__ != "Module":
         return
-    nodeid = getattr(collector, "nodeid", str(getattr(collector, "path", "")))
-    _MODULE_SNAPSHOTS[nodeid] = _snapshot_project_modules()
+    _restore_project_modules(_COLLECTION_BASELINE)
 
 
 def pytest_collectreport(report) -> None:
-    snapshot = _MODULE_SNAPSHOTS.pop(report.nodeid, None)
-    if snapshot is not None:
-        _restore_project_modules(snapshot)
+    if getattr(report, "nodeid", "").endswith(".py"):
+        _restore_project_modules(_COLLECTION_BASELINE)
 
 
 @pytest.fixture(autouse=True)

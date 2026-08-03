@@ -170,7 +170,19 @@ class SelfMaintainingImprovementRuntime:
             return
 
         self._maintenance_result = result
-        self._write_preflight(result.to_dict())
+        payload = result.to_dict()
+        self._write_preflight(payload)
+        required_health_fields = {
+            "maintenance_id",
+            "health_before",
+            "health_after",
+            "health_delta",
+            "health_trend",
+        }
+        if required_health_fields.issubset(payload):
+            self.improvement_runtime.maintenance_result_paths = (
+                self.maintenance_preflight_path,
+            )
 
     def run(
         self,

@@ -11,6 +11,10 @@ from artmach_assistant.core.knowledge_repository import (
     KnowledgeRecord,
     KnowledgeRepository,
 )
+from artmach_assistant.core.repository_health_knowledge import (
+    RepositoryHealthKnowledgeRecord,
+    RepositoryHealthKnowledgeRepository,
+)
 from artmach_assistant.core.self_improvement_planner import (
     ImprovementCandidate,
     SelfImprovementPlan,
@@ -332,11 +336,13 @@ class KnowledgeAwareSelfImprovementPlanner:
     """
 
     MAX_SCORE_BONUS = 20
+    MAX_HEALTH_ADJUSTMENT = 15
 
     def __init__(
         self,
         project_root: str | Path,
         knowledge_repository_path: str | Path,
+        repository_health_knowledge_path: str | Path | None = None,
     ) -> None:
         self.project_root = (
             Path(project_root)
@@ -354,12 +360,91 @@ class KnowledgeAwareSelfImprovementPlanner:
         self.repository = KnowledgeRepository(
             self.knowledge_repository_path
         )
+        self.repository_health_knowledge_path = (
+            Path(repository_health_knowledge_path)
+            .expanduser()
+            .resolve(strict=False)
+            if repository_health_knowledge_path is not None
+            else None
+        )
+        self.health_repository = (
+            RepositoryHealthKnowledgeRepository(
+                self.knowledge_repository_path,
+                self.repository_health_knowledge_path,
+            )
+            if self.repository_health_knowledge_path is not None
+            else None
+        )
 
     def _records(self) -> tuple[KnowledgeRecord, ...]:
         if not self.knowledge_repository_path.exists():
             return ()
 
         return self.repository.list_records()
+
+    def _health_records(
+        self,
+    ) -> tuple[RepositoryHealthKnowledgeRecord, ...]:
+        if (
+            self.health_repository is None
+            or self.repository_health_knowledge_path is None
+            or not self.repository_health_knowledge_path.exists()
+        ):
+            return ()
+        return self.health_repository.list_records()
+
+    @staticmethod
+    def _health_adjustment(
+        matched: Iterable[KnowledgeRecord],
+        health_records: tuple[RepositoryHealthKnowledgeRecord, ...],
+    ) -> tuple[int, dict[str, object] | None]:
+        knowledge_ids = {record.record_id for record in matched}
+        relevant = tuple(
+            record
+            for record in health_records
+            if record.knowledge_record_id in knowledge_ids
+        )
+        if not relevant:
+            return 0, None
+
+        observations = sum(
+            max(1, record.observation_count)
+            for record in relevant
+        )
+        weighted_delta = sum(
+            record.health_delta * max(1, record.observation_count)
+            for record in relevant
+        )
+        average_delta = round(weighted_delta / observations)
+        improving = sum(
+            max(1, record.observation_count)
+            for record in relevant
+            if record.health_delta > 0
+            and record.maintenance_status in {"completed", "passed", "success"}
+        )
+        declining = sum(
+            max(1, record.observation_count)
+            for record in relevant
+            if record.health_delta < 0
+            or record.maintenance_status in {"failed", "error", "blocked"}
+        )
+        adjustment = max(
+            -KnowledgeAwareSelfImprovementPlanner.MAX_HEALTH_ADJUSTMENT,
+            min(
+                KnowledgeAwareSelfImprovementPlanner.MAX_HEALTH_ADJUSTMENT,
+                average_delta + min(5, improving) - min(5, declining * 2),
+            ),
+        )
+        return adjustment, {
+            "matched_health_record_ids": [
+                record.health_record_id for record in relevant
+            ],
+            "health_observations": observations,
+            "average_health_delta": average_delta,
+            "improving_observations": improving,
+            "declining_observations": declining,
+            "health_score_adjustment": adjustment,
+        }
 
     @staticmethod
     def _observation_total(
@@ -445,7 +530,8 @@ class KnowledgeAwareSelfImprovementPlanner:
         self,
         candidate: ImprovementCandidate,
         records: tuple[KnowledgeRecord, ...],
-    ) -> tuple[ImprovementCandidate | None, str | None]:
+        health_records: tuple[RepositoryHealthKnowledgeRecord, ...],
+    ) -> tuple[ImprovementCandidate | None, str | None, dict[str, object] | None]:
         exact_matches = _exact_matching_records(
             candidate,
             records,
@@ -462,6 +548,7 @@ class KnowledgeAwareSelfImprovementPlanner:
                     candidate,
                     records,
                 ),
+                None,
             )
 
         exact_successes = tuple(
@@ -507,10 +594,11 @@ class KnowledgeAwareSelfImprovementPlanner:
                     "problem/solution strategy previously failed: "
                     f"{candidate.candidate_id}"
                 ),
+                None,
             )
 
         if not successes:
-            return candidate, None
+            return candidate, None, None
 
         historical_confidence = round(
             sum(
@@ -542,6 +630,13 @@ class KnowledgeAwareSelfImprovementPlanner:
             + max(0, 50 - profile.success_rate) // 10,
         )
 
+        health_adjustment, health_diagnostic = (
+            self._health_adjustment(
+                family_matches,
+                health_records,
+            )
+        )
+
         confidence_score = max(
             0,
             min(
@@ -551,7 +646,8 @@ class KnowledgeAwareSelfImprovementPlanner:
                     historical_confidence,
                 )
                 + success_bonus
-                - failure_penalty,
+                - failure_penalty
+                + health_adjustment,
             ),
         )
 
@@ -561,7 +657,8 @@ class KnowledgeAwareSelfImprovementPlanner:
                 100,
                 candidate.priority_score
                 + success_bonus
-                - failure_penalty,
+                - failure_penalty
+                + health_adjustment,
             ),
         )
 
@@ -597,16 +694,18 @@ class KnowledgeAwareSelfImprovementPlanner:
             f"strategy reliability={profile.reliability_score}, "
             f"success rate={profile.success_rate}%, "
             f"family matches={len(family_matches)}, "
+            f"health adjustment={health_adjustment}, "
             "context=files+risk+applicability+validation: "
             f"{candidate.candidate_id}"
         )
-        return adjusted, warning
+        return adjusted, warning, health_diagnostic
 
     @staticmethod
     def _plan_id(
         base: SelfImprovementPlan,
         candidates: tuple[ImprovementCandidate, ...],
         repository_records: tuple[KnowledgeRecord, ...],
+        health_records: tuple[RepositoryHealthKnowledgeRecord, ...],
         diagnostics: tuple[dict[str, object], ...],
     ) -> str:
         identity = {
@@ -627,6 +726,15 @@ class KnowledgeAwareSelfImprovementPlanner:
                     ),
                 }
                 for record in repository_records
+            ],
+            "health_records": [
+                {
+                    "health_record_id": record.health_record_id,
+                    "knowledge_record_id": record.knowledge_record_id,
+                    "health_delta": record.health_delta,
+                    "observation_count": record.observation_count,
+                }
+                for record in health_records
             ],
             "diagnostics": [
                 dict(item)
@@ -649,6 +757,7 @@ class KnowledgeAwareSelfImprovementPlanner:
             snapshot_path
         )
         records = self._records()
+        health_records = self._health_records()
 
         if not records:
             return base
@@ -665,10 +774,13 @@ class KnowledgeAwareSelfImprovementPlanner:
             if diagnostic is not None:
                 diagnostics.append(diagnostic)
 
-            adjusted, warning = self._adjust_candidate(
+            adjusted, warning, health_diagnostic = self._adjust_candidate(
                 candidate,
                 records,
+                health_records,
             )
+            if diagnostic is not None and health_diagnostic is not None:
+                diagnostic.update(health_diagnostic)
 
             if warning:
                 warnings.append(warning)
@@ -699,6 +811,7 @@ class KnowledgeAwareSelfImprovementPlanner:
                 base,
                 ordered,
                 records,
+                health_records,
                 tuple(diagnostics),
             ),
             source_closeout_id=(

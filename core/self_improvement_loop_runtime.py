@@ -13,6 +13,9 @@ from artmach_assistant.core.experiment_executor import (
 from artmach_assistant.core.knowledge_repository import (
     KnowledgeRepository,
 )
+from artmach_assistant.core.repository_health_knowledge import (
+    RepositoryHealthKnowledgeRepository,
+)
 from artmach_assistant.core.autonomous_improvement_loop import (
     AutonomousImprovementLoop,
     ImprovementLoopResult,
@@ -104,6 +107,7 @@ class SelfImprovementLoopRuntime:
         *,
         candidate_id: str | None = None,
         experiment_result_paths: Sequence[str | Path] = (),
+        maintenance_result_paths: Sequence[str | Path] = (),
         experiment_changeset_path: str | Path | None = None,
         focused_test_targets: Sequence[str] = (),
         full_test_targets: Sequence[str] = (),
@@ -139,9 +143,18 @@ class SelfImprovementLoopRuntime:
             candidate_id,
             limit=200,
         )
+        if len(maintenance_result_paths) > self.MAX_RESULTS:
+            raise ValueError(
+                "maintenance result limit exceeded"
+            )
+
         self.experiment_result_paths = tuple(
             Path(value).expanduser().resolve(strict=False)
             for value in experiment_result_paths
+        )
+        self.maintenance_result_paths = tuple(
+            Path(value).expanduser().resolve(strict=False)
+            for value in maintenance_result_paths
         )
         self.experiment_changeset_path = (
             Path(experiment_changeset_path)
@@ -186,6 +199,9 @@ class SelfImprovementLoopRuntime:
         )
         self.knowledge_repository_path = (
             self.knowledge_root / "repository.json"
+        )
+        self.repository_health_knowledge_path = (
+            self.knowledge_root / "repository_health.json"
         )
         self.loop_state_path = (
             self.runtime_root / "autonomous_loop_state.json"
@@ -809,8 +825,44 @@ class SelfImprovementLoopRuntime:
         repository = KnowledgeRepository(
             self.knowledge_repository_path
         )
-        for result_path in result_paths:
-            repository.add_result(result_path)
+        health_repository = RepositoryHealthKnowledgeRepository(
+            self.knowledge_repository_path,
+            self.repository_health_knowledge_path,
+        )
+        maintenance_paths = self.maintenance_result_paths
+        if maintenance_paths and len(maintenance_paths) not in {
+            1,
+            len(result_paths),
+        }:
+            raise ValueError(
+                "maintenance results must contain one shared result "
+                "or one result per experiment"
+            )
+
+        health_records = []
+        for index, result_path in enumerate(result_paths):
+            if maintenance_paths:
+                maintenance_path = (
+                    maintenance_paths[0]
+                    if len(maintenance_paths) == 1
+                    else maintenance_paths[index]
+                )
+                _, health_record = health_repository.add_result(
+                    result_path,
+                    maintenance_path,
+                )
+                health_records.append(health_record.to_dict())
+            else:
+                repository.add_result(result_path)
+
+        if health_records:
+            payload = built.to_dict()
+            payload["repository_health_records"] = health_records
+            artifact = self._write_stage_artifact(
+                workspace,
+                "knowledge_build",
+                payload,
+            )
 
         return StageResult(
             stage="knowledge",
