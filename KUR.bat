@@ -2,16 +2,16 @@
 setlocal
 cd /d "%~dp0"
 if exist ".venv\Scripts\python.exe" (
-  ".venv\Scripts\python.exe" apply_lifecycle_stabilization.py
+  ".venv\Scripts\python.exe" install_two_regression_fix.py
 ) else (
-  python apply_lifecycle_stabilization.py
+  python install_two_regression_fix.py
 )
 if errorlevel 1 (
   echo.
-  echo Duzeltme uygulanamadi.
+  echo Kurulum basarisiz. Yedekler otomatik geri yuklendi.
   pause
   exit /b 1
 )
 echo.
-echo Duzeltme tamamlandi.
+echo Kurulum tamamlandi.
 pause
