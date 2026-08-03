@@ -186,6 +186,57 @@ def asks_for_self_improvement_technical_details(text: object) -> bool:
     )
 
 
+def asks_about_external_research(text: object) -> bool:
+    normalized = _normalize(text)
+    return any(
+        marker in normalized
+        for marker in (
+            "internet arastirmasi gerekir mi",
+            "arastirma icin internet gerekir mi",
+            "dis kaynak gerekir mi",
+            "internete ihtiyacin var mi",
+            "internetten arastirman gerekir mi",
+            "hangi kaynaklara dayandin",
+            "kanit kaynaklarini goster",
+        )
+    )
+
+
+def grants_external_research_permission(text: object) -> bool:
+    normalized = _normalize(text)
+    return any(
+        marker in normalized
+        for marker in (
+            "bu arastirma icin internete izin veriyorum",
+            "bu arastirmada internete cikabilirsin",
+            "dis kaynak arastirmasina izin veriyorum",
+            "internet arastirmasini onayliyorum",
+        )
+    )
+
+
+def denies_external_research_permission(text: object) -> bool:
+    normalized = _normalize(text)
+    return any(
+        marker in normalized
+        for marker in (
+            "bu arastirmada internete cikma",
+            "yalnizca kendi loglarini kullan",
+            "dis kaynak kullanma",
+            "internet arastirmasina izin vermiyorum",
+        )
+    )
+
+
+def source_quality_label(url: str) -> str:
+    value = _normalize(url)
+    if any(marker in value for marker in ("docs.", "documentation", "github.com", "readthedocs", "python.org")):
+        return "yüksek"
+    if any(marker in value for marker in ("stackoverflow", "issue", "forum", "reddit")):
+        return "orta"
+    return "belirsiz"
+
+
 @dataclass(frozen=True, slots=True)
 class SelfImprovementResearchTask:
     task_id: str
@@ -222,6 +273,14 @@ class SelfImprovementResearchTask:
     notified_at: str = ""
     failure_kind: str = ""
     next_step: str = ""
+    local_runtime_evidence: tuple[str, ...] = ()
+    local_code_evidence: tuple[str, ...] = ()
+    external_evidence: tuple[str, ...] = ()
+    external_sources: tuple[str, ...] = ()
+    source_quality_notes: tuple[str, ...] = ()
+    evidence_conflicts: tuple[str, ...] = ()
+    external_research_state: str = "not_needed"
+    external_research_reason: str = ""
     error: str = ""
 
     def to_dict(self) -> dict[str, object]:
@@ -237,6 +296,12 @@ class SelfImprovementResearchTask:
         payload["plan_options"] = list(self.plan_options)
         payload["implementation_plan"] = list(self.implementation_plan)
         payload["test_plan"] = list(self.test_plan)
+        payload["local_runtime_evidence"] = list(self.local_runtime_evidence)
+        payload["local_code_evidence"] = list(self.local_code_evidence)
+        payload["external_evidence"] = list(self.external_evidence)
+        payload["external_sources"] = list(self.external_sources)
+        payload["source_quality_notes"] = list(self.source_quality_notes)
+        payload["evidence_conflicts"] = list(self.evidence_conflicts)
         return payload
 
     @classmethod
@@ -279,6 +344,14 @@ class SelfImprovementResearchTask:
             notified_at=str(payload.get("notified_at", "")),
             failure_kind=str(payload.get("failure_kind", "")),
             next_step=str(payload.get("next_step", "")),
+            local_runtime_evidence=tuple(str(item) for item in payload.get("local_runtime_evidence", ()) if item),
+            local_code_evidence=tuple(str(item) for item in payload.get("local_code_evidence", ()) if item),
+            external_evidence=tuple(str(item) for item in payload.get("external_evidence", ()) if item),
+            external_sources=tuple(str(item) for item in payload.get("external_sources", ()) if item),
+            source_quality_notes=tuple(str(item) for item in payload.get("source_quality_notes", ()) if item),
+            evidence_conflicts=tuple(str(item) for item in payload.get("evidence_conflicts", ()) if item),
+            external_research_state=str(payload.get("external_research_state", "not_needed")),
+            external_research_reason=str(payload.get("external_research_reason", "")),
             error=str(payload.get("error", "")),
         )
 
@@ -367,13 +440,25 @@ class SelfImprovementResearchTask:
         details = "\n".join(f"- {item}" for item in self.technical_details[:12])
         if not details:
             details = "- Ek teknik olay kaydı bulunmuyor."
+        runtime = "\n".join(f"- {item}" for item in self.local_runtime_evidence) or "- yok"
+        code = "\n".join(f"- {item}" for item in self.local_code_evidence) or "- yok"
+        external = "\n".join(f"- {item}" for item in self.external_evidence) or "- kullanılmadı"
+        conflicts = "\n".join(f"- {item}" for item in self.evidence_conflicts) or "- çelişki kaydedilmedi"
+        quality = "\n".join(f"- {item}" for item in self.source_quality_notes) or "- dış kaynak yok"
         return (
             "TEKNİK ARAŞTIRMA AYRINTILARI\n\n"
             f"İlgili kapsam: {paths}\n"
             f"Doğrulama: {checks}\n"
-            f"Kanıt kimlikleri: {', '.join(self.evidence_ids) or 'yok'}\n"
-            f"Kayıtlar:\n{details}\n\n"
-            "Bu rapor yalnızca tanı içindir; kod değişikliği uygulanmadı."
+            f"Kanıt kimlikleri: {', '.join(self.evidence_ids) or 'yok'}\n\n"
+            f"YEREL ÇALIŞMA ZAMANI KANITI:\n{runtime}\n\n"
+            f"YEREL KOD KANITI:\n{code}\n\n"
+            f"DIŞ KAYNAK BULGULARI:\n{external}\n\n"
+            f"KAYNAK KALİTESİ:\n{quality}\n\n"
+            f"ÇELİŞKİLER:\n{conflicts}\n\n"
+            f"Dış araştırma durumu: {self.external_research_state}. "
+            f"{self.external_research_reason}\n\n"
+            f"Diğer kayıtlar:\n{details}\n\n"
+            "Dış kaynaklar yerel kanıt yerine geçmez. Bu rapor yalnızca tanı içindir; kod değişikliği uygulanmadı."
         )
 
 
@@ -650,6 +735,16 @@ class SelfImprovementResearchStore:
             evidence_ids=tuple(dict.fromkeys(str(item) for item in evidence_ids if item))[:20],
             technical_details=tuple(dict.fromkeys(str(item) for item in technical_details if item))[:30],
             hypotheses=tuple(dict.fromkeys(str(item) for item in hypotheses if item))[:12],
+            local_runtime_evidence=tuple(dict.fromkeys(str(item) for item in evidence_ids if item))[:20],
+            local_code_evidence=tuple(dict.fromkeys(str(item) for item in affected_paths if item))[:20],
+            external_research_state=(
+                "recommended" if not tuple(str(item) for item in evidence_ids if item) else "not_needed"
+            ),
+            external_research_reason=(
+                "Yerel çalışma zamanı kanıtı kök nedeni doğrulamaya yetmedi; dış kaynak yalnızca karşılaştırma için kullanılabilir."
+                if not tuple(str(item) for item in evidence_ids if item) else
+                "Yerel çalışma zamanı kanıtı mevcut; dış kaynak araştırması zorunlu değil."
+            ),
             journal_entries=task.journal_entries + (f"{_now()} — Araştırma tamamlandı; bulgular ve belirsizlikler kaydedildi.",),
             notification_state="pending",
             notification_id="",
@@ -666,6 +761,71 @@ class SelfImprovementResearchStore:
             history.append(completed)
             self._save_history(history)
         return completed
+
+    def set_external_research_permission(
+        self, task: SelfImprovementResearchTask, *, allowed: bool
+    ) -> SelfImprovementResearchTask:
+        state = "approved" if allowed else "denied"
+        reason = (
+            "Kullanıcı bu araştırma için dış kaynak kullanımına açık izin verdi."
+            if allowed else
+            "Kullanıcı bu araştırmada yalnızca yerel kanıt kullanılmasını istedi."
+        )
+        updated = replace(
+            task,
+            external_research_state=state,
+            external_research_reason=reason,
+            journal_entries=task.journal_entries + (f"{_now()} — Dış araştırma izni: {state}.",),
+        )
+        self.save(updated)
+        return updated
+
+    def record_external_evidence(
+        self,
+        task: SelfImprovementResearchTask,
+        *,
+        findings: Iterable[str],
+        sources: Iterable[str],
+        conflicts: Iterable[str] = (),
+    ) -> SelfImprovementResearchTask:
+        if task.external_research_state != "approved":
+            raise PermissionError("external research requires task-specific permission")
+        source_items = tuple(dict.fromkeys(str(item) for item in sources if item))[:12]
+        finding_items = tuple(dict.fromkeys(str(item) for item in findings if item))[:20]
+        conflict_items = tuple(dict.fromkeys(str(item) for item in conflicts if item))[:12]
+        quality = tuple(f"{item} — kalite: {source_quality_label(item)}" for item in source_items)
+        updated = replace(
+            task,
+            external_evidence=finding_items,
+            external_sources=source_items,
+            source_quality_notes=quality,
+            evidence_conflicts=conflict_items,
+            external_research_state="completed",
+            external_research_reason=(
+                "Dış kaynak bulguları yerel kanıttan ayrı kaydedildi ve yalnızca karşılaştırma amacıyla kullanıldı."
+            ),
+            journal_entries=task.journal_entries + (f"{_now()} — Dış kaynak karşılaştırması tamamlandı.",),
+        )
+        self.save(updated)
+        return updated
+
+    def external_research_report(self, task: SelfImprovementResearchTask) -> str:
+        state = task.external_research_state
+        if state == "recommended":
+            return (
+                "Yerel kanıt güvenilir bir sonuca yetmediği için dış kaynak karşılaştırması yararlı olabilir. "
+                "İzin verirsen yalnızca bu araştırma için kullanacağım; dış kaynaklar yerel kanıt yerine geçmeyecek."
+            )
+        if state == "approved":
+            return "Bu araştırma için dış kaynak izni verildi; karşılaştırma henüz tamamlanmadı."
+        if state == "denied":
+            return "Bu araştırmada dış kaynak kullanılmayacak; yalnızca yerel kanıtla devam edeceğim."
+        if state == "completed":
+            return (
+                f"Dış kaynak karşılaştırması tamamlandı. {len(task.external_sources)} kaynak ve "
+                f"{len(task.evidence_conflicts)} çelişki kaydedildi. Teknik ayrıntılarda ayrı gösteriliyor."
+            )
+        return "Yerel kanıt yeterli göründüğü için bu araştırmada dış kaynak zorunlu değil."
 
     def prepare_plan(self, task: SelfImprovementResearchTask) -> SelfImprovementResearchTask:
         if task.state != "solution_found":

@@ -14,6 +14,7 @@ import sys
 import threading
 import urllib.error
 import urllib.request
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
@@ -168,6 +169,9 @@ from artmach_assistant.core.self_improvement_research import (
     asks_for_self_improvement_result,
     asks_for_self_improvement_status,
     asks_for_self_improvement_technical_details,
+    asks_about_external_research,
+    grants_external_research_permission,
+    denies_external_research_permission,
     asks_to_cancel_self_improvement_research,
     asks_to_restart_self_improvement_research,
     choose_speed_research_result,
@@ -4047,6 +4051,59 @@ class AssistantEngine:
                 failed.user_report(),
             )
 
+    def _run_self_improvement_external_research(self, task_id: str) -> None:
+        store = getattr(self, "self_improvement_research", None)
+        if store is None:
+            return
+        task = store.load(task_id)
+        if task is None or task.external_research_state != "approved":
+            return
+        try:
+            query = (
+                f"{task.feedback_category} alanındaki şu Jarvis geri bildirimi için güvenilir teknik kaynakları "
+                f"karşılaştır: {task.complaint}. Yerel tanıyı değiştirecek komut verme; yalnızca açıklayıcı bilgi sun."
+            )
+            result = self.researcher.search(query)
+            source_items = []
+            for source in tuple(getattr(result, "sources", ()) or ())[:12]:
+                url = str(getattr(source, "url", "") or getattr(source, "link", "") or "").strip()
+                title = str(getattr(source, "title", "") or "").strip()
+                source_items.append(url or title)
+            source_items = [item for item in source_items if item]
+            summary = str(getattr(result, "summary", "") or "").strip()
+            if not summary and hasattr(result, "source_text"):
+                summary = str(result.source_text())[:6000]
+            findings = [summary or "Kaynaklar bulundu ancak güvenilir bir ortak sonuç çıkarılamadı."]
+            conflicts = []
+            local_cause = task.cause.casefold().strip()
+            if local_cause and summary and not any(
+                token in summary.casefold() for token in local_cause.split() if len(token) > 6
+            ):
+                conflicts.append(
+                    "Dış kaynak özeti yerel kök neden adayını doğrudan doğrulamadı; sonuçlar ayrı tutuldu."
+                )
+            updated = store.record_external_evidence(
+                task, findings=findings, sources=source_items, conflicts=conflicts
+            )
+            self._remember_action_context(
+                "self_improvement_external_research",
+                "Dış kaynak karşılaştırması tamamlandı",
+                store.external_research_report(updated),
+            )
+        except Exception as exc:
+            current = store.load(task_id)
+            if current is None:
+                return
+            updated = replace(
+                current,
+                external_research_state="failed",
+                external_research_reason=f"Dış kaynak karşılaştırması tamamlanamadı: {exc}",
+                journal_entries=current.journal_entries + (
+                    f"{datetime.now(timezone.utc).isoformat(timespec='seconds')} — Dış kaynak karşılaştırması başarısız oldu.",
+                ),
+            )
+            store.save(updated)
+
     def _time_budget_request(self, text: str) -> str | None:
         store = getattr(self, "time_budget", None)
         if store is None:
@@ -4123,6 +4180,42 @@ class AssistantEngine:
                 "Birden fazla araştırma var. Hangisini kastettiğini kategori veya kimlikle söyle:\n"
                 + "\n".join(lines)
             )
+
+        if grants_external_research_permission(text):
+            task, ambiguity = select_task(states=("solution_found", "failed"))
+            if ambiguity:
+                return ambiguity
+            if task is None:
+                return "Dış kaynak izni bağlayabileceğim tamamlanmış bir araştırma yok."
+            task = store.set_external_research_permission(task, allowed=True)
+            worker = threading.Thread(
+                target=self._run_self_improvement_external_research,
+                args=(task.task_id,),
+                name=f"jarvis-external-research-{task.task_id}",
+                daemon=True,
+            )
+            worker.start()
+            return (
+                f"{task.task_id} araştırması için dış kaynak iznini kaydettim. "
+                "Yerel kanıtı değiştirmeden kaynakları ayrı karşılaştıracağım ve çelişkileri ayrıca göstereceğim."
+            )
+
+        if denies_external_research_permission(text):
+            task, ambiguity = select_task(states=("solution_found", "failed", "queued", "researching"))
+            if ambiguity:
+                return ambiguity
+            if task is None:
+                return "Dış kaynak tercihi bağlayabileceğim bir araştırma yok."
+            task = store.set_external_research_permission(task, allowed=False)
+            return store.external_research_report(task)
+
+        if asks_about_external_research(text):
+            task, ambiguity = select_task()
+            if ambiguity:
+                return ambiguity
+            if task is None:
+                return "Henüz kaynak ihtiyacını değerlendirebileceğim bir araştırma yok."
+            return store.external_research_report(task)
 
         if asks_to_cancel_self_improvement_research(text):
             task, ambiguity = select_task(states=("queued", "researching"))

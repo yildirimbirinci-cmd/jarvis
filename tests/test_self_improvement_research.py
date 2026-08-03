@@ -556,3 +556,80 @@ def test_failed_research_reports_uncertainty_and_next_step(tmp_path: Path) -> No
     assert "Bir kök neden uydurmadım" in report
     assert "Konuşma örneklerini" in report
     assert "kodumu değiştirmedim" in report
+
+asks_about_external_research = module.asks_about_external_research
+grants_external_research_permission = module.grants_external_research_permission
+denies_external_research_permission = module.denies_external_research_permission
+
+
+def test_external_research_permission_phrases_are_task_specific() -> None:
+    assert asks_about_external_research("Bu araştırma için internet gerekir mi?")
+    assert grants_external_research_permission("Bu araştırma için internete izin veriyorum")
+    assert denies_external_research_permission("Bu araştırmada internete çıkma")
+
+
+def test_external_evidence_cannot_be_recorded_without_permission(tmp_path: Path) -> None:
+    store = SelfImprovementResearchStore(tmp_path / "research.json")
+    task = store.start("Konuşma kalitesini araştır.", feedback_category="dialogue_quality")
+    completed = store.complete(
+        task,
+        summary="Yerel kanıt yetersiz.",
+        cause="Kök neden doğrulanmadı.",
+        solution="Dış kaynakla karşılaştırma düşünülebilir.",
+        benefit="Yanlış varsayımı azaltır.",
+        risk="Dış kaynak yerel kanıt sayılmamalı.",
+    )
+    import pytest
+    with pytest.raises(PermissionError):
+        store.record_external_evidence(
+            completed,
+            findings=("Dış bulgu",),
+            sources=("https://docs.python.org/",),
+        )
+
+
+def test_external_evidence_is_separated_and_quality_labeled(tmp_path: Path) -> None:
+    store = SelfImprovementResearchStore(tmp_path / "research.json")
+    task = store.start("Konuşma kalitesini araştır.", feedback_category="dialogue_quality")
+    completed = store.complete(
+        task,
+        summary="Yerel kanıt yetersiz.",
+        cause="Kök neden doğrulanmadı.",
+        solution="Dış kaynakla karşılaştırma düşünülebilir.",
+        benefit="Yanlış varsayımı azaltır.",
+        risk="Dış kaynak yerel kanıt sayılmamalı.",
+        affected_paths=("core/local_dialogue.py",),
+    )
+    approved = store.set_external_research_permission(completed, allowed=True)
+    updated = store.record_external_evidence(
+        approved,
+        findings=("Resmî dokümantasyon kısa bağlam öneriyor.",),
+        sources=("https://docs.python.org/3/", "https://example.invalid/blog"),
+        conflicts=("Yerel kayıt bağlam boyutunu henüz doğrulamıyor.",),
+    )
+    assert updated.external_research_state == "completed"
+    assert updated.local_code_evidence == ("core/local_dialogue.py",)
+    assert updated.external_evidence == ("Resmî dokümantasyon kısa bağlam öneriyor.",)
+    assert any("kalite: yüksek" in item for item in updated.source_quality_notes)
+    assert any("kalite: belirsiz" in item for item in updated.source_quality_notes)
+    report = updated.technical_report()
+    assert "YEREL KOD KANITI" in report
+    assert "DIŞ KAYNAK BULGULARI" in report
+    assert "ÇELİŞKİLER" in report
+    assert "Dış kaynaklar yerel kanıt yerine geçmez" in report
+
+
+def test_denying_external_research_keeps_local_only_contract(tmp_path: Path) -> None:
+    store = SelfImprovementResearchStore(tmp_path / "research.json")
+    task = store.start("Performansı araştır.")
+    completed = store.complete(
+        task,
+        summary="Yerel kanıt yetersiz.",
+        cause="Ölçüm yok.",
+        solution="Ölçüm ekle.",
+        benefit="Kök nedeni doğrular.",
+        risk="Düşük.",
+    )
+    denied = store.set_external_research_permission(completed, allowed=False)
+    assert denied.external_research_state == "denied"
+    assert "yalnızca yerel kanıt" in store.external_research_report(denied)
