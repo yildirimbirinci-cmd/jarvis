@@ -1011,3 +1011,90 @@ def test_selection_payload_contains_diagnostic_data(
 
     assert selection["diagnostic_adjustment"] == 8
     assert selection["diagnostic"]["accepted"] is True
+
+
+def test_execution_result_contains_selection_provenance(
+    tmp_path: Path,
+) -> None:
+    project = write_phase2_project(tmp_path)
+    journal = tmp_path / "phase2-journal" / "research.json"
+    changeset = tmp_path / "changeset.json"
+    runtime_root = tmp_path / "phase2-runtime"
+    write_phase2_journal(journal)
+    write_phase2_changeset(changeset)
+
+    result = SelfImprovementLoopRuntime(
+        project,
+        journal,
+        runtime_root,
+        experiment_changeset_path=changeset,
+        focused_test_targets=["tests/test_example.py"],
+        full_test_targets=["tests"],
+    ).run(
+        make_trigger(
+            allow_experiment=True,
+            digest="a" * 64,
+        )
+    )
+
+    experiment = next(
+        stage
+        for stage in result.stages
+        if stage.stage == "experiment"
+    )
+    execution_payload = json.loads(
+        Path(experiment.artifact_path).read_text(
+            encoding="utf-8"
+        )
+    )
+    result_payload = json.loads(
+        Path(
+            execution_payload["result_path"]
+        ).read_text(encoding="utf-8")
+    )
+
+    assert execution_payload["selection"] is not None
+    assert result_payload["selection"] == (
+        execution_payload["selection"]
+    )
+    assert (
+        result_payload["selection"][
+            "selected_candidate_id"
+        ]
+        == result_payload["candidate_id"]
+    )
+
+
+def test_knowledge_repository_accepts_enriched_result(
+    tmp_path: Path,
+) -> None:
+    project = write_phase2_project(tmp_path)
+    journal = tmp_path / "phase2-journal" / "research.json"
+    changeset = tmp_path / "changeset.json"
+    runtime_root = tmp_path / "phase2-runtime"
+    write_phase2_journal(journal)
+    write_phase2_changeset(changeset)
+
+    result = SelfImprovementLoopRuntime(
+        project,
+        journal,
+        runtime_root,
+        experiment_changeset_path=changeset,
+        focused_test_targets=["tests/test_example.py"],
+        full_test_targets=["tests"],
+    ).run(
+        make_trigger(
+            allow_experiment=True,
+            digest="b" * 64,
+        )
+    )
+
+    assert result.status == "completed"
+    repository = json.loads(
+        (
+            runtime_root
+            / "knowledge"
+            / "repository.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert len(repository["records"]) == 1

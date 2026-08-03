@@ -654,10 +654,13 @@ class SelfImprovementLoopRuntime:
         )
         self._execution_result = execution
 
+        execution_payload = self._enrich_execution_result(
+            execution
+        )
         execution_artifact = self._write_stage_artifact(
             workspace,
             "experiment_execution",
-            execution.to_dict(),
+            execution_payload,
         )
 
         if execution.status != "passed":
@@ -676,6 +679,42 @@ class SelfImprovementLoopRuntime:
             artifact_id=execution.experiment_id,
             message=execution.message,
         )
+
+    def _enrich_execution_result(
+        self,
+        execution: ExperimentExecutionResult,
+    ) -> dict[str, object]:
+        result_path = (
+            Path(execution.result_path)
+            .expanduser()
+            .resolve(strict=False)
+        )
+        if not result_path.is_file():
+            raise FileNotFoundError(result_path)
+
+        payload = json.loads(
+            result_path.read_text(encoding="utf-8-sig")
+        )
+        if not isinstance(payload, dict):
+            raise ValueError(
+                "experiment result must be an object"
+            )
+
+        selection = (
+            dict(self._selection_decision)
+            if getattr(
+                self,
+                "_selection_decision",
+                None,
+            ) is not None
+            else None
+        )
+        payload["selection"] = selection
+        _atomic_write_json(result_path, payload)
+
+        enriched = execution.to_dict()
+        enriched["selection"] = selection
+        return enriched
 
     def _knowledge_handler(
         self,
