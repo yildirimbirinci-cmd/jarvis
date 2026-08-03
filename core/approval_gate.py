@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Mapping
 
 from .git_change_service import GitChangeError, GitChangeService, GitCommitResult
+from .trust_engine import ApprovalTrustEngine
 
 _SCHEMA_VERSION = 1
 _MAX_RESULT_BYTES = 4 * 1024 * 1024
@@ -81,6 +82,8 @@ class CommitProposal:
     expires_at: str
     confirmation_token: str
     receipt_path: str
+    trust_report_path: str
+    trust_recommendation: str
 
     def public_dict(self) -> dict[str, object]:
         payload = asdict(self)
@@ -128,6 +131,7 @@ class PromotionCommitApprovalGate:
         self,
         promotion_result_path: str | Path,
         *,
+        diagnostic_report_path: str | Path | None = None,
         git_executable: str = "git",
     ) -> None:
         self.promotion_result_path = Path(promotion_result_path).expanduser().resolve()
@@ -142,6 +146,11 @@ class PromotionCommitApprovalGate:
         self.project_root = Path(raw_root).expanduser().resolve()
         if not self.project_root.is_dir():
             raise FileNotFoundError(self.project_root)
+        self.diagnostic_report_path = (
+            Path(diagnostic_report_path).expanduser().resolve()
+            if diagnostic_report_path is not None
+            else None
+        )
         self.git_executable = git_executable
         self.git = GitChangeService(self.project_root, git_executable=git_executable)
         self._pending: dict[str, _PendingApproval] = {}
@@ -228,6 +237,10 @@ class PromotionCommitApprovalGate:
             else self.promotion_result_path.parent / "commit_snapshots"
         )
         prepared = self.git.prepare_commit(message, snapshot_base, paths=paths)
+        trust_report = ApprovalTrustEngine(
+            self.promotion_result_path,
+            diagnostic_report_path=self.diagnostic_report_path,
+        ).build(output_path=Path(prepared.snapshot_directory) / "approval_trust_report.json")
         now = datetime.now(timezone.utc)
         proposal = CommitProposal(
             _SCHEMA_VERSION,
@@ -245,6 +258,8 @@ class PromotionCommitApprovalGate:
             (now + timedelta(seconds=ttl_seconds)).isoformat(),
             prepared.confirmation_token,
             str(Path(prepared.snapshot_directory) / "approval_proposal.json"),
+            trust_report.report_path,
+            trust_report.recommendation,
         )
         self._pending[proposal.operation_id] = _PendingApproval(
             proposal=proposal,
