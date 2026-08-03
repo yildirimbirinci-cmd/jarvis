@@ -8,7 +8,12 @@ rollback remain the source of truth.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable, Protocol
+from pathlib import Path
+from typing import Callable, Protocol, Sequence
+
+from artmach_assistant.core.self_improvement_runtime_cli import (
+    run_self_improvement_runtime,
+)
 
 
 class SelfDevelopmentEngine(Protocol):
@@ -89,6 +94,96 @@ def run_self_development(
         plan_output + "\n\n" + proposal_text + "\n\n" + apply_output,
     )
 
+
+
+_LEGACY_STAGES = frozenset({"plan", "propose", "apply"})
+_IMPROVEMENT_STAGE_MAP = {
+    "improvement_status": "status",
+    "improvement_run": "run",
+    "improvement_prepare": "prepare",
+    "improvement_complete": "complete",
+}
+
+
+def run_self_development_command(
+    instruction: str = "",
+    *,
+    stage: str = "plan",
+    engine_factory: Callable[[], SelfDevelopmentEngine] | None = None,
+    project_root: str | Path | None = None,
+    journal_path: str | Path | None = None,
+    runtime_root: str | Path | None = None,
+    candidate_id: str | None = None,
+    experiment_result_paths: Sequence[str | Path] = (),
+    trigger_id: str = "manual-self-improvement",
+) -> SelfDevelopmentResult:
+    """Dispatch legacy code editing and autonomous improvement commands.
+
+    Existing ``plan``, ``propose`` and ``apply`` behavior remains unchanged.
+    Autonomous stages use the separate guarded runtime and never invoke the
+    legacy proposal/application path.
+    """
+
+    selected_stage = str(stage or "").strip().casefold()
+
+    if selected_stage in _LEGACY_STAGES:
+        factory = engine_factory or build_engine
+        return run_self_development(
+            instruction,
+            stage=selected_stage,
+            engine_factory=factory,
+        )
+
+    runtime_command = _IMPROVEMENT_STAGE_MAP.get(selected_stage)
+
+    if runtime_command is None:
+        return SelfDevelopmentResult(
+            "invalid",
+            2,
+            (
+                "Bilinmeyen a?ama: "
+                f"{selected_stage or '<bo?>'}. "
+                "Ge?erli a?amalar: plan, propose, apply, "
+                "improvement_status, improvement_run, "
+                "improvement_prepare, improvement_complete."
+            ),
+        )
+
+    missing = [
+        name
+        for name, value in (
+            ("project_root", project_root),
+            ("journal_path", journal_path),
+            ("runtime_root", runtime_root),
+        )
+        if value is None or not str(value).strip()
+    ]
+
+    if missing:
+        return SelfDevelopmentResult(
+            "invalid",
+            2,
+            (
+                "Autonomous improvement i?in eksik yol: "
+                + ", ".join(missing)
+            ),
+        )
+
+    runtime_result = run_self_improvement_runtime(
+        runtime_command,
+        project_root=project_root,
+        journal_path=journal_path,
+        runtime_root=runtime_root,
+        candidate_id=candidate_id,
+        experiment_result_paths=experiment_result_paths,
+        trigger_id=trigger_id,
+    )
+
+    return SelfDevelopmentResult(
+        stage=f"improvement_{runtime_result.status}",
+        exit_code=runtime_result.exit_code,
+        output=runtime_result.output,
+    )
 
 def build_engine() -> SelfDevelopmentEngine:
     """Create the real engine without opening the desktop GUI."""
