@@ -88,6 +88,33 @@ def looks_like_self_improvement_complaint(text: object) -> bool:
     return complaint and self_target
 
 
+
+
+def asks_to_cancel_self_improvement_research(text: object) -> bool:
+    normalized = _normalize(text)
+    return any(
+        marker in normalized
+        for marker in (
+            "arastirmayi durdur",
+            "arastirmayi iptal et",
+            "incelemeyi durdur",
+            "bunu arastirmayi birak",
+        )
+    )
+
+
+def asks_to_restart_self_improvement_research(text: object) -> bool:
+    normalized = _normalize(text)
+    return any(
+        marker in normalized
+        for marker in (
+            "arastirmayi bastan baslat",
+            "bastan arastir",
+            "yeniden arastir",
+            "arastirmayi tekrar baslat",
+        )
+    )
+
 def asks_for_self_improvement_result(text: object) -> bool:
     normalized = _normalize(text)
     return any(
@@ -250,12 +277,16 @@ class SelfImprovementResearchTask:
             return "Araştırma tamamlandı. Sonucu dinlemek için 'ne buldun' diyebilirsin."
         if self.state == "failed":
             return "Araştırma tamamlanamadı. Ayrıntı için 'ne buldun' diyebilirsin."
+        if self.state == "cancelled":
+            return "Araştırma durduruldu. Yeniden başlatmamı istersen 'baştan araştır' diyebilirsin."
         message = self.status_message or "Yavaşlığın hangi aşamada oluştuğunu inceliyorum."
         return f"Araştırma devam ediyor. %{self.progress}: {message} Henüz kodumu değiştirmedim."
 
     def user_report(self) -> str:
         if self.state in {"queued", "researching"}:
             return self.status_report()
+        if self.state == "cancelled":
+            return "Araştırmayı kullanıcı isteğiyle durdurdum. Hiçbir dosyayı değiştirmedim."
         if self.state == "failed":
             return (
                 "Araştırmayı tamamlayamadım. "
@@ -582,6 +613,25 @@ class SelfImprovementResearchStore:
         self.save(updated)
         return updated
 
+    def cancel(self, task: SelfImprovementResearchTask, reason: str = "Kullanıcı araştırmayı durdurdu.") -> SelfImprovementResearchTask:
+        if task.state not in {"queued", "researching"}:
+            return task
+        cancelled = replace(
+            task,
+            state="cancelled",
+            completed_at=_now(),
+            stage="cancelled",
+            status_message="Araştırma kullanıcı isteğiyle durduruldu.",
+            journal_entries=task.journal_entries + (f"{_now()} — Araştırma kullanıcı isteğiyle durduruldu.",),
+            error=" ".join(str(reason or "").split())[:1000],
+        )
+        self.save(cancelled)
+        return cancelled
+
+    def is_active(self, task_id: str) -> bool:
+        current = self.load()
+        return bool(current is not None and current.task_id == task_id and current.state in {"queued", "researching"})
+
     def fail(self, task: SelfImprovementResearchTask, error: object) -> SelfImprovementResearchTask:
         failed = replace(
             task,
@@ -598,6 +648,23 @@ def choose_speed_research_result(runtime_report: object, architecture_assessment
     """Convert technical evidence into a bounded, plain-language recommendation."""
 
     findings = tuple(getattr(runtime_report, "findings", ()) or ())
+    deduplicated: dict[tuple[str, tuple[str, ...], tuple[str, ...]], object] = {}
+    for item in findings:
+        key = (
+            str(getattr(item, "category", "")),
+            tuple(getattr(item, "affected_paths", ()) or ()),
+            tuple(getattr(item, "affected_symbols", ()) or ()),
+        )
+        previous = deduplicated.get(key)
+        if previous is None or (
+            int(getattr(item, "occurrence_count", 0)),
+            float(getattr(item, "confidence", 0.0)),
+        ) > (
+            int(getattr(previous, "occurrence_count", 0)),
+            float(getattr(previous, "confidence", 0.0)),
+        ):
+            deduplicated[key] = item
+    findings = tuple(deduplicated.values())
     slow = [item for item in findings if getattr(item, "category", "") == "repeated_slow_operation"]
     if slow:
         chosen = max(

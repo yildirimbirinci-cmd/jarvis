@@ -399,3 +399,49 @@ def test_experience_outcome_language_is_recognized() -> None:
     assert parse_experience_outcome("Biraz düzeldi ama tam değil")[0] == "partial"
     assert parse_experience_outcome("Hiç işe yaramadı")[0] == "failed"
     assert asks_for_experience_report("Daha önce ne öğrendin?")
+
+
+def test_cancel_and_restart_commands_are_recognized() -> None:
+    assert module.asks_to_cancel_self_improvement_research("Araştırmayı durdur")
+    assert module.asks_to_cancel_self_improvement_research("Bunu araştırmayı bırak")
+    assert module.asks_to_restart_self_improvement_research("Araştırmayı baştan başlat")
+    assert module.asks_to_restart_self_improvement_research("Yeniden araştır")
+
+
+def test_store_cancels_active_research_without_overwriting_result(tmp_path: Path) -> None:
+    store = SelfImprovementResearchStore(tmp_path / "research.json")
+    task = store.start("Neden yavaşladığını araştır.")
+    cancelled = store.cancel(task)
+    assert cancelled.state == "cancelled"
+    assert not store.is_active(task.task_id)
+    assert "durdur" in cancelled.status_report().casefold()
+    assert "Hiçbir dosyayı değiştirmedim" in cancelled.user_report()
+
+
+def test_cancel_is_idempotent_for_completed_research(tmp_path: Path) -> None:
+    store = SelfImprovementResearchStore(tmp_path / "research.json")
+    task = store.start("Neden yavaşladığını araştır.")
+    completed = store.complete(
+        task, summary="Ölçüm gerekli.", cause="Kanıt yetersiz.",
+        solution="Aşama sürelerini ölç.", benefit="Doğru kök neden.", risk="Düşük."
+    )
+    assert store.cancel(completed) == completed
+
+
+def test_duplicate_runtime_findings_are_collapsed() -> None:
+    @dataclass
+    class DuplicateFinding:
+        category: str = "repeated_slow_operation"
+        occurrence_count: int = 4
+        confidence: float = 0.8
+        affected_paths: tuple[str, ...] = ("core/task_orchestrator.py",)
+        affected_symbols: tuple[str, ...] = ("TaskOrchestrator.execute_task",)
+        title: str = "slow"
+        explanation: str = "threshold exceeded"
+        finding_id: str = "DUP"
+
+    report = RuntimeReport((DuplicateFinding(), DuplicateFinding(occurrence_count=9, confidence=0.95)))
+    result = choose_speed_research_result(report, ArchitectureAssessment())
+    assert result["evidence_ids"] == ("DUP",)
+    assert any("Tekrar sayısı: 9" in item for item in result["technical_details"])
+    assert not any("Tekrar sayısı: 4" in item for item in result["technical_details"])

@@ -167,6 +167,8 @@ from artmach_assistant.core.self_improvement_research import (
     asks_for_self_improvement_result,
     asks_for_self_improvement_status,
     asks_for_self_improvement_technical_details,
+    asks_to_cancel_self_improvement_research,
+    asks_to_restart_self_improvement_research,
     choose_speed_research_result,
     looks_like_self_improvement_complaint,
     looks_like_opened_item_followup,
@@ -3958,6 +3960,8 @@ class AssistantEngine:
                 status_message="Çalışma zamanı kayıtlarını alanlara göre inceliyorum.",
             )
             runtime_report = self.runtime_health_assessment(own_code=True)
+            if not store.is_active(task_id):
+                return
             task = store.update_progress(
                 task,
                 stage="architecture_evidence",
@@ -3968,12 +3972,16 @@ class AssistantEngine:
                 own_code=True,
                 refresh=True,
             )
+            if not store.is_active(task_id):
+                return
             task = store.update_progress(
                 task,
                 stage="recommendation",
                 progress=80,
                 status_message="En düşük riskli çözümü ve doğrulama yöntemini karşılaştırıyorum.",
             )
+            if not store.is_active(task_id):
+                return
             result = choose_reflection_research_result(
                 task.feedback_category,
                 runtime_report,
@@ -4049,6 +4057,31 @@ class AssistantEngine:
         store = getattr(self, "self_improvement_research", None)
         if store is None:
             return None
+        if asks_to_cancel_self_improvement_research(text):
+            task = store.load()
+            if task is None or task.state not in {"queued", "researching"}:
+                return "Şu anda durdurulabilecek aktif bir kendini geliştirme araştırması yok."
+            store.cancel(task)
+            return "Araştırmayı durdurdum. Hiçbir dosyayı değiştirmedim."
+        if asks_to_restart_self_improvement_research(text):
+            previous = store.load()
+            if previous is None:
+                return "Yeniden başlatabileceğim önceki bir araştırma yok."
+            if previous.state in {"queued", "researching"}:
+                store.cancel(previous, "Yeni araştırma başlatılmadan önce önceki görev durduruldu.")
+            task = store.start(
+                previous.complaint,
+                feedback_category=previous.feedback_category,
+                reflection_confidence=previous.reflection_confidence,
+            )
+            worker = threading.Thread(
+                target=self._run_self_improvement_research,
+                args=(task.task_id,),
+                name=f"jarvis-self-improvement-{task.task_id}",
+                daemon=True,
+            )
+            worker.start()
+            return "Araştırmayı baştan başlattım. Önceki sonuçları kesin kabul etmeden kanıtları yeniden inceleyeceğim."
         if asks_for_experience_report(text):
             experiences = getattr(self, "self_improvement_experiences", None)
             if experiences is None:
