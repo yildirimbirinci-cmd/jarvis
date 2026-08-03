@@ -2324,8 +2324,17 @@ $s.Dispose()
             raise ValueError("Ses örnekleme oranı sıfırdan büyük olmalıdır.")
         if source_rate == target_rate or values.shape[0] <= 1:
             return values.astype(np.float32, copy=True)
+        try:
+            from scipy.signal import resample_poly
 
-        def linear_resample():
+            divisor = math.gcd(source_rate, target_rate)
+            return resample_poly(
+                values,
+                target_rate // divisor,
+                source_rate // divisor,
+                axis=0,
+            ).astype(np.float32, copy=False)
+        except (ImportError, ValueError):
             source_positions = np.arange(values.shape[0], dtype=np.float64)
             target_length = max(
                 1,
@@ -2352,21 +2361,6 @@ $s.Dispose()
                     for channel in range(values.shape[1])
                 ]
             ).astype(np.float32)
-
-        if values.shape[0] <= max(source_rate * 2, 48000):
-            return linear_resample()
-
-        try:
-            from scipy.signal import resample_poly
-            divisor = math.gcd(source_rate, target_rate)
-            return resample_poly(
-                values,
-                target_rate // divisor,
-                source_rate // divisor,
-                axis=0,
-            ).astype(np.float32, copy=False)
-        except (ImportError, ValueError):
-            return linear_resample()
 
     def _output_audio_for_device(self, audio, max_channels: int):
         np = self._numpy()
