@@ -166,3 +166,236 @@ def test_progress_and_technical_report_are_separate(tmp_path: Path) -> None:
     assert "TaskOrchestrator.execute_task" not in plain
     assert "TaskOrchestrator.execute_task" in technical
     assert "teknik ayrıntıları göster" in plain
+
+
+def test_journal_command_is_recognized() -> None:
+    assert module.asks_for_self_improvement_journal("Araştırma günlüğünü göster")
+    assert module.asks_for_self_improvement_journal("Hangi hipotezleri denedin?")
+
+
+def test_research_journal_records_progress_and_hypotheses(tmp_path: Path) -> None:
+    store = SelfImprovementResearchStore(tmp_path / "research.json")
+    task = store.start("Cevapların yavaş, nedenini araştır.")
+    task = store.update_progress(
+        task,
+        stage="runtime_evidence",
+        progress=20,
+        status_message="Normal sohbet sürelerini inceliyorum.",
+    )
+    completed = store.complete(
+        task,
+        summary="Görev yürütme aşaması en güçlü aday.",
+        cause="Bazı görevler süre eşiğini aşıyor.",
+        solution="Alt aşamalara süre ölçümü ekle.",
+        benefit="Gerçek darboğazı bulmak.",
+        risk="Düşük.",
+        hypotheses=(
+            "Görev yürütme darboğazı — desteklendi.",
+            "Ses sistemi ana neden — elendi.",
+        ),
+    )
+    report = completed.journal_report()
+    assert "Araştırma görevi oluşturuldu" in report
+    assert "%20" in report
+    assert "Görev yürütme darboğazı" in report
+    assert "Ses sistemi ana neden" in report
+
+
+def test_completed_research_is_archived_and_reused(tmp_path: Path) -> None:
+    store = SelfImprovementResearchStore(tmp_path / "research.json")
+    first = store.start("Cevap verirken çok yavaşlıyorsun, nedenini araştır.")
+    first = store.complete(
+        first,
+        summary="Bağlam hazırlığı yavaş.",
+        cause="Gereğinden fazla içerik hazırlanıyor.",
+        solution="İlgili sembolleri seç.",
+        benefit="Daha kısa yanıt süresi.",
+        risk="Düşük.",
+    )
+    second = store.start("Yine cevap verirken yavaşladın, bunu araştır.")
+    assert first.task_id in second.related_research_ids
+    assert store.history_path.exists()
+
+
+def test_plan_request_is_recognized() -> None:
+    assert module.asks_for_self_improvement_plan("Bu çözüm için plan hazırla")
+    assert module.asks_for_self_improvement_plan("Seçenekleri karşılaştır")
+
+
+def test_planner_requires_completed_research(tmp_path: Path) -> None:
+    store = SelfImprovementResearchStore(tmp_path / "research.json")
+    task = store.start("Neden yavaşladığını araştır.")
+    try:
+        store.prepare_plan(task)
+    except ValueError as exc:
+        assert "completed" in str(exc)
+    else:
+        raise AssertionError("incomplete research must not be planned")
+
+
+def test_planner_compares_options_without_creating_patch(tmp_path: Path) -> None:
+    store = SelfImprovementResearchStore(tmp_path / "research.json")
+    task = store.start("Neden yavaşladığını araştır.")
+    task = store.complete(
+        task,
+        summary="Görev yürütme aşaması yavaş.",
+        cause="Bir alt işlem süre eşiğini aşıyor.",
+        solution="Hedefli iyileştirme yap.",
+        benefit="Daha kısa yanıt süresi.",
+        risk="Düşük-orta.",
+        affected_paths=("core/task_orchestrator.py",),
+        validation=("Aynı komutu üç kez ölç.",),
+        evidence_ids=("RUN-SLOW",),
+    )
+    planned = store.prepare_plan(task)
+    assert len(planned.plan_options) == 3
+    assert "2. seçenek" in planned.recommended_option
+    report = planned.plan_report()
+    assert "KENDİNİ GELİŞTİRME PLANI" in report
+    assert "Henüz patch üretmedim" in report
+    assert "core/task_orchestrator.py" in report
+
+
+def test_planner_prefers_measurement_without_runtime_evidence(tmp_path: Path) -> None:
+    store = SelfImprovementResearchStore(tmp_path / "research.json")
+    task = store.start("Neden yavaşladığını araştır.")
+    task = store.complete(
+        task, summary="Kanıt yetersiz.", cause="Aşamalar ölçülmedi.",
+        solution="Ölçüm ekle.", benefit="Kök nedeni bul.", risk="Düşük."
+    )
+    planned = store.prepare_plan(task)
+    assert "1. seçenek" in planned.recommended_option
+
+REFLECTION_MODULE_PATH = Path(__file__).parents[1] / "core" / "self_reflection_engine.py"
+reflection_spec = importlib.util.spec_from_file_location(
+    "self_reflection_engine", REFLECTION_MODULE_PATH
+)
+assert reflection_spec is not None and reflection_spec.loader is not None
+reflection_module = importlib.util.module_from_spec(reflection_spec)
+sys.modules[reflection_spec.name] = reflection_module
+reflection_spec.loader.exec_module(reflection_module)
+classify_self_feedback = reflection_module.classify_self_feedback
+natural_research_start_message = reflection_module.natural_research_start_message
+
+
+def test_natural_feedback_is_classified_without_research_command() -> None:
+    cases = {
+        "Bugün biraz yavaşsın.": "performance",
+        "Kendini çok tekrar ediyorsun.": "repetition",
+        "Bazen konuyu kaçırıyorsun.": "context",
+        "Eskisi kadar doğal konuşmuyorsun.": "dialogue_quality",
+        "Konuşurken bazen takılıyorsun.": "voice_stability",
+    }
+    for text, category in cases.items():
+        feedback = classify_self_feedback(text)
+        assert feedback is not None
+        assert feedback.category == category
+
+
+def test_external_slow_system_is_not_self_feedback() -> None:
+    assert classify_self_feedback("İnternetim bugün çok yavaş.") is None
+    assert classify_self_feedback("Bilgisayarım ağır çalışıyor.") is None
+
+
+def test_reflection_response_is_natural_and_safe() -> None:
+    feedback = classify_self_feedback("Bugün biraz yavaşsın.")
+    assert feedback is not None
+    message = natural_research_start_message(feedback)
+    assert "araştıracağım" in message
+    assert "kodumu değiştirmeyeceğim" in message
+    assert "cyclomatic" not in message
+    assert "self improvement" not in message.casefold()
+
+
+def test_store_persists_feedback_category(tmp_path: Path) -> None:
+    store = SelfImprovementResearchStore(tmp_path / "research.json")
+    task = store.start(
+        "Kendini çok tekrar ediyorsun.",
+        feedback_category="repetition",
+        reflection_confidence=0.9,
+    )
+    loaded = store.load()
+    assert loaded == task
+    assert loaded.feedback_category == "repetition"
+    assert loaded.reflection_confidence == 0.9
+
+choose_reflection_research_result = reflection_module.choose_reflection_research_result
+
+
+def test_non_performance_feedback_gets_category_specific_research() -> None:
+    result = choose_reflection_research_result(
+        "context", RuntimeReport(()), ArchitectureAssessment(),
+        speed_result_factory=choose_speed_research_result,
+    )
+    assert "Bağlam" in result["summary"]
+    assert "conversation_context" in " ".join(result["affected_paths"])
+    assert "yavaşlığın" not in result["summary"].casefold()
+
+EXPERIENCE_MODULE_PATH = Path(__file__).parents[1] / "core" / "self_improvement_experience.py"
+experience_spec = importlib.util.spec_from_file_location(
+    "self_improvement_experience", EXPERIENCE_MODULE_PATH
+)
+assert experience_spec is not None and experience_spec.loader is not None
+experience_module = importlib.util.module_from_spec(experience_spec)
+sys.modules[experience_spec.name] = experience_module
+experience_spec.loader.exec_module(experience_module)
+SelfImprovementExperienceStore = experience_module.SelfImprovementExperienceStore
+parse_experience_outcome = experience_module.parse_experience_outcome
+asks_for_experience_report = experience_module.asks_for_experience_report
+
+
+def test_completed_research_becomes_experience(tmp_path: Path) -> None:
+    research = SelfImprovementResearchStore(tmp_path / "research.json")
+    experiences = SelfImprovementExperienceStore(tmp_path / "experiences.json")
+    research.experience_store = experiences
+    task = research.start("Bugün biraz yavaşsın.", feedback_category="performance")
+    research.complete(
+        task,
+        summary="Bağlam hazırlığı yavaş.",
+        cause="Gereğinden fazla içerik hazırlanıyor.",
+        solution="İlgili sembolleri seç.",
+        benefit="Daha kısa yanıt süresi.",
+        risk="Düşük.",
+    )
+    records = experiences.load_all()
+    assert len(records) == 1
+    assert records[0].research_id == task.task_id
+    assert records[0].outcome == "untested"
+
+
+def test_successful_experience_is_reused_in_new_research(tmp_path: Path) -> None:
+    research = SelfImprovementResearchStore(tmp_path / "research.json")
+    experiences = SelfImprovementExperienceStore(tmp_path / "experiences.json")
+    research.experience_store = experiences
+    first = research.start("Cevap verirken çok yavaşsın.", feedback_category="performance")
+    first = research.complete(
+        first,
+        summary="Bağlam hazırlığı yavaş.", cause="Fazla içerik hazırlanıyor.",
+        solution="İlgili sembolleri seç.", benefit="Hızlanma.", risk="Düşük.",
+    )
+    recorded = experiences.record_outcome(first.task_id, "successful", "Artık daha hızlı.")
+    assert recorded is not None
+    second = research.start("Bugün yine cevap verirken yavaşsın.", feedback_category="performance")
+    assert second.related_experience_ids
+    assert "işe yaramıştı" in second.experience_context
+
+
+def test_failed_experience_is_not_blindly_recommended(tmp_path: Path) -> None:
+    research = SelfImprovementResearchStore(tmp_path / "research.json")
+    experiences = SelfImprovementExperienceStore(tmp_path / "experiences.json")
+    research.experience_store = experiences
+    first = research.start("Konuyu kaçırıyorsun.", feedback_category="context")
+    first = research.complete(
+        first, summary="Bağlam budanıyor.", cause="Erken budama.",
+        solution="Daha fazla geçmiş taşı.", benefit="Bağlam.", risk="Orta.",
+    )
+    experiences.record_outcome(first.task_id, "failed", "Daha da yavaşladı.")
+    second = research.start("Yine konuyu kaçırdın.", feedback_category="context")
+    assert "körü körüne tekrarlamayacağım" in second.experience_context
+
+
+def test_experience_outcome_language_is_recognized() -> None:
+    assert parse_experience_outcome("Bu çözüm işe yaradı")[0] == "successful"
+    assert parse_experience_outcome("Biraz düzeldi ama tam değil")[0] == "partial"
+    assert parse_experience_outcome("Hiç işe yaramadı")[0] == "failed"
+    assert asks_for_experience_report("Daha önce ne öğrendin?")

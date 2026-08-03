@@ -144,8 +144,20 @@ from artmach_assistant.core.runtime_observability import (
 )
 from artmach_assistant.core.maintenance_advisor import MaintenanceAdvisor, MaintenanceReview
 from artmach_assistant.core.notification_store import NotificationStore
+from artmach_assistant.core.self_reflection_engine import (
+    classify_self_feedback,
+    choose_reflection_research_result,
+    natural_research_start_message,
+)
+from artmach_assistant.core.self_improvement_experience import (
+    SelfImprovementExperienceStore,
+    asks_for_experience_report,
+    parse_experience_outcome,
+)
 from artmach_assistant.core.self_improvement_research import (
     SelfImprovementResearchStore,
+    asks_for_self_improvement_journal,
+    asks_for_self_improvement_plan,
     asks_for_self_improvement_result,
     asks_for_self_improvement_status,
     asks_for_self_improvement_technical_details,
@@ -366,6 +378,10 @@ class AssistantEngine:
         self.self_improvement_research = SelfImprovementResearchStore(
             DATA_DIR / "diagnostics" / "self_improvement_research.json"
         )
+        self.self_improvement_experiences = SelfImprovementExperienceStore(
+            DATA_DIR / "diagnostics" / "self_improvement_experiences.json"
+        )
+        self.self_improvement_research.experience_store = self.self_improvement_experiences
         self.maintenance_advisor = MaintenanceAdvisor(
             DATA_DIR / "maintenance" / "state.json",
             self.notifications,
@@ -3949,20 +3965,23 @@ class AssistantEngine:
                 progress=80,
                 status_message="En düşük riskli çözümü ve doğrulama yöntemini karşılaştırıyorum.",
             )
-            result = choose_speed_research_result(
-                runtime_report, architecture_assessment
+            result = choose_reflection_research_result(
+                task.feedback_category,
+                runtime_report,
+                architecture_assessment,
+                speed_result_factory=choose_speed_research_result,
             )
             completed = store.complete(task, **result)
             notifications = getattr(self, "notifications", None)
             if notifications is not None:
                 notifications.append(
-                    "Yavaşlık araştırmasını tamamladım. Sonucu anlaşılır biçimde "
+                    "Kendimi geliştirme araştırmasını tamamladım. Sonucu anlaşılır biçimde "
                     "dinlemek için 'ne buldun' diyebilirsin.",
                     level="info",
                 )
             self._remember_action_context(
                 "self_improvement_research",
-                "Yavaşlık araştırması tamamlandı",
+                "Kendini geliştirme araştırması tamamlandı",
                 completed.user_report(),
             )
         except Exception as exc:
@@ -3970,13 +3989,13 @@ class AssistantEngine:
             notifications = getattr(self, "notifications", None)
             if notifications is not None:
                 notifications.append(
-                    "Yavaşlık araştırmasını tamamlayamadım. Ayrıntı için "
+                    "Kendimi geliştirme araştırmasını tamamlayamadım. Ayrıntı için "
                     "'ne buldun' diyebilirsin.",
                     level="warning",
                 )
             self._remember_action_context(
                 "self_improvement_research",
-                "Yavaşlık araştırması tamamlanamadı",
+                "Kendini geliştirme araştırması tamamlanamadı",
                 failed.user_report(),
             )
 
@@ -3984,6 +4003,38 @@ class AssistantEngine:
         store = getattr(self, "self_improvement_research", None)
         if store is None:
             return None
+        if asks_for_experience_report(text):
+            experiences = getattr(self, "self_improvement_experiences", None)
+            if experiences is None:
+                return "Henüz geçmiş deneyim kaydım yok."
+            return experiences.report()
+        outcome = parse_experience_outcome(text)
+        if outcome is not None:
+            task = store.load()
+            experiences = getattr(self, "self_improvement_experiences", None)
+            if task is None or experiences is None:
+                return "Bu geri bildirimi bağlayabileceğim tamamlanmış bir araştırma yok."
+            recorded = experiences.record_outcome(task.task_id, outcome[0], outcome[1])
+            if recorded is None:
+                return "Bu geri bildirimi bağlayabileceğim deneyim kaydı bulunamadı."
+            return (
+                f"Bunu geçmiş deneyimime kaydettim: çözüm {recorded.outcome_label()}. "
+                "Benzer bir sorun tekrar oluşursa bu sonucu karar verirken kullanacağım."
+            )
+        if asks_for_self_improvement_plan(text):
+            task = store.load()
+            if task is None:
+                return "Henüz planlanabilecek bir kendini geliştirme araştırması yok."
+            if task.state != "solution_found":
+                return "Plan hazırlayabilmem için araştırmanın tamamlanması gerekiyor. " + task.status_report()
+            if not task.plan_options:
+                task = store.prepare_plan(task)
+            return task.plan_report()
+        if asks_for_self_improvement_journal(text):
+            task = store.load()
+            if task is None:
+                return "Henüz başlatılmış bir kendini geliştirme araştırması yok."
+            return task.journal_report()
         if asks_for_self_improvement_technical_details(text):
             task = store.load()
             if task is None:
@@ -3999,12 +4050,17 @@ class AssistantEngine:
             if task is None:
                 return "Henüz başlatılmış bir kendini geliştirme araştırması yok."
             return task.user_report()
-        if not looks_like_self_improvement_complaint(text):
+        feedback = classify_self_feedback(text)
+        if feedback is None and not looks_like_self_improvement_complaint(text):
             return None
         current = store.load()
         if current is not None and current.state in {"queued", "researching"}:
             return current.status_report()
-        task = store.start(text)
+        task = store.start(
+            text,
+            feedback_category=(feedback.category if feedback is not None else "performance"),
+            reflection_confidence=(feedback.confidence if feedback is not None else 0.75),
+        )
         worker = threading.Thread(
             target=self._run_self_improvement_research,
             args=(task.task_id,),
@@ -4014,9 +4070,14 @@ class AssistantEngine:
         worker.start()
         self._remember_action_context(
             "self_improvement_research",
-            "Yavaşlık şikâyeti araştırılıyor",
+            "Kullanıcı geri bildirimi araştırılıyor",
             task.user_report(),
         )
+        if feedback is not None:
+            message = natural_research_start_message(feedback)
+            if task.experience_context:
+                message += " " + task.experience_context
+            return message
         return (
             "Haklısın. Bunun nedenini henüz bilmiyorum; araştırma görevini başlattım. "
             "Normal sohbeti, kendi kodumu geliştirme işlemlerini ve ses işlemlerini "
