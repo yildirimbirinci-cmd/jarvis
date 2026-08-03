@@ -123,6 +123,8 @@ def _same_strategy_family(
 def _files_compatible(
     candidate: ImprovementCandidate,
     record: KnowledgeRecord,
+    *,
+    require_evidence: bool = False,
 ) -> bool:
     candidate_files = {
         item.casefold()
@@ -134,9 +136,105 @@ def _files_compatible(
     }
 
     if not candidate_files or not record_files:
-        return True
+        return not require_evidence
 
     return bool(candidate_files & record_files)
+
+
+_CONTEXT_STOP_WORDS = frozenset(
+    {
+        "a",
+        "after",
+        "an",
+        "and",
+        "for",
+        "in",
+        "of",
+        "on",
+        "or",
+        "the",
+        "to",
+        "with",
+    }
+)
+
+
+def _context_terms(values: Iterable[object]) -> set[str]:
+    terms: set[str] = set()
+    for value in values:
+        terms.update(
+            token
+            for token in re.findall(
+                r"[a-z0-9]+",
+                _normalise_text(value),
+            )
+            if token not in _CONTEXT_STOP_WORDS
+        )
+    return terms
+
+
+def _applicability_compatible(
+    candidate: ImprovementCandidate,
+    record: KnowledgeRecord,
+) -> bool:
+    if not record.applicability:
+        return True
+
+    candidate_terms = _context_terms(
+        (
+            candidate.title,
+            candidate.problem,
+            candidate.proposed_solution,
+            candidate.rationale,
+            *candidate.affected_files,
+        )
+    )
+    applicability_terms = _context_terms(
+        record.applicability
+    )
+    return bool(
+        candidate_terms
+        and applicability_terms
+        and candidate_terms & applicability_terms
+    )
+
+
+def _validation_compatible(
+    candidate: ImprovementCandidate,
+    record: KnowledgeRecord,
+) -> bool:
+    if not record.validation_steps:
+        return True
+    if not candidate.test_plan:
+        return False
+
+    candidate_steps = {
+        _normalise_text(step)
+        for step in candidate.test_plan
+        if _normalise_text(step)
+    }
+    record_steps = {
+        _normalise_text(step)
+        for step in record.validation_steps
+        if _normalise_text(step)
+    }
+    return bool(candidate_steps & record_steps)
+
+
+def _context_compatible(
+    candidate: ImprovementCandidate,
+    record: KnowledgeRecord,
+) -> bool:
+    return (
+        candidate.risk == record.risk
+        and _files_compatible(
+            candidate,
+            record,
+            require_evidence=True,
+        )
+        and _applicability_compatible(candidate, record)
+        and _validation_compatible(candidate, record)
+    )
 
 
 def _exact_matching_records(
@@ -161,7 +259,7 @@ def _family_matching_records(
         for record in records
         if _same_problem(candidate, record)
         and _same_strategy_family(candidate, record)
-        and _files_compatible(candidate, record)
+        and _context_compatible(candidate, record)
     )
 
 
@@ -171,7 +269,8 @@ class KnowledgeAwareSelfImprovementPlanner:
     Safety rules:
     - the base planner remains the source of candidates;
     - exact matches remain the only source of candidate suppression;
-    - conservative strategy-family matches may inform scores;
+    - strategy-family matches require file, risk, applicability,
+      and validation context compatibility before informing scores;
     - verified successes can raise scores but never disable experiments;
     - no repository, Journal or project source file is modified.
     """

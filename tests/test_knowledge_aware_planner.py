@@ -522,3 +522,135 @@ def test_family_matching_requires_same_problem(
     ).build_plan(snapshot)
 
     assert plan.candidates[0].confidence_score == 60
+
+
+def test_family_matching_requires_context_compatibility(
+    tmp_path: Path,
+) -> None:
+    project = create_project(tmp_path)
+    snapshot = tmp_path / "snapshot.json"
+    result = tmp_path / "success.json"
+    repository_path = tmp_path / "knowledge.json"
+
+    write_snapshot(
+        snapshot,
+        solution="Memoize deterministic result.",
+    )
+    write_result(
+        result,
+        status="passed",
+        experiment_id="exp1-success",
+        solution="Cache deterministic results.",
+        confidence=90,
+    )
+    payload = json.loads(result.read_text(encoding="utf-8"))
+    payload["applicability"] = ["Network request batching"]
+    result.write_text(json.dumps(payload), encoding="utf-8")
+    KnowledgeRepository(repository_path).add_result(result)
+
+    plan = KnowledgeAwareSelfImprovementPlanner(
+        project,
+        repository_path,
+    ).build_plan(snapshot)
+
+    assert plan.candidates[0].confidence_score == 60
+    assert not any(
+        "family matches=" in warning
+        for warning in plan.warnings
+    )
+
+
+def test_family_matching_requires_file_evidence(
+    tmp_path: Path,
+) -> None:
+    project = create_project(tmp_path)
+    snapshot = tmp_path / "snapshot.json"
+    result = tmp_path / "success.json"
+    repository_path = tmp_path / "knowledge.json"
+
+    write_snapshot(
+        snapshot,
+        solution="Memoize deterministic result.",
+    )
+    write_result(
+        result,
+        status="passed",
+        experiment_id="exp1-success",
+        solution="Cache deterministic results.",
+        confidence=90,
+    )
+    payload = json.loads(result.read_text(encoding="utf-8"))
+    payload["changes"] = []
+    result.write_text(json.dumps(payload), encoding="utf-8")
+    KnowledgeRepository(repository_path).add_result(result)
+
+    plan = KnowledgeAwareSelfImprovementPlanner(
+        project,
+        repository_path,
+    ).build_plan(snapshot)
+
+    assert plan.candidates[0].confidence_score == 60
+
+
+def test_family_matching_requires_same_risk(
+    tmp_path: Path,
+) -> None:
+    project = create_project(tmp_path)
+    snapshot = tmp_path / "snapshot.json"
+    result = tmp_path / "success.json"
+    repository_path = tmp_path / "knowledge.json"
+
+    write_snapshot(
+        snapshot,
+        solution="Memoize deterministic result.",
+    )
+    write_result(
+        result,
+        status="passed",
+        experiment_id="exp1-success",
+        solution="Cache deterministic results.",
+        confidence=90,
+    )
+    payload = json.loads(result.read_text(encoding="utf-8"))
+    payload["risk"] = "high"
+    result.write_text(json.dumps(payload), encoding="utf-8")
+    KnowledgeRepository(repository_path).add_result(result)
+
+    plan = KnowledgeAwareSelfImprovementPlanner(
+        project,
+        repository_path,
+    ).build_plan(snapshot)
+
+    assert plan.candidates[0].confidence_score == 60
+
+
+def test_family_matching_requires_validation_overlap(
+    tmp_path: Path,
+) -> None:
+    project = create_project(tmp_path)
+    snapshot = tmp_path / "snapshot.json"
+    result = tmp_path / "success.json"
+    repository_path = tmp_path / "knowledge.json"
+
+    write_snapshot(
+        snapshot,
+        solution="Memoize deterministic result.",
+    )
+    write_result(
+        result,
+        status="passed",
+        experiment_id="exp1-success",
+        solution="Cache deterministic results.",
+        confidence=90,
+    )
+    payload = json.loads(result.read_text(encoding="utf-8"))
+    payload["validation_steps"] = ["Run network benchmark."]
+    result.write_text(json.dumps(payload), encoding="utf-8")
+    KnowledgeRepository(repository_path).add_result(result)
+
+    plan = KnowledgeAwareSelfImprovementPlanner(
+        project,
+        repository_path,
+    ).build_plan(snapshot)
+
+    assert plan.candidates[0].confidence_score == 60
