@@ -6,6 +6,7 @@ from enum import Enum
 
 
 class IntentKind(str, Enum):
+    DIAGNOSTIC = "diagnostic"
     RESEARCH = "research"
     PROJECT_ANALYSIS = "project_analysis"
     CODE_CHANGE = "code_change"
@@ -25,6 +26,7 @@ class IntentDecision:
 
 
 _RULES: tuple[tuple[IntentKind, tuple[str, ...]], ...] = (
+    (IntentKind.DIAGNOSTIC, ("ses sorunlarını gider", "ses sorunlarini gider", "ses sistemini analiz et", "mikrofon sorununu çöz", "mikrofon sorununu coz", "piper hatasını", "piper hatasini", "whisper sorununu", "wake word sorununu")),
     (IntentKind.CODE_CHANGE, ("düzelt", "degistir", "değiştir", "patch", "refactor", "kod yaz", "uygula", "yeniden yaz")),
     (IntentKind.RESEARCH, ("araştır", "arastir", "internette", "web", "kaynak bul", "güncel bilgi", "haber")),
     (IntentKind.PROJECT_ANALYSIS, ("analiz", "incele", "tara", "bağımlılık", "bagimlilik", "call graph", "mimari", "proje haritası")),
@@ -34,6 +36,12 @@ _RULES: tuple[tuple[IntentKind, tuple[str, ...]], ...] = (
 )
 
 _MESSAGES: dict[IntentKind, tuple[str, str, str, str]] = {
+    IntentKind.DIAGNOSTIC: (
+        "Tanılama",
+        "Sorunun kök nedenini kanıtlarla incelemeye başladım.",
+        "Tanılama tamamlandı.",
+        "Tanılama tamamlanamadı.",
+    ),
     IntentKind.RESEARCH: (
         "İnternet araştırması",
         "Araştırmaya başladım.",
