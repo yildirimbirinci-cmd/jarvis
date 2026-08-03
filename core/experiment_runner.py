@@ -1,8 +1,9 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import hashlib
 import json
 import os
+import re
 import shutil
 import tempfile
 from dataclasses import asdict, dataclass
@@ -109,7 +110,9 @@ class ExperimentManifest:
     file_count: int
     files: tuple[ExperimentFile, ...]
     test_plan: tuple[str, ...]
+    focused_test_targets: tuple[str, ...] = ()
     warnings: tuple[str, ...] = ()
+    project_root: str = ""
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -123,9 +126,11 @@ class ExperimentManifest:
             "risk": self.risk,
             "requires_experiment": self.requires_experiment,
             "workspace_path": self.workspace_path,
+            "project_root": self.project_root,
             "file_count": self.file_count,
             "files": [item.to_dict() for item in self.files],
             "test_plan": list(self.test_plan),
+            "focused_test_targets": list(self.focused_test_targets),
             "warnings": list(self.warnings),
         }
 
@@ -278,6 +283,80 @@ class ExperimentRunner:
 
         return plan_id, candidate
 
+    _TEST_PATH_PATTERN = re.compile(
+        r"(?P<path>(?:tests|core|indexing)[/\\][A-Za-z0-9_./\\-]+\.py)"
+    )
+
+    def _focused_test_files(
+        self,
+        test_plan: Sequence[str],
+    ) -> tuple[tuple[str, Path], ...]:
+        """Resolve explicit Python test paths embedded in the plan.
+
+        Free-form instructions are retained in ``test_plan`` but only concrete
+        paths below the allowed project roots are copied into the workspace.
+        """
+
+        resolved: list[tuple[str, Path]] = []
+        seen: set[str] = set()
+
+        for instruction in test_plan:
+            for match in self._TEST_PATH_PATTERN.finditer(instruction):
+                raw = match.group("path").replace("\\", "/")
+                if not raw.startswith("tests/"):
+                    continue
+                relative, source = self._resolve_source_file(raw)
+                key = relative.casefold()
+                if key in seen:
+                    continue
+                seen.add(key)
+                resolved.append((relative, source))
+
+        return tuple(resolved)
+
+    @staticmethod
+    def _write_workspace_bootstrap(source_root: Path) -> None:
+        """Expose the isolated source tree as ``artmach_assistant`` to pytest."""
+
+        source_root.mkdir(parents=True, exist_ok=True)
+        bootstrap = source_root / "conftest.py"
+        if bootstrap.exists():
+            return
+        bootstrap.write_text(
+            "from pathlib import Path\n"
+            "import sys\n"
+            "import types\n\n"
+            "ROOT = Path(__file__).resolve().parent\n"
+            "package = sys.modules.get('artmach_assistant')\n"
+            "if package is None:\n"
+            "    package = types.ModuleType('artmach_assistant')\n"
+            "    package.__package__ = 'artmach_assistant'\n"
+            "    package.__path__ = [str(ROOT)]\n"
+            "    sys.modules['artmach_assistant'] = package\n",
+            encoding="utf-8",
+        )
+
+    @staticmethod
+    def _copy_parent_initializers(
+        project_root: Path,
+        source_root: Path,
+        relative_paths: Sequence[str],
+    ) -> None:
+        parents: set[Path] = set()
+        for value in relative_paths:
+            parent = Path(value).parent
+            while parent != Path("."):
+                parents.add(parent)
+                parent = parent.parent
+
+        for parent in sorted(parents, key=lambda item: len(item.parts)):
+            initializer = project_root / parent / "__init__.py"
+            if initializer.is_file() and not initializer.is_symlink():
+                destination = source_root / parent / "__init__.py"
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                if not destination.exists():
+                    shutil.copyfile(initializer, destination)
+
     @staticmethod
     def _test_plan(candidate: Mapping[str, object]) -> tuple[str, ...]:
         value = candidate.get("test_plan")
@@ -332,6 +411,9 @@ class ExperimentRunner:
         if len(raw_files) > self.MAX_FILES:
             raise ValueError("experiment source file limit exceeded")
 
+        test_plan = self._test_plan(candidate)
+        resolved_tests = self._focused_test_files(test_plan)
+
         resolved_files: list[tuple[str, Path]] = []
         seen: set[str] = set()
 
@@ -351,6 +433,7 @@ class ExperimentRunner:
             "candidate_id": selected_id,
             "plan_digest": plan_digest,
             "files": [relative for relative, _ in resolved_files],
+            "focused_tests": [relative for relative, _ in resolved_tests],
         }
         experiment_id = f"exp1-{_sha256_bytes(_canonical_json(identity))[:20]}"
         workspace = self.experiment_root / experiment_id
@@ -378,6 +461,22 @@ class ExperimentRunner:
                     )
                 )
 
+            source_root = workspace / "source"
+            for relative, source in resolved_tests:
+                destination = source_root / relative
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(source, destination)
+
+            support_paths = [
+                relative for relative, _ in resolved_files
+            ] + [relative for relative, _ in resolved_tests]
+            self._copy_parent_initializers(
+                self.project_root,
+                source_root,
+                support_paths,
+            )
+            self._write_workspace_bootstrap(source_root)
+
             warnings: list[str] = []
 
             if not copied:
@@ -397,9 +496,13 @@ class ExperimentRunner:
                 risk=risk,
                 requires_experiment=requires_experiment,
                 workspace_path=str(workspace),
+                project_root=str(self.project_root),
                 file_count=len(copied),
                 files=tuple(copied),
-                test_plan=self._test_plan(candidate),
+                test_plan=test_plan,
+                focused_test_targets=tuple(
+                    relative for relative, _ in resolved_tests
+                ),
                 warnings=tuple(warnings),
             )
 

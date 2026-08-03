@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import hashlib
 import json
@@ -468,7 +468,26 @@ class ExperimentExecutor:
                     "expected_count must be positive"
                 )
 
-            actual_count = source.count(old)
+            effective_old = old
+            effective_new = new
+            actual_count = source.count(effective_old)
+
+            if actual_count != expected_count:
+                # Model prompts and JSON payloads conventionally use LF,
+                # while Windows experiment workspaces can preserve CRLF
+                # bytes. Adapt only when the source has one consistent
+                # non-LF newline style and the original exact match failed.
+                if "\r\n" in source and "\n" not in source.replace("\r\n", ""):
+                    newline = "\r\n"
+                elif "\r" in source and "\n" not in source:
+                    newline = "\r"
+                else:
+                    newline = "\n"
+
+                if newline != "\n":
+                    effective_old = old.replace("\r\n", "\n").replace("\r", "\n").replace("\n", newline)
+                    effective_new = new.replace("\r\n", "\n").replace("\r", "\n").replace("\n", newline)
+                    actual_count = source.count(effective_old)
 
             if actual_count != expected_count:
                 raise ValueError(
@@ -478,8 +497,8 @@ class ExperimentExecutor:
                 )
 
             updated = source.replace(
-                old,
-                new,
+                effective_old,
+                effective_new,
                 expected_count,
             )
             encoded = updated.encode("utf-8")
@@ -500,6 +519,145 @@ class ExperimentExecutor:
             )
 
         return tuple(results)
+
+
+    @staticmethod
+    def _manifest_test_targets(
+        manifest: Mapping[str, object],
+    ) -> tuple[str, ...]:
+        value = manifest.get("focused_test_targets", [])
+        if value is None:
+            value = []
+        if not isinstance(value, list):
+            raise ValueError("manifest focused_test_targets must be a list")
+
+        result: list[str] = []
+        seen: set[str] = set()
+        for item in value:
+            text = _normalise_text(item, limit=500).replace("\\", "/")
+            relative = Path(text)
+            if (
+                not text
+                or relative.is_absolute()
+                or ".." in relative.parts
+                or not text.startswith("tests/")
+                or relative.suffix.casefold() != ".py"
+            ):
+                raise ValueError("unsafe focused test target in manifest")
+            target = Path("tests") / Path(*relative.parts[1:])
+            key = target.as_posix().casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            result.append(target.as_posix())
+        return tuple(result)
+
+
+    def _project_root_from_manifest(
+        self,
+        manifest: Mapping[str, object],
+    ) -> Path:
+        raw = manifest.get("project_root")
+        if not isinstance(raw, str) or not raw.strip():
+            raise ValueError("experiment manifest project_root is missing")
+        root = Path(raw).expanduser().resolve(strict=False)
+        if not root.is_dir() or root.is_symlink():
+            raise ValueError("experiment manifest project_root is invalid")
+        if root == self.workspace or self.workspace in root.parents:
+            raise ValueError("experiment project_root overlaps workspace")
+        return root
+
+    def _write_overlay_packages(self, project_root: Path) -> Path:
+        overlay = self.workspace / "overlay"
+        overlay.mkdir(parents=True, exist_ok=True)
+
+        def write_package(package_dir: Path, paths: tuple[Path, ...]) -> None:
+            package_dir.mkdir(parents=True, exist_ok=True)
+            encoded_paths = ", ".join(repr(str(path)) for path in paths)
+            (package_dir / "__init__.py").write_text(
+                "__path__ = [" + encoded_paths + "]\n",
+                encoding="utf-8",
+            )
+
+        write_package(
+            overlay / "artmach_assistant",
+            (self.source_root, project_root),
+        )
+        for name in ("core", "indexing"):
+            workspace_dir = self.source_root / name
+            project_dir = project_root / name
+            if workspace_dir.is_dir() or project_dir.is_dir():
+                write_package(
+                    overlay / "artmach_assistant" / name,
+                    (workspace_dir, project_dir),
+                )
+                write_package(
+                    overlay / name,
+                    (workspace_dir, project_dir),
+                )
+        return overlay
+
+    def _run_full_regression(
+        self,
+        manifest: Mapping[str, object],
+        *,
+        timeout_seconds: int,
+    ) -> CommandResult:
+        project_root = self._project_root_from_manifest(manifest)
+        overlay = self._write_overlay_packages(project_root)
+        env = {
+            **os.environ,
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "PYTHONPATH": os.pathsep.join(
+                [
+                    str(overlay),
+                    str(project_root.parent),
+                    str(project_root),
+                    os.environ.get("PYTHONPATH", ""),
+                ]
+            ).rstrip(os.pathsep),
+        }
+        argv = (
+            sys.executable,
+            "-m",
+            "pytest",
+            "-q",
+            str(project_root),
+        )
+        try:
+            completed = subprocess.run(
+                argv,
+                cwd=project_root,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                encoding="utf-8",
+                errors="replace",
+                timeout=timeout_seconds,
+                shell=False,
+                check=False,
+                env=env,
+            )
+            return CommandResult(
+                name="full_tests",
+                argv=argv,
+                exit_code=completed.returncode,
+                timed_out=False,
+                output=completed.stdout[: self.MAX_COMMAND_OUTPUT],
+            )
+        except subprocess.TimeoutExpired as exc:
+            output = (
+                exc.stdout.decode("utf-8", errors="replace")
+                if isinstance(exc.stdout, bytes)
+                else str(exc.stdout or "")
+            )
+            return CommandResult(
+                name="full_tests",
+                argv=argv,
+                exit_code=124,
+                timed_out=True,
+                output=output[: self.MAX_COMMAND_OUTPUT],
+            )
 
     def _run_command(
         self,
@@ -537,6 +695,16 @@ class ExperimentExecutor:
                 "experiment command is not allowlisted"
             )
 
+        command_env = {
+            **os.environ,
+            "PYTHONDONTWRITEBYTECODE": "1",
+        }
+        # A full-regression overlay may launch tests that themselves create
+        # nested experiment subprocesses.  Never let the parent overlay's
+        # PYTHONPATH leak into those workspace-local pytest/compile commands;
+        # the workspace conftest and cwd must resolve the isolated sources.
+        command_env.pop("PYTHONPATH", None)
+
         try:
             completed = subprocess.run(
                 safe_argv,
@@ -549,10 +717,7 @@ class ExperimentExecutor:
                 timeout=timeout_seconds,
                 shell=False,
                 check=False,
-                env={
-                    **os.environ,
-                    "PYTHONDONTWRITEBYTECODE": "1",
-                },
+                env=command_env,
             )
 
             output = completed.stdout[
@@ -618,6 +783,9 @@ class ExperimentExecutor:
             )
 
         manifest = self._load_manifest()
+        if not focused_test_targets:
+            focused_test_targets = self._manifest_test_targets(manifest)
+
         changeset = self._read_json(
             Path(changeset_path),
             maximum_bytes=self.MAX_CHANGESET_BYTES,
@@ -685,25 +853,31 @@ class ExperimentExecutor:
             if focused_result.exit_code != 0:
                 status = "failed"
 
-        if (
-            status == "passed"
-            and full_test_targets
-        ):
-            full_result = self._run_command(
-                "full_tests",
-                (
-                    sys.executable,
-                    "-m",
-                    "pytest",
-                    "-q",
-                    *full_test_targets,
-                ),
-                timeout_seconds=timeout_seconds,
-            )
-            commands.append(full_result)
+        if status == "passed":
+            if full_test_targets:
+                full_result = self._run_command(
+                    "full_tests",
+                    (
+                        sys.executable,
+                        "-m",
+                        "pytest",
+                        "-q",
+                        *full_test_targets,
+                    ),
+                    timeout_seconds=timeout_seconds,
+                )
+            elif focused_test_targets and isinstance(
+                manifest.get("project_root"), str
+            ) and str(manifest.get("project_root", "")).strip():
+                full_result = self._run_full_regression(
+                    manifest,
+                    timeout_seconds=timeout_seconds,
+                )
 
-            if full_result.exit_code != 0:
-                status = "failed"
+            if full_result is not None:
+                commands.append(full_result)
+                if full_result.exit_code != 0:
+                    status = "failed"
 
         focused_passed = (
             self._count_passed(

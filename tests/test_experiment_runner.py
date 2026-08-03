@@ -284,3 +284,59 @@ def test_warns_when_experiment_not_required(tmp_path: Path) -> None:
 
     assert "candidate does not explicitly require an experiment" in manifest.warnings
     assert "candidate has no experiment source files" in manifest.warnings
+
+
+def test_copies_explicit_focused_test_into_workspace(tmp_path: Path) -> None:
+    project = create_project(tmp_path)
+    test_file = project / "tests" / "test_example.py"
+    test_file.write_text(
+        "from artmach_assistant.core.example import VALUE\n\n"
+        "def test_value():\n"
+        "    assert VALUE == 1\n",
+        encoding="utf-8",
+    )
+    plan = tmp_path / "plan.json"
+    write_plan(
+        plan,
+        candidates=[
+            {
+                "candidate_id": "focused",
+                "affected_files": ["core/example.py"],
+                "test_plan": ["Run tests/test_example.py"],
+                "risk": "low",
+                "requires_experiment": True,
+            }
+        ],
+    )
+
+    manifest = ExperimentRunner(
+        project,
+        tmp_path / "experiments",
+    ).prepare(plan)
+    workspace = Path(manifest.workspace_path)
+
+    assert manifest.focused_test_targets == ("tests/test_example.py",)
+    assert (workspace / "source" / "tests" / "test_example.py").is_file()
+    assert (workspace / "source" / "conftest.py").is_file()
+
+
+def test_manifest_records_project_root_for_full_regression(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    (project / "core").mkdir(parents=True)
+    (project / "tests").mkdir(parents=True)
+    (project / "core" / "sample.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (project / "tests" / "test_sample.py").write_text("def test_ok():\n    assert True\n", encoding="utf-8")
+    plan = tmp_path / "plan.json"
+    plan.write_text(json.dumps({
+        "plan_id": "plan-1",
+        "candidates": [{
+            "candidate_id": "candidate-1",
+            "risk": "low",
+            "requires_experiment": True,
+            "affected_files": ["core/sample.py"],
+            "test_plan": ["tests/test_sample.py"],
+        }],
+    }), encoding="utf-8")
+    manifest = ExperimentRunner(project, tmp_path / "experiments").prepare(plan)
+    assert manifest.project_root == str(project.resolve())
+    assert manifest.to_dict()["project_root"] == str(project.resolve())
