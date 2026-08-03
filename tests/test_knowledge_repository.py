@@ -256,3 +256,52 @@ def test_empty_reliability_profile_is_zeroed(
     assert profile.success_rate == 0
     assert profile.reliability_score == 0
 
+
+
+def test_stores_selection_provenance(
+    tmp_path: Path,
+) -> None:
+    result = tmp_path / "result.json"
+    store = tmp_path / "knowledge.json"
+    write_result(result)
+
+    payload = json.loads(result.read_text(encoding="utf-8"))
+    payload["selection"] = {
+        "selection_reason": "highest_adjusted_rank",
+        "diagnostic": {
+            "match_type": "family",
+            "accepted": True,
+            "reliability_score": 84,
+        },
+    }
+    result.write_text(json.dumps(payload), encoding="utf-8")
+
+    record = KnowledgeRepository(store).add_result(result)
+
+    assert record.selection_reliability == 84
+    assert record.selection_strategy == "family"
+    assert record.selection_accepted is True
+
+
+def test_old_repository_record_uses_selection_defaults(
+    tmp_path: Path,
+) -> None:
+    result = tmp_path / "result.json"
+    store = tmp_path / "knowledge.json"
+    write_result(result)
+
+    repository = KnowledgeRepository(store)
+    created = repository.add_result(result)
+    payload = json.loads(store.read_text(encoding="utf-8"))
+
+    payload["records"][0].pop("selection_reliability")
+    payload["records"][0].pop("selection_strategy")
+    payload["records"][0].pop("selection_accepted")
+    store.write_text(json.dumps(payload), encoding="utf-8")
+
+    loaded = repository.list_records()[0]
+
+    assert loaded.record_id == created.record_id
+    assert loaded.selection_reliability == 0
+    assert loaded.selection_strategy == ""
+    assert loaded.selection_accepted is None

@@ -108,6 +108,9 @@ class KnowledgeRecord:
     full_tests_passed: int
     failure_message: str
     result_digest: str
+    selection_reliability: int = 0
+    selection_strategy: str = ""
+    selection_accepted: bool | None = None
     observation_count: int = 1
 
     def to_dict(self) -> dict[str, object]:
@@ -308,6 +311,32 @@ class KnowledgeRepository:
         if outcome == "failure" and not failure_message:
             failure_message = "experiment validation failed"
 
+        selection = payload.get("selection")
+        if isinstance(selection, Mapping):
+            diagnostic = selection.get("diagnostic")
+            if not isinstance(diagnostic, Mapping):
+                diagnostic = {}
+
+            selection_reliability = self._bounded_int(
+                diagnostic.get("reliability_score"),
+                maximum=100,
+            )
+            selection_strategy = _normalise_text(
+                diagnostic.get("match_type")
+                or selection.get("selection_reason"),
+                limit=100,
+            ).casefold()
+            accepted_value = diagnostic.get("accepted")
+            selection_accepted = (
+                accepted_value
+                if isinstance(accepted_value, bool)
+                else None
+            )
+        else:
+            selection_reliability = 0
+            selection_strategy = ""
+            selection_accepted = None
+
         affected_files: list[str] = []
 
         changes = payload.get("changes")
@@ -354,6 +383,9 @@ class KnowledgeRepository:
             full_tests_passed=full,
             failure_message=failure_message,
             result_digest=digest,
+            selection_reliability=selection_reliability,
+            selection_strategy=selection_strategy,
+            selection_accepted=selection_accepted,
         )
 
     @staticmethod
@@ -414,6 +446,31 @@ class KnowledgeRepository:
             result_digest=_normalise_text(
                 payload.get("result_digest"),
                 limit=128,
+            ),
+            selection_reliability=max(
+                0,
+                min(
+                    100,
+                    int(
+                        payload.get(
+                            "selection_reliability",
+                            0,
+                        )
+                        or 0
+                    ),
+                ),
+            ),
+            selection_strategy=_normalise_text(
+                payload.get("selection_strategy"),
+                limit=100,
+            ).casefold(),
+            selection_accepted=(
+                payload.get("selection_accepted")
+                if isinstance(
+                    payload.get("selection_accepted"),
+                    bool,
+                )
+                else None
             ),
             observation_count=max(
                 1,
