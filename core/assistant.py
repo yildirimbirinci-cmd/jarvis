@@ -39,6 +39,7 @@ from artmach_assistant.core.snapshot_manager import SnapshotManager
 from artmach_assistant.core.code_review import CodeReviewService
 from artmach_assistant.core.system_control import SystemControlService
 from artmach_assistant.core.voice_service import VoiceService
+from artmach_assistant.core.tts_output_routing import TtsOutputRouter
 from artmach_assistant.core.local_command_router import Intent, LocalCommandRouter, normalize_text
 from artmach_assistant.core.local_dialogue import LocalDialogueManager
 from artmach_assistant.core.own_code_intent import (
@@ -354,6 +355,7 @@ class AssistantEngine:
             # Catalog refresh is an optional convenience; never block startup.
             pass
         self.voice = VoiceService()
+        self.tts_output_router = TtsOutputRouter(self.config, self.voice)
         self.conversation_runtime = ConversationRuntime()
         self._interaction_context = threading.local()
         self._dialogue_runtime_managed = False
@@ -7626,7 +7628,7 @@ class AssistantEngine:
                 self.config.voice_tts_backend,
                 self.config.piper_executable,
                 self.config.piper_model,
-                self.config.voice_output_index,
+                self.tts_output_router.active_output_index(),
                 preserve_pending_cancel=True,
                 speech_session_id=session_id,
                 cancel_check=(lambda: token.cancelled) if token is not None else None,
@@ -7741,6 +7743,16 @@ class AssistantEngine:
             "sessiz moda gec", "sessiz kal", "sessiz ol", "uyku moduna gec",
             "uykuya gec", "normale don", "dinlemeyi kapat",
         ), lambda _text: self._enter_sleep_mode(), 0.70))
+        register(Intent("tts_output_outside", (
+            "sesi disari ver", "sesi dışarı ver", "sesi hoparlore ver",
+            "sesi hoparlöre ver", "hoparlorden konus", "hoparlörden konuş",
+            "bluetooth hoparlore gec", "bluetooth hoparlöre geç",
+        ), lambda _text: self.tts_output_router.switch("outside"), 0.90))
+        register(Intent("tts_output_inside", (
+            "sesi ice al", "sesi içe al", "sesi kulakliga al",
+            "sesi kulaklığa al", "kulakliktan konus", "kulaklıktan konuş",
+            "kulakliga geri don", "kulaklığa geri dön",
+        ), lambda _text: self.tts_output_router.switch("inside"), 0.90))
         register(Intent("open_system_app", (
             "vscode aç", "vs code aç", "visual studio code aç", "open vscode", "launch vs code",
             "visual studio aç", "open visual studio", "qt creator aç", "open qt creator",

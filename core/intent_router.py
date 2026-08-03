@@ -32,7 +32,7 @@ _RULES: tuple[tuple[IntentKind, tuple[str, ...]], ...] = (
     (IntentKind.PROJECT_ANALYSIS, ("analiz", "incele", "tara", "bağımlılık", "bagimlilik", "call graph", "mimari", "proje haritası")),
     (IntentKind.BUILD, ("build", "test çalıştır", "test calistir", "derle", "pytest", "doğrula", "dogrula")),
     (IntentKind.MEMORY, ("hafızaya al", "hafizaya al", "hatırla", "hatirla", "unut", "kaydet")),
-    (IntentKind.LOCAL_COMMAND, ("yedekle", "yedek al", "backup", "zip yedeği", "aç", "ac", "kapat", "başlat", "baslat", "çalıştır", "calistir", "dosya", "klasör", "program", "uygulama")),
+    (IntentKind.LOCAL_COMMAND, ("sesi dışarı ver", "sesi disari ver", "sesi içe al", "sesi ice al", "sesi hoparlöre ver", "sesi kulaklığa al", "yedekle", "yedek al", "backup", "zip yedeği", "aç", "ac", "kapat", "başlat", "baslat", "çalıştır", "calistir", "dosya", "klasör", "program", "uygulama")),
 )
 
 _MESSAGES: dict[IntentKind, tuple[str, str, str, str]] = {

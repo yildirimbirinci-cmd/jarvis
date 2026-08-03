@@ -92,6 +92,14 @@ class AppConfig:
     # plugged in. Keep the endpoint name as a second, stable identifier.
     voice_microphone_name: str = ""
     voice_output_index: int = -1
+    # Jarvis TTS routing profiles. Microphone input is intentionally stored
+    # separately and must not change when the spoken output route changes.
+    voice_output_name: str = ""
+    voice_output_mode: str = "inside"
+    voice_output_inside_index: int = -1
+    voice_output_inside_name: str = ""
+    voice_output_outside_index: int = -1
+    voice_output_outside_name: str = ""
     voice_language: str = "tr-TR"
     voice_name: str = ""
     voice_rate: int = 0
@@ -201,6 +209,23 @@ class AppConfig:
         data["voice_owner_verification"] = bool(
             data.get("voice_owner_verification", True)
         )
+        output_mode = str(data.get("voice_output_mode", "inside") or "inside").casefold()
+        data["voice_output_mode"] = output_mode if output_mode in {"inside", "outside"} else "inside"
+        for field_name in (
+            "voice_output_index",
+            "voice_output_inside_index",
+            "voice_output_outside_index",
+        ):
+            try:
+                data[field_name] = int(data.get(field_name, -1) or -1)
+            except (TypeError, ValueError, OverflowError):
+                data[field_name] = -1
+        for field_name in (
+            "voice_output_name",
+            "voice_output_inside_name",
+            "voice_output_outside_name",
+        ):
+            data[field_name] = " ".join(str(data.get(field_name, "") or "").split())
         # Windows may persist the MME routing placeholder as the default input.
         # It is not a physical microphone and must not survive upgrades.
         saved_mic_name = str(data.get("voice_microphone_name", "")).casefold()
