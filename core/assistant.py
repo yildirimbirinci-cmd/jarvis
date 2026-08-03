@@ -4177,12 +4177,7 @@ class AssistantEngine:
         return plan.estimate_report()
 
     def _self_improvement_runtime_request(self, text: str) -> str | None:
-        """Route only explicit autonomous-improvement runtime commands.
-
-        Generic complaints and phrases such as ``kendini geli?tir`` remain
-        owned by the existing Research Engine flow. Experiment preparation
-        requires an explicit preparation command and never applies a patch.
-        """
+        """Route only explicit autonomous-improvement commands."""
 
         import unicodedata
 
@@ -4190,96 +4185,51 @@ class AssistantEngine:
             "NFKD",
             str(text or "").casefold(),
         )
-        without_marks = "".join(
+        normalized = "".join(
             character
             for character in folded
             if not unicodedata.combining(character)
         )
-        normalized = " ".join(
-            without_marks.translate(
-                str.maketrans(
-                    {
-                        "?": "c",
-                        "?": "g",
-                        "?": "i",
-                        "?": "o",
-                        "?": "s",
-                        "?": "u",
-                    }
-                )
-            ).split()
-        )
-
-        status_phrases = {
-            "otonom gelisim durumu",
-            "otonom iyilestirme durumu",
-            "otonom gelisim ne durumda",
-            "otonom iyilestirme ne durumda",
-            "gelisim dongusu durumu",
-            "iyilestirme dongusu durumu",
-        }
-        run_phrases = {
-            "otonom gelisim dongusunu calistir",
-            "otonom iyilestirme dongusunu calistir",
-            "gelisim zincirini calistir",
-            "iyilestirme zincirini calistir",
-            "guvenli gelisim dongusunu calistir",
-        }
-        prepare_phrases = {
-            "otonom gelisim deneyini hazirla",
-            "otonom iyilestirme deneyini hazirla",
-            "deney calisma alanini hazirla",
-            "iyilestirme deneyi calisma alanini hazirla",
-            "guvenli deneyi hazirla",
-        }
-
-        words = set(normalized.split())
-
-        is_runtime_status = (
-            normalized in status_phrases
-            or (
-                {"durumu"} <= words
-                and (
-                    {"otonom", "gelisim"} <= words
-                    or {"otonom", "iyilestirme"} <= words
-                    or {"gelisim", "dongusu"} <= words
-                    or {"iyilestirme", "dongusu"} <= words
-                )
+        normalized = normalized.translate(
+            str.maketrans(
+                {
+                    "\u00e7": "c",
+                    "\u011f": "g",
+                    "\u0131": "i",
+                    "\u00f6": "o",
+                    "\u015f": "s",
+                    "\u00fc": "u",
+                }
             )
         )
-        is_runtime_run = (
-            normalized in run_phrases
-            or (
-                "calistir" in words
-                and (
-                    {"iyilestirme", "zincirini"} <= words
-                    or {"gelisim", "zincirini"} <= words
-                    or {"otonom", "gelisim", "dongusunu"} <= words
-                    or {"otonom", "iyilestirme", "dongusunu"} <= words
-                    or {"guvenli", "gelisim", "dongusunu"} <= words
-                )
-            )
-        )
-        is_runtime_prepare = (
-            normalized in prepare_phrases
-            or (
-                "hazirla" in words
-                and (
-                    {"deney", "calisma", "alanini"} <= words
-                    or {"guvenli", "deneyi"} <= words
-                    or {"otonom", "gelisim", "deneyini"} <= words
-                    or {"otonom", "iyilestirme", "deneyini"} <= words
-                )
-            )
+        normalized = " ".join(normalized.split()).strip(
+            " .,:;!?\"'()[]{}"
         )
 
-        if is_runtime_status:
-            stage = "improvement_status"
-        elif is_runtime_run:
-            stage = "improvement_run"
-        elif is_runtime_prepare:
-            stage = "improvement_prepare"
-        else:
+        command_stages = {
+            "otonom gelisim durumu": "improvement_status",
+            "otonom iyilestirme durumu": "improvement_status",
+            "otonom gelisim ne durumda": "improvement_status",
+            "otonom iyilestirme ne durumda": "improvement_status",
+            "gelisim dongusu durumu": "improvement_status",
+            "iyilestirme dongusu durumu": "improvement_status",
+
+            "otonom gelisim dongusunu calistir": "improvement_run",
+            "otonom iyilestirme dongusunu calistir": "improvement_run",
+            "gelisim zincirini calistir": "improvement_run",
+            "iyilestirme zincirini calistir": "improvement_run",
+            "guvenli gelisim dongusunu calistir": "improvement_run",
+
+            "otonom gelisim deneyini hazirla": "improvement_prepare",
+            "otonom iyilestirme deneyini hazirla": "improvement_prepare",
+            "deney calisma alanini hazirla": "improvement_prepare",
+            "iyilestirme deneyi calisma alanini hazirla": "improvement_prepare",
+            "guvenli deneyi hazirla": "improvement_prepare",
+        }
+
+        stage = command_stages.get(normalized)
+
+        if stage is None:
             return None
 
         store = getattr(self, "self_improvement_research", None)
@@ -4287,8 +4237,8 @@ class AssistantEngine:
 
         if journal_path is None:
             return (
-                "Self-improvement Research Journal yolu bulunamad??? i?in "
-                "otonom geli?im zincirini ?al??t?ram?yorum."
+                "Self-improvement Research Journal yolu bulunamadigi icin "
+                "otonom gelisim zincirini calistiramiyorum."
             )
 
         try:
@@ -4296,15 +4246,12 @@ class AssistantEngine:
                 stage=stage,
                 project_root=self.own_project_root(),
                 journal_path=journal_path,
-                runtime_root=(
-                    DATA_DIR
-                    / "self_improvement_runtime"
-                ),
+                runtime_root=DATA_DIR / "self_improvement_runtime",
                 trigger_id="assistant-natural-language",
             )
         except Exception as exc:
             return (
-                "Otonom geli?im komutu ?al??t?r?lamad?: "
+                "Otonom gelisim komutu calistirilamadi: "
                 f"{type(exc).__name__}: {exc}"
             )
 
