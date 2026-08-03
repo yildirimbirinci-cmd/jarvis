@@ -759,3 +759,104 @@ def test_unrelated_knowledge_does_not_emit_context_warning(
         in warning
         for warning in plan.warnings
     )
+
+
+def test_plan_persists_structured_strategy_diagnostics(
+    tmp_path: Path,
+) -> None:
+    project = create_project(tmp_path)
+    snapshot = tmp_path / "snapshot.json"
+    result = tmp_path / "success.json"
+    repository_path = tmp_path / "knowledge.json"
+
+    write_snapshot(
+        snapshot,
+        solution="Memoize deterministic result.",
+    )
+    write_result(
+        result,
+        status="passed",
+        experiment_id="exp1-success",
+        solution="Cache deterministic results.",
+        confidence=90,
+    )
+    record = KnowledgeRepository(
+        repository_path
+    ).add_result(result)
+
+    plan = KnowledgeAwareSelfImprovementPlanner(
+        project,
+        repository_path,
+    ).build_plan(snapshot)
+
+    assert len(plan.diagnostics) == 1
+    diagnostic = plan.diagnostics[0]
+    assert diagnostic["match_type"] == "family"
+    assert diagnostic["accepted"] is True
+    assert diagnostic["failed_gates"] == []
+    assert diagnostic["matched_record_ids"] == [
+        record.record_id
+    ]
+    assert diagnostic["reliability_score"] > 0
+
+
+def test_rejected_match_persists_failed_gates(
+    tmp_path: Path,
+) -> None:
+    project = create_project(tmp_path)
+    snapshot = tmp_path / "snapshot.json"
+    result = tmp_path / "success.json"
+    repository_path = tmp_path / "knowledge.json"
+
+    write_snapshot(
+        snapshot,
+        solution="Memoize deterministic result.",
+    )
+    write_result(
+        result,
+        status="passed",
+        experiment_id="exp1-success",
+        solution="Cache deterministic results.",
+        confidence=90,
+    )
+    payload = json.loads(result.read_text(encoding="utf-8"))
+    payload["risk"] = "high"
+    result.write_text(json.dumps(payload), encoding="utf-8")
+    KnowledgeRepository(repository_path).add_result(result)
+
+    plan = KnowledgeAwareSelfImprovementPlanner(
+        project,
+        repository_path,
+    ).build_plan(snapshot)
+
+    diagnostic = plan.diagnostics[0]
+    assert diagnostic["match_type"] == "family"
+    assert diagnostic["accepted"] is False
+    assert "risk" in diagnostic["failed_gates"]
+
+
+def test_written_plan_contains_diagnostics(
+    tmp_path: Path,
+) -> None:
+    project = create_project(tmp_path)
+    snapshot = tmp_path / "snapshot.json"
+    result = tmp_path / "success.json"
+    repository_path = tmp_path / "knowledge.json"
+    output = tmp_path / "plan.json"
+
+    write_snapshot(snapshot)
+    write_result(
+        result,
+        status="passed",
+        experiment_id="exp1-success",
+    )
+    KnowledgeRepository(repository_path).add_result(result)
+
+    KnowledgeAwareSelfImprovementPlanner(
+        project,
+        repository_path,
+    ).write_plan(snapshot, output)
+
+    payload = json.loads(output.read_text(encoding="utf-8"))
+    assert isinstance(payload["diagnostics"], list)
+    assert payload["diagnostics"]

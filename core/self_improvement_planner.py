@@ -135,6 +135,7 @@ class SelfImprovementPlan:
     candidate_count: int
     candidates: tuple[ImprovementCandidate, ...]
     warnings: tuple[str, ...] = ()
+    diagnostics: tuple[dict[str, object], ...] = ()
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -145,6 +146,10 @@ class SelfImprovementPlan:
             "candidate_count": self.candidate_count,
             "candidates": [candidate.to_dict() for candidate in self.candidates],
             "warnings": list(self.warnings),
+            "diagnostics": [
+                dict(item)
+                for item in self.diagnostics
+            ],
         }
 
 

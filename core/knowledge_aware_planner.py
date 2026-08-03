@@ -370,6 +370,77 @@ class KnowledgeAwareSelfImprovementPlanner:
             for record in records
         )
 
+    def _strategy_match_diagnostic(
+        self,
+        candidate: ImprovementCandidate,
+        records: tuple[KnowledgeRecord, ...],
+    ) -> dict[str, object] | None:
+        exact_matches = _exact_matching_records(
+            candidate,
+            records,
+        )
+        related = tuple(
+            record
+            for record in records
+            if _same_problem(candidate, record)
+            and _same_strategy_family(candidate, record)
+        )
+        family_matches = tuple(
+            record
+            for record in related
+            if _context_compatible(candidate, record)
+        )
+
+        if exact_matches:
+            matched = exact_matches
+            match_type = "exact"
+            accepted = True
+            failed_gates: tuple[str, ...] = ()
+        elif family_matches:
+            matched = family_matches
+            match_type = "family"
+            accepted = True
+            failed_gates = ()
+        elif related:
+            matched = related
+            match_type = "family"
+            accepted = False
+            failed_gates = tuple(
+                name
+                for name in (
+                    "files",
+                    "risk",
+                    "applicability",
+                    "validation",
+                )
+                if any(
+                    not _context_diagnostics(
+                        candidate,
+                        record,
+                    )[name]
+                    for record in related
+                )
+            )
+        else:
+            return None
+
+        profile = self.repository.reliability_profile(
+            matched
+        )
+        return {
+            "candidate_id": candidate.candidate_id,
+            "match_type": match_type,
+            "accepted": accepted,
+            "failed_gates": list(failed_gates),
+            "matched_record_ids": [
+                record.record_id
+                for record in matched
+            ],
+            "reliability_score": (
+                profile.reliability_score
+            ),
+        }
+
     def _adjust_candidate(
         self,
         candidate: ImprovementCandidate,
@@ -536,6 +607,7 @@ class KnowledgeAwareSelfImprovementPlanner:
         base: SelfImprovementPlan,
         candidates: tuple[ImprovementCandidate, ...],
         repository_records: tuple[KnowledgeRecord, ...],
+        diagnostics: tuple[dict[str, object], ...],
     ) -> str:
         identity = {
             "schema_version": _SCHEMA_VERSION,
@@ -555,6 +627,10 @@ class KnowledgeAwareSelfImprovementPlanner:
                     ),
                 }
                 for record in repository_records
+            ],
+            "diagnostics": [
+                dict(item)
+                for item in diagnostics
             ],
         }
 
@@ -578,9 +654,17 @@ class KnowledgeAwareSelfImprovementPlanner:
             return base
 
         candidates: list[ImprovementCandidate] = []
+        diagnostics: list[dict[str, object]] = []
         warnings = list(base.warnings)
 
         for candidate in base.candidates:
+            diagnostic = self._strategy_match_diagnostic(
+                candidate,
+                records,
+            )
+            if diagnostic is not None:
+                diagnostics.append(diagnostic)
+
             adjusted, warning = self._adjust_candidate(
                 candidate,
                 records,
@@ -615,6 +699,7 @@ class KnowledgeAwareSelfImprovementPlanner:
                 base,
                 ordered,
                 records,
+                tuple(diagnostics),
             ),
             source_closeout_id=(
                 base.source_closeout_id
@@ -625,6 +710,7 @@ class KnowledgeAwareSelfImprovementPlanner:
             warnings=tuple(
                 dict.fromkeys(warnings)
             ),
+            diagnostics=tuple(diagnostics),
         )
 
     def write_plan(
