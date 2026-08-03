@@ -10,6 +10,10 @@ from artmach_assistant.core.experiment_executor import (
     ExperimentExecutionResult,
     ExperimentExecutor,
 )
+from artmach_assistant.core.autonomous_changeset_builder import (
+    AutonomousChangesetBuilder,
+    ChangesetModelProtocol,
+)
 from artmach_assistant.core.knowledge_repository import (
     KnowledgeRepository,
 )
@@ -109,6 +113,7 @@ class SelfImprovementLoopRuntime:
         experiment_result_paths: Sequence[str | Path] = (),
         maintenance_result_paths: Sequence[str | Path] = (),
         experiment_changeset_path: str | Path | None = None,
+        changeset_model: ChangesetModelProtocol | None = None,
         focused_test_targets: Sequence[str] = (),
         full_test_targets: Sequence[str] = (),
         experiment_timeout_seconds: int = 120,
@@ -156,6 +161,7 @@ class SelfImprovementLoopRuntime:
             Path(value).expanduser().resolve(strict=False)
             for value in maintenance_result_paths
         )
+        self.changeset_model = changeset_model
         self.experiment_changeset_path = (
             Path(experiment_changeset_path)
             .expanduser()
@@ -648,7 +654,37 @@ class SelfImprovementLoopRuntime:
                 message=preparation.message,
             )
 
-        if self.experiment_changeset_path is None:
+        changeset_path = self.experiment_changeset_path
+        if changeset_path is None and self.changeset_model is not None:
+            try:
+                changeset_path = AutonomousChangesetBuilder(
+                    self.changeset_model
+                ).build(
+                    plan_path=result.plan_path,
+                    candidate_id=candidate_id,
+                    workspace_path=preparation.workspace_path,
+                )
+            except (OSError, TypeError, ValueError) as exc:
+                blocked = self._write_stage_artifact(
+                    workspace,
+                    "experiment_changeset_blocked",
+                    {
+                        "schema_version": _SCHEMA_VERSION,
+                        "candidate_id": candidate_id,
+                        "experiment_id": preparation.experiment_id,
+                        "status": "blocked",
+                        "message": _normalise_text(exc),
+                    },
+                )
+                return StageResult(
+                    stage="experiment",
+                    status="blocked",
+                    artifact_path=str(blocked),
+                    artifact_id=preparation.experiment_id,
+                    message=f"automatic change-set generation blocked: {exc}",
+                )
+
+        if changeset_path is None:
             return StageResult(
                 stage="experiment",
                 status="completed",
@@ -660,7 +696,7 @@ class SelfImprovementLoopRuntime:
         execution = ExperimentExecutor(
             preparation.workspace_path
         ).execute(
-            self.experiment_changeset_path,
+            changeset_path,
             focused_test_targets=(
                 self.focused_test_targets
             ),
