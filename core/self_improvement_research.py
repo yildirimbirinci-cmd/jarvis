@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
 
-_ALLOWED_STATES = {"researching", "solution_found", "failed", "cancelled"}
+_ALLOWED_STATES = {"queued", "researching", "solution_found", "failed", "cancelled"}
 
 
 def _now() -> str:
@@ -23,35 +23,67 @@ def _normalize(text: object) -> str:
     return " ".join(value.translate(table).split())
 
 
+
+
+def looks_like_opened_item_followup(text: str) -> bool:
+    """Return True only for an explicit question about what was opened.
+
+    Prefix matching is intentionally avoided: Turkish words such as ``neden``
+    and ``açık`` previously looked like ``ne`` + ``aç`` and caused ordinary
+    research instructions to be mistaken for an editor-open follow-up.
+    """
+    normalized = _normalize(text)
+    phrases = (
+        "az once ne actin",
+        "az once neyi actin",
+        "az once hangisini actin",
+        "hangi klasoru actin",
+        "hangi dosyayi actin",
+        "neyi actin",
+        "ne actin",
+        "hangisini actin",
+    )
+    return any(phrase in normalized for phrase in phrases)
+
 def looks_like_self_improvement_complaint(text: object) -> bool:
     """Recognize natural complaints that ask Jarvis to investigate itself."""
 
     normalized = _normalize(text)
     if not normalized:
         return False
-    complaint = any(
-        marker in normalized
-        for marker in (
-            "cok yavas",
-            "yavas dusun",
-            "yavas cevap",
-            "gec cevap",
-            "uzun suruyor",
-            "bekletiyorsun",
-            "agir calis",
+    tokens = set(normalized.split())
+    complaint = (
+        any(token.startswith("yavas") for token in tokens)
+        or any(
+            marker in normalized
+            for marker in (
+                "gec cevap",
+                "uzun suruyor",
+                "fazla suruyor",
+                "bekletiyorsun",
+                "agir calis",
+                "hizli degil",
+            )
         )
     )
-    self_target = any(
-        marker in normalized
-        for marker in (
-            "kendini gelistir",
-            "kendini iyilestir",
-            "ne yapabilirsin",
-            "nasil hizlan",
-            "bunu arastir",
-            "cozum bul",
-            "neden yavas",
+    self_target = (
+        any(
+            marker in normalized
+            for marker in (
+                "kendini gelistir",
+                "kendini iyilestir",
+                "ne yapabilirsin",
+                "nasil hizlan",
+                "nedenini arastir",
+                "nedenlerini arastir",
+                "bunu arastir",
+                "bunun neden",
+                "cozum bul",
+                "neden yavas",
+                "problemi anla",
+            )
         )
+        or ("arastir" in tokens and any(token.startswith("neden") for token in tokens))
     )
     return complaint and self_target
 
@@ -71,6 +103,33 @@ def asks_for_self_improvement_result(text: object) -> bool:
     )
 
 
+def asks_for_self_improvement_status(text: object) -> bool:
+    normalized = _normalize(text)
+    return any(
+        marker in normalized
+        for marker in (
+            "arastirma ne durumda",
+            "arastirma devam ediyor mu",
+            "ne asamadasin",
+            "inceleme ne durumda",
+        )
+    )
+
+
+def asks_for_self_improvement_technical_details(text: object) -> bool:
+    normalized = _normalize(text)
+    return any(
+        marker in normalized
+        for marker in (
+            "teknik ayrintilari goster",
+            "teknik detaylari goster",
+            "ayrintili raporu goster",
+            "kanitlari goster",
+            "hangi fonksiyonlar",
+        )
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class SelfImprovementResearchTask:
     task_id: str
@@ -78,6 +137,9 @@ class SelfImprovementResearchTask:
     state: str
     created_at: str
     completed_at: str = ""
+    stage: str = "queued"
+    progress: int = 0
+    status_message: str = ""
     summary: str = ""
     cause: str = ""
     solution: str = ""
@@ -86,6 +148,7 @@ class SelfImprovementResearchTask:
     affected_paths: tuple[str, ...] = ()
     validation: tuple[str, ...] = ()
     evidence_ids: tuple[str, ...] = ()
+    technical_details: tuple[str, ...] = ()
     error: str = ""
 
     def to_dict(self) -> dict[str, object]:
@@ -93,6 +156,7 @@ class SelfImprovementResearchTask:
         payload["affected_paths"] = list(self.affected_paths)
         payload["validation"] = list(self.validation)
         payload["evidence_ids"] = list(self.evidence_ids)
+        payload["technical_details"] = list(self.technical_details)
         return payload
 
     @classmethod
@@ -106,6 +170,9 @@ class SelfImprovementResearchTask:
             state=state,
             created_at=str(payload.get("created_at", "")),
             completed_at=str(payload.get("completed_at", "")),
+            stage=str(payload.get("stage", "queued")),
+            progress=max(0, min(100, int(payload.get("progress", 0) or 0))),
+            status_message=str(payload.get("status_message", "")),
             summary=str(payload.get("summary", "")),
             cause=str(payload.get("cause", "")),
             solution=str(payload.get("solution", "")),
@@ -114,36 +181,55 @@ class SelfImprovementResearchTask:
             affected_paths=tuple(str(item) for item in payload.get("affected_paths", ()) if item),
             validation=tuple(str(item) for item in payload.get("validation", ()) if item),
             evidence_ids=tuple(str(item) for item in payload.get("evidence_ids", ()) if item),
+            technical_details=tuple(str(item) for item in payload.get("technical_details", ()) if item),
             error=str(payload.get("error", "")),
         )
 
+    def status_report(self) -> str:
+        if self.state == "solution_found":
+            return "Araştırma tamamlandı. Sonucu dinlemek için 'ne buldun' diyebilirsin."
+        if self.state == "failed":
+            return "Araştırma tamamlanamadı. Ayrıntı için 'ne buldun' diyebilirsin."
+        message = self.status_message or "Yavaşlığın hangi aşamada oluştuğunu inceliyorum."
+        return f"Araştırma devam ediyor. %{self.progress}: {message} Henüz kodumu değiştirmedim."
+
     def user_report(self) -> str:
-        if self.state == "researching":
-            return (
-                "Yavaşlık şikâyetini araştırıyorum. Önce hangi aşamanın süreyi "
-                "tükettiğini ölçüp, sonra güvenli çözüm seçeneklerini karşılaştıracağım. "
-                "Henüz kodumu değiştirmedim."
-            )
+        if self.state in {"queued", "researching"}:
+            return self.status_report()
         if self.state == "failed":
             return (
                 "Araştırmayı tamamlayamadım. "
                 + (self.error or "Yeterli kanıt toplanamadı.")
                 + " Kodumu değiştirmedim."
             )
-        paths = ", ".join(self.affected_paths[:4]) or "henüz kesin dosya kapsamı yok"
-        checks = "; ".join(self.validation[:3]) or "önce/sonra süre karşılaştırması"
         return (
-            "Yavaşlık araştırmasını tamamladım.\n\n"
+            "Araştırmayı tamamladım.\n\n"
             f"Ne buldum: {self.summary}\n"
-            f"Muhtemel neden: {self.cause}\n"
+            f"Bunun anlamı: {self.cause}\n"
             f"Önerdiğim çözüm: {self.solution}\n"
             f"Beklenen fayda: {self.benefit}\n"
-            f"Risk: {self.risk}\n"
-            f"İlgili kapsam: {paths}\n"
-            f"Nasıl doğrulayacağım: {checks}\n\n"
-            "Bu yalnızca araştırma sonucudur; henüz hiçbir dosyayı değiştirmedim. "
-            "İstersen bu çözüm için önce teknik plan hazırlayabilirim."
+            f"Risk: {self.risk}\n\n"
+            "henüz hiçbir dosyayı değiştirmedim. Bu çözüm için plan hazırlamamı "
+            "isteyebilirsin. Teknik kayıtları görmek için 'teknik ayrıntıları göster' de."
         )
+
+    def technical_report(self) -> str:
+        if self.state != "solution_found":
+            return self.status_report()
+        paths = ", ".join(self.affected_paths[:8]) or "kesin dosya kapsamı yok"
+        checks = "; ".join(self.validation[:6]) or "önce/sonra süre karşılaştırması"
+        details = "\n".join(f"- {item}" for item in self.technical_details[:12])
+        if not details:
+            details = "- Ek teknik olay kaydı bulunmuyor."
+        return (
+            "TEKNİK ARAŞTIRMA AYRINTILARI\n\n"
+            f"İlgili kapsam: {paths}\n"
+            f"Doğrulama: {checks}\n"
+            f"Kanıt kimlikleri: {', '.join(self.evidence_ids) or 'yok'}\n"
+            f"Kayıtlar:\n{details}\n\n"
+            "Bu rapor yalnızca tanı içindir; kod değişikliği uygulanmadı."
+        )
+
 
 
 class SelfImprovementResearchStore:
@@ -201,11 +287,32 @@ class SelfImprovementResearchStore:
         task = SelfImprovementResearchTask(
             task_id="SIR-" + uuid.uuid4().hex[:10].upper(),
             complaint=" ".join(str(complaint or "").split())[:2000],
-            state="researching",
+            state="queued",
             created_at=_now(),
+            stage="queued",
+            progress=0,
+            status_message="Araştırma görevi sıraya alındı.",
         )
         self.save(task)
         return task
+
+    def update_progress(
+        self,
+        task: SelfImprovementResearchTask,
+        *,
+        stage: str,
+        progress: int,
+        status_message: str,
+    ) -> SelfImprovementResearchTask:
+        updated = replace(
+            task,
+            state="researching",
+            stage=str(stage).strip()[:80] or "researching",
+            progress=max(0, min(99, int(progress))),
+            status_message=" ".join(str(status_message or "").split())[:500],
+        )
+        self.save(updated)
+        return updated
 
     def complete(
         self,
@@ -219,11 +326,15 @@ class SelfImprovementResearchStore:
         affected_paths: Iterable[str] = (),
         validation: Iterable[str] = (),
         evidence_ids: Iterable[str] = (),
+        technical_details: Iterable[str] = (),
     ) -> SelfImprovementResearchTask:
         completed = replace(
             task,
             state="solution_found",
             completed_at=_now(),
+            stage="completed",
+            progress=100,
+            status_message="Araştırma tamamlandı.",
             summary=str(summary).strip()[:2000],
             cause=str(cause).strip()[:3000],
             solution=str(solution).strip()[:3000],
@@ -232,6 +343,7 @@ class SelfImprovementResearchStore:
             affected_paths=tuple(dict.fromkeys(str(item) for item in affected_paths if item))[:12],
             validation=tuple(dict.fromkeys(str(item) for item in validation if item))[:12],
             evidence_ids=tuple(dict.fromkeys(str(item) for item in evidence_ids if item))[:20],
+            technical_details=tuple(dict.fromkeys(str(item) for item in technical_details if item))[:30],
             error="",
         )
         self.save(completed)
@@ -276,6 +388,12 @@ def choose_speed_research_result(runtime_report: object, architecture_assessment
             "affected_paths": paths,
             "validation": tuple(getattr(chosen, "acceptance_criteria", ()) or ()),
             "evidence_ids": (str(getattr(chosen, "finding_id", "")),),
+            "technical_details": tuple(
+                item for item in (
+                    f"{getattr(chosen, 'title', '')}: {getattr(chosen, 'explanation', '')}",
+                    f"Tekrar sayısı: {getattr(chosen, 'occurrence_count', 0)}; güven: {getattr(chosen, 'confidence', 0.0):.2f}",
+                ) if item.strip(": ")
+            ),
         }
 
     architecture_findings = tuple(getattr(architecture_assessment, "findings", ()) or ())
@@ -312,4 +430,8 @@ def choose_speed_research_result(runtime_report: object, architecture_assessment
             "Cevap içeriği, iptal ve ilerleme bildirimi davranışı korunmalı.",
         ),
         "evidence_ids": (evidence_id,) if evidence_id else (),
+        "technical_details": (
+            "Normal sohbet, kendi kodunu geliştirme ve ses işlemleri ayrı süre alanları olarak ölçülmeli.",
+            "Statik karmaşıklık tek başına çalışma zamanı yavaşlığının kanıtı sayılmadı.",
+        ),
     }

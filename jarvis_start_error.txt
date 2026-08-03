@@ -1,0 +1,5 @@
+Error calling Python override of QMainWindow::closeEvent(): Traceback (most recent call last):
+  File "C:\Users\yildi\Desktop\artmach_assistant\app.py", line 2579, in closeEvent
+    (self.tts_worker, 8000),
+     ^^^^^^^^^^^^^^^
+AttributeError: 'MainWindow' object has no attribute 'tts_worker'. Did you mean: 'run_worker'?

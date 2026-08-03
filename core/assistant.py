@@ -147,8 +147,11 @@ from artmach_assistant.core.notification_store import NotificationStore
 from artmach_assistant.core.self_improvement_research import (
     SelfImprovementResearchStore,
     asks_for_self_improvement_result,
+    asks_for_self_improvement_status,
+    asks_for_self_improvement_technical_details,
     choose_speed_research_result,
     looks_like_self_improvement_complaint,
+    looks_like_opened_item_followup,
 )
 from artmach_assistant.core.project_development_memory import ProjectDevelopmentMemory
 from artmach_assistant.core.project_development_planner import (
@@ -3920,13 +3923,31 @@ class AssistantEngine:
         if store is None:
             return
         task = store.load()
-        if task is None or task.task_id != task_id or task.state != "researching":
+        if task is None or task.task_id != task_id or task.state not in {"queued", "researching"}:
             return
         try:
+            task = store.update_progress(
+                task,
+                stage="runtime_evidence",
+                progress=20,
+                status_message="Çalışma zamanı kayıtlarını alanlara göre inceliyorum.",
+            )
             runtime_report = self.runtime_health_assessment(own_code=True)
+            task = store.update_progress(
+                task,
+                stage="architecture_evidence",
+                progress=55,
+                status_message="Yavaşlık kanıtını mimari bulgulardan ayırıyorum.",
+            )
             architecture_assessment = self._project_improvement_runtime().assessment(
                 own_code=True,
                 refresh=True,
+            )
+            task = store.update_progress(
+                task,
+                stage="recommendation",
+                progress=80,
+                status_message="En düşük riskli çözümü ve doğrulama yöntemini karşılaştırıyorum.",
             )
             result = choose_speed_research_result(
                 runtime_report, architecture_assessment
@@ -3963,6 +3984,16 @@ class AssistantEngine:
         store = getattr(self, "self_improvement_research", None)
         if store is None:
             return None
+        if asks_for_self_improvement_technical_details(text):
+            task = store.load()
+            if task is None:
+                return "Henüz başlatılmış bir kendini geliştirme araştırması yok."
+            return task.technical_report()
+        if asks_for_self_improvement_status(text):
+            task = store.load()
+            if task is None:
+                return "Henüz başlatılmış bir kendini geliştirme araştırması yok."
+            return task.status_report()
         if asks_for_self_improvement_result(text):
             task = store.load()
             if task is None:
@@ -3971,8 +4002,8 @@ class AssistantEngine:
         if not looks_like_self_improvement_complaint(text):
             return None
         current = store.load()
-        if current is not None and current.state == "researching":
-            return current.user_report()
+        if current is not None and current.state in {"queued", "researching"}:
+            return current.status_report()
         task = store.start(text)
         worker = threading.Thread(
             target=self._run_self_improvement_research,
@@ -3987,11 +4018,10 @@ class AssistantEngine:
             task.user_report(),
         )
         return (
-            "Haklısın. Yavaşlığın hangi aşamada oluştuğunu araştıracağım. "
-            "Komut yönlendirme, bağlam hazırlama, model çağrısı ve cevap işleme "
-            "sürelerini mevcut kayıtlarla karşılaştıracağım. Çözüm bulduğumda "
-            "sana teknik terimlere boğmadan bildireceğim. Onayın olmadan kodumu "
-            "değiştirmeyeceğim."
+            "Haklısın. Bunun nedenini henüz bilmiyorum; araştırma görevini başlattım. "
+            "Normal sohbeti, kendi kodumu geliştirme işlemlerini ve ses işlemlerini "
+            "birbirine karıştırmadan ayrı ayrı inceleyeceğim. Sonuç hazır olduğunda "
+            "sana bildireceğim. Şimdilik kodumu değiştirmeyeceğim."
         )
 
     def _maintenance_request(self, text: str) -> str | None:
@@ -7020,10 +7050,7 @@ class AssistantEngine:
         kind = context.get("kind", "")
         target = context.get("target", "")
         detail = context.get("detail", "")
-        asks_what_opened = (
-            any(word.startswith(("hangi", "hangisini", "ne")) for word in words)
-            and any(word.startswith(("ac", "calistir")) for word in words)
-        )
+        asks_what_opened = looks_like_opened_item_followup(text)
         if asks_what_opened and target:
             return f"Az önce {target} açtım." + (f" Kendi kaynak klasörüm: {detail}." if detail else "")
         asks_edit_capability = any(word.startswith(("duzenle", "degistir", "gelistir", "uygula")) for word in words)
@@ -8424,6 +8451,13 @@ class AssistantEngine:
             or normalized in {"cikis yap", "tamamen kapan", "tamamen kapat"}
         ):
             return APP_EXIT_SIGNAL
+        # A self-improvement complaint or result request must outrank generic
+        # follow-ups to an older local action. Otherwise words such as
+        # "neden" and "açık" can be misread as "ne açtın".
+        self_improvement_research = self._self_improvement_research_request(text)
+        if self_improvement_research is not None:
+            return self_improvement_research
+
         action_follow_up = self._handle_action_follow_up(text)
         if action_follow_up is not None:
             self.dialogue.remember(text, action_follow_up)
@@ -8431,9 +8465,6 @@ class AssistantEngine:
 
         # Explicit RUN identifiers take precedence over every older plan and
         # over the general dialogue model.
-        self_improvement_research = self._self_improvement_research_request(text)
-        if self_improvement_research is not None:
-            return self_improvement_research
         maintenance = self._maintenance_request(text)
         if maintenance is not None:
             return maintenance

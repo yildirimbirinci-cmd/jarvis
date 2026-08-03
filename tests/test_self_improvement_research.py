@@ -16,8 +16,11 @@ spec.loader.exec_module(module)
 
 looks_like_self_improvement_complaint = module.looks_like_self_improvement_complaint
 asks_for_self_improvement_result = module.asks_for_self_improvement_result
+asks_for_self_improvement_status = module.asks_for_self_improvement_status
+asks_for_self_improvement_technical_details = module.asks_for_self_improvement_technical_details
 SelfImprovementResearchStore = module.SelfImprovementResearchStore
 choose_speed_research_result = module.choose_speed_research_result
+looks_like_opened_item_followup = module.looks_like_opened_item_followup
 
 
 def test_natural_speed_complaint_is_recognized() -> None:
@@ -106,3 +109,60 @@ def test_no_runtime_evidence_proposes_measurement_not_fake_root_cause() -> None:
     assert "henüz kanıtlamıyor" in result["summary"]
     assert "süre ölçümü" in result["solution"]
     assert "core/assistant.py" in result["affected_paths"]
+
+
+def test_opened_item_followup_requires_explicit_open_question() -> None:
+    assert looks_like_opened_item_followup("Az önce ne açtın?")
+    assert looks_like_opened_item_followup("Hangi klasörü açtın?")
+    assert not looks_like_opened_item_followup(
+        "Önce problemi anlamaya çalış, nedenlerini araştır ve açık onayımı bekle."
+    )
+    assert not looks_like_opened_item_followup(
+        "Üçüncü çözümle devam et; henüz performans davranışını değiştirme."
+    )
+
+
+def test_natural_slowed_down_research_request_is_recognized() -> None:
+    assert looks_like_self_improvement_complaint(
+        "Son zamanlarda cevap verirken yavaşladığını hissediyorum. "
+        "Bunun nedenlerini araştır. Önce problemi anlamaya çalış."
+    )
+
+
+def test_new_task_is_queued_and_has_short_status(tmp_path: Path) -> None:
+    store = SelfImprovementResearchStore(tmp_path / "research.json")
+    task = store.start("Neden yavaşladığını araştır.")
+    assert task.state == "queued"
+    assert task.progress == 0
+    assert "Araştırma devam ediyor" in task.status_report()
+    assert "Dayandığım kanıtlar" not in task.status_report()
+
+
+def test_progress_and_technical_report_are_separate(tmp_path: Path) -> None:
+    store = SelfImprovementResearchStore(tmp_path / "research.json")
+    task = store.start("Neden yavaşladığını araştır.")
+    task = store.update_progress(
+        task,
+        stage="runtime_evidence",
+        progress=35,
+        status_message="Normal sohbet sürelerini inceliyorum.",
+    )
+    assert "%35" in task.status_report()
+    assert "Normal sohbet" in task.status_report()
+    completed = store.complete(
+        task,
+        summary="Görev yürütme aşaması ölçülen en güçlü darboğaz.",
+        cause="Bazı görevler kendi süre eşiğini aşıyor.",
+        solution="Önce alt aşamalara süre ölçümü ekle.",
+        benefit="Yanlış optimizasyon yapmadan gerçek darboğazı bulmak.",
+        risk="Düşük.",
+        affected_paths=("core/task_orchestrator.py",),
+        validation=("Aynı komutu üç kez ölç.",),
+        evidence_ids=("RUN-SLOW",),
+        technical_details=("TaskOrchestrator.execute_task median=98236ms",),
+    )
+    plain = completed.user_report()
+    technical = completed.technical_report()
+    assert "TaskOrchestrator.execute_task" not in plain
+    assert "TaskOrchestrator.execute_task" in technical
+    assert "teknik ayrıntıları göster" in plain
