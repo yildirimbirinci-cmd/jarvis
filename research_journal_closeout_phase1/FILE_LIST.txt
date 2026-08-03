@@ -1,0 +1,5 @@
+core/research_journal_closeout.py
+tests/test_research_journal_closeout_phase1.py
+install_research_journal_closeout_phase1.py
+README_TR.txt
+FILE_LIST.txt
