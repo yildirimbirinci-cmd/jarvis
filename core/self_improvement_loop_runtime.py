@@ -438,8 +438,55 @@ class SelfImprovementLoopRuntime:
                 indexed[candidate_id] = row
         return indexed
 
+    @staticmethod
+    def _score_value(
+        row: dict[str, object],
+        name: str,
+    ) -> int:
+        try:
+            return int(row.get(name, 0) or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    def _build_selection_decision(
+        self,
+        row: dict[str, object],
+        diagnostic: dict[str, object] | None,
+        *,
+        reason: str,
+    ) -> dict[str, object]:
+        candidate_id = _normalise_text(
+            row.get("candidate_id"),
+            limit=200,
+        )
+        priority = self._score_value(
+            row,
+            "priority_score",
+        )
+        confidence = self._score_value(
+            row,
+            "confidence_score",
+        )
+        adjustment = self._diagnostic_rank_adjustment(
+            diagnostic
+        )
+        return {
+            "selected_candidate_id": candidate_id,
+            "base_priority": priority,
+            "base_confidence": confidence,
+            "diagnostic_adjustment": adjustment,
+            "final_rank_score": priority + adjustment,
+            "selection_reason": reason,
+            "diagnostic": (
+                dict(diagnostic)
+                if diagnostic is not None
+                else None
+            ),
+        }
+
     def _select_candidate_id(self) -> str:
         candidates = self._load_plan_candidates()
+        diagnostics = self._plan_diagnostics()
 
         if self.requested_candidate_id:
             matches = [
@@ -457,6 +504,16 @@ class SelfImprovementLoopRuntime:
                     "requested candidate was not found"
                 )
 
+            selected = matches[0]
+            self._selection_decision = (
+                self._build_selection_decision(
+                    selected,
+                    diagnostics.get(
+                        self.requested_candidate_id
+                    ),
+                    reason="explicit_candidate_request",
+                )
+            )
             return self.requested_candidate_id
 
         experiment_candidates = [
@@ -470,8 +527,6 @@ class SelfImprovementLoopRuntime:
                 "no candidate requires an experiment"
             )
 
-        diagnostics = self._plan_diagnostics()
-
         def selection_key(
             row: dict[str, object],
         ) -> tuple[int, int, str]:
@@ -479,19 +534,14 @@ class SelfImprovementLoopRuntime:
                 row.get("candidate_id"),
                 limit=200,
             )
-            try:
-                priority = int(
-                    row.get("priority_score", 0) or 0
-                )
-            except (TypeError, ValueError):
-                priority = 0
-            try:
-                confidence = int(
-                    row.get("confidence_score", 0) or 0
-                )
-            except (TypeError, ValueError):
-                confidence = 0
-
+            priority = self._score_value(
+                row,
+                "priority_score",
+            )
+            confidence = self._score_value(
+                row,
+                "confidence_score",
+            )
             adjustment = self._diagnostic_rank_adjustment(
                 diagnostics.get(candidate_id)
             )
@@ -516,6 +566,13 @@ class SelfImprovementLoopRuntime:
                 "selected candidate identity is incomplete"
             )
 
+        self._selection_decision = (
+            self._build_selection_decision(
+                selected,
+                diagnostics.get(candidate_id),
+                reason="highest_adjusted_rank",
+            )
+        )
         return candidate_id
 
     def _experiment_handler(
@@ -543,10 +600,20 @@ class SelfImprovementLoopRuntime:
         )
         self._preparation_result = preparation
 
+        preparation_payload = preparation.to_dict()
+        preparation_payload["selection"] = (
+            dict(self._selection_decision)
+            if getattr(
+                self,
+                "_selection_decision",
+                None,
+            ) is not None
+            else None
+        )
         artifact = self._write_stage_artifact(
             workspace,
             "experiment_preparation",
-            preparation.to_dict(),
+            preparation_payload,
         )
         self._preparation_path = artifact
 

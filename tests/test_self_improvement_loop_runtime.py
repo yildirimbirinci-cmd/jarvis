@@ -868,3 +868,146 @@ def test_explicit_candidate_ignores_diagnostic_ranking(
     )
 
     assert runtime._select_candidate_id() == "requested"
+
+
+def test_selection_decision_is_persisted(
+    tmp_path: Path,
+) -> None:
+    project = create_project(tmp_path)
+    journal = tmp_path / "journal" / "research.json"
+    runtime_root = tmp_path / "runtime"
+    write_journal(journal)
+
+    runtime = SelfImprovementLoopRuntime(
+        project,
+        journal,
+        runtime_root,
+    )
+    workspace = runtime_root / "workspace"
+    runtime._journal_handler(
+        workspace,
+        make_trigger(allow_experiment=True),
+    )
+    stage = runtime._experiment_handler(
+        workspace,
+        make_trigger(allow_experiment=True),
+    )
+
+    payload = json.loads(
+        Path(stage.artifact_path).read_text(
+            encoding="utf-8"
+        )
+    )
+    selection = payload["selection"]
+
+    assert selection["selected_candidate_id"]
+    assert (
+        selection["selection_reason"]
+        == "highest_adjusted_rank"
+    )
+    assert selection["final_rank_score"] == (
+        selection["base_priority"]
+        + selection["diagnostic_adjustment"]
+    )
+
+
+def test_explicit_selection_reason_is_persisted(
+    tmp_path: Path,
+) -> None:
+    project = create_project(tmp_path)
+    journal = tmp_path / "journal" / "research.json"
+    runtime_root = tmp_path / "runtime"
+    write_journal(journal)
+
+    first = SelfImprovementLoopRuntime(
+        project,
+        journal,
+        runtime_root,
+    )
+    first._journal_handler(
+        runtime_root / "first",
+        make_trigger(allow_experiment=True),
+    )
+    candidate_id = str(
+        first._load_plan_candidates()[0][
+            "candidate_id"
+        ]
+    )
+
+    runtime = SelfImprovementLoopRuntime(
+        project,
+        journal,
+        runtime_root,
+        candidate_id=candidate_id,
+    )
+    workspace = runtime_root / "explicit"
+    runtime._journal_handler(
+        workspace,
+        make_trigger(allow_experiment=True),
+    )
+    stage = runtime._experiment_handler(
+        workspace,
+        make_trigger(allow_experiment=True),
+    )
+
+    payload = json.loads(
+        Path(stage.artifact_path).read_text(
+            encoding="utf-8"
+        )
+    )
+    assert (
+        payload["selection"]["selection_reason"]
+        == "explicit_candidate_request"
+    )
+
+
+def test_selection_payload_contains_diagnostic_data(
+    tmp_path: Path,
+) -> None:
+    project = create_project(tmp_path)
+    journal = tmp_path / "journal" / "research.json"
+    runtime_root = tmp_path / "runtime"
+    write_journal(journal)
+
+    runtime = SelfImprovementLoopRuntime(
+        project,
+        journal,
+        runtime_root,
+    )
+    workspace = runtime_root / "workspace"
+    runtime._journal_handler(
+        workspace,
+        make_trigger(allow_experiment=True),
+    )
+    candidate = runtime._load_plan_candidates()[0]
+    candidate_id = str(candidate["candidate_id"])
+
+    plan_path = Path(runtime._pipeline_result.plan_path)
+    payload = json.loads(
+        plan_path.read_text(encoding="utf-8")
+    )
+    payload["diagnostics"] = [
+        {
+            "candidate_id": candidate_id,
+            "accepted": True,
+            "reliability_score": 80,
+        }
+    ]
+    plan_path.write_text(
+        json.dumps(payload),
+        encoding="utf-8",
+    )
+
+    stage = runtime._experiment_handler(
+        workspace,
+        make_trigger(allow_experiment=True),
+    )
+    artifact = json.loads(
+        Path(stage.artifact_path).read_text(
+            encoding="utf-8"
+        )
+    )
+    selection = artifact["selection"]
+
+    assert selection["diagnostic_adjustment"] == 8
+    assert selection["diagnostic"]["accepted"] is True
