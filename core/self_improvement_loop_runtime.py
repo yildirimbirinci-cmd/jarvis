@@ -10,6 +10,9 @@ from artmach_assistant.core.experiment_executor import (
     ExperimentExecutionResult,
     ExperimentExecutor,
 )
+from artmach_assistant.core.knowledge_repository import (
+    KnowledgeRepository,
+)
 from artmach_assistant.core.autonomous_improvement_loop import (
     AutonomousImprovementLoop,
     ImprovementLoopResult,
@@ -181,6 +184,9 @@ class SelfImprovementLoopRuntime:
         self.knowledge_root = (
             self.runtime_root / "knowledge"
         )
+        self.knowledge_repository_path = (
+            self.knowledge_root / "repository.json"
+        )
         self.loop_state_path = (
             self.runtime_root / "autonomous_loop_state.json"
         )
@@ -253,6 +259,9 @@ class SelfImprovementLoopRuntime:
             self.project_root,
             self.journal_path,
             self.pipeline_root,
+            knowledge_repository_path=(
+                self.knowledge_repository_path
+            ),
         )
         result = pipeline.run()
         self._pipeline_result = result
@@ -616,6 +625,12 @@ class SelfImprovementLoopRuntime:
                 artifact_id=built.snapshot_id,
                 message=built.message,
             )
+
+        repository = KnowledgeRepository(
+            self.knowledge_repository_path
+        )
+        for result_path in result_paths:
+            repository.add_result(result_path)
 
         return StageResult(
             stage="knowledge",

@@ -653,3 +653,64 @@ def test_phase1_behavior_remains_without_changeset(
     assert result.stages[-1].stage == "knowledge"
     assert result.stages[-1].status == "blocked"
 
+
+def test_phase2_persists_planner_repository(
+    tmp_path: Path,
+) -> None:
+    project = write_phase2_project(tmp_path)
+    journal = tmp_path / "phase2-journal" / "research.json"
+    changeset = tmp_path / "changeset.json"
+    runtime_root = tmp_path / "phase2-runtime"
+    write_phase2_journal(journal)
+    write_phase2_changeset(changeset)
+
+    result = SelfImprovementLoopRuntime(
+        project,
+        journal,
+        runtime_root,
+        experiment_changeset_path=changeset,
+        focused_test_targets=["tests/test_example.py"],
+        full_test_targets=["tests"],
+    ).run(
+        make_trigger(
+            allow_experiment=True,
+            digest="f" * 64,
+        )
+    )
+
+    repository_path = (
+        runtime_root / "knowledge" / "repository.json"
+    )
+    assert result.status == "completed"
+    assert repository_path.is_file()
+
+    stored = json.loads(
+        repository_path.read_text(encoding="utf-8")
+    )
+    assert len(stored["records"]) == 1
+    assert stored["records"][0]["outcome"] == "success"
+
+
+def test_runtime_pipeline_uses_shared_repository(
+    tmp_path: Path,
+) -> None:
+    project = create_project(tmp_path)
+    journal = tmp_path / "journal" / "research.json"
+    runtime_root = tmp_path / "runtime"
+    write_journal(journal)
+
+    runtime = SelfImprovementLoopRuntime(
+        project,
+        journal,
+        runtime_root,
+    )
+    runtime._journal_handler(
+        runtime_root / "workspace",
+        make_trigger(allow_experiment=False),
+    )
+
+    assert runtime._pipeline_result is not None
+    assert runtime.knowledge_repository_path == (
+        runtime_root / "knowledge" / "repository.json"
+    ).resolve()
+
