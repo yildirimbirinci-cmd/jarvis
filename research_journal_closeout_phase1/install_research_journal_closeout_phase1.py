@@ -36,9 +36,14 @@ def _find_root() -> Path:
 
 
 def _run(root: Path, args: list[str]) -> subprocess.CompletedProcess[str]:
+    env = os.environ.copy()
+    parent = str(root.parent)
+    current = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = parent if not current else parent + os.pathsep + current
     return subprocess.run(
         args,
         cwd=root,
+        env=env,
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
@@ -95,7 +100,10 @@ def main() -> int:
         if focused.returncode:
             raise RuntimeError("ODAK TEST BASARISIZ\n" + focused.stdout)
 
-        full = _run(root, [sys.executable, "-m", "pytest", "-q"])
+        full = _run(
+            root,
+            [sys.executable, "-m", "pytest", "-q", "tests"],
+        )
         full_counts = _pytest_counts(full.stdout)
         if full.returncode or full_counts["failed"] or full_counts["errors"]:
             raise RuntimeError("TAM TEST BASARISIZ\n" + full.stdout)
