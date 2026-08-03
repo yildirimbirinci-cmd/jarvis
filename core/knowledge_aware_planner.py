@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import replace
 from pathlib import Path
 from typing import Iterable
@@ -57,6 +58,68 @@ def _same_solution(
     )
 
 
+
+_STRATEGY_ALIASES = {
+    "cached": "cache",
+    "caches": "cache",
+    "caching": "cache",
+    "memoisation": "cache",
+    "memoise": "cache",
+    "memoised": "cache",
+    "memoization": "cache",
+    "memoize": "cache",
+    "memoized": "cache",
+    "results": "result",
+    "requests": "request",
+    "helpers": "helper",
+    "methods": "method",
+    "functions": "function",
+}
+
+_STRATEGY_STOP_WORDS = frozenset(
+    {
+        "a",
+        "an",
+        "and",
+        "for",
+        "into",
+        "of",
+        "the",
+        "to",
+        "using",
+        "with",
+    }
+)
+
+
+def _strategy_family(value: object) -> tuple[str, ...]:
+    tokens = re.findall(
+        r"[a-z0-9]+",
+        _normalise_text(value),
+    )
+    family = {
+        _STRATEGY_ALIASES.get(token, token)
+        for token in tokens
+        if token not in _STRATEGY_STOP_WORDS
+    }
+    return tuple(sorted(family))
+
+
+def _same_strategy_family(
+    candidate: ImprovementCandidate,
+    record: KnowledgeRecord,
+) -> bool:
+    candidate_family = _strategy_family(
+        candidate.proposed_solution
+    )
+    record_family = _strategy_family(
+        record.solution_pattern
+    )
+    return (
+        bool(candidate_family)
+        and candidate_family == record_family
+    )
+
 def _files_compatible(
     candidate: ImprovementCandidate,
     record: KnowledgeRecord,
@@ -76,7 +139,7 @@ def _files_compatible(
     return bool(candidate_files & record_files)
 
 
-def _matching_records(
+def _exact_matching_records(
     candidate: ImprovementCandidate,
     records: Iterable[KnowledgeRecord],
 ) -> tuple[KnowledgeRecord, ...]:
@@ -89,13 +152,26 @@ def _matching_records(
     )
 
 
+def _family_matching_records(
+    candidate: ImprovementCandidate,
+    records: Iterable[KnowledgeRecord],
+) -> tuple[KnowledgeRecord, ...]:
+    return tuple(
+        record
+        for record in records
+        if _same_problem(candidate, record)
+        and _same_strategy_family(candidate, record)
+        and _files_compatible(candidate, record)
+    )
+
+
 class KnowledgeAwareSelfImprovementPlanner:
     """Adjust safe improvement plans using verified experiment memory.
 
     Safety rules:
     - the base planner remains the source of candidates;
-    - only exact problem/solution knowledge matches are considered;
-    - a failure-only exact match suppresses the repeated candidate;
+    - exact matches remain the only source of candidate suppression;
+    - conservative strategy-family matches may inform scores;
     - verified successes can raise scores but never disable experiments;
     - no repository, Journal or project source file is modified.
     """
@@ -144,32 +220,54 @@ class KnowledgeAwareSelfImprovementPlanner:
         candidate: ImprovementCandidate,
         records: tuple[KnowledgeRecord, ...],
     ) -> tuple[ImprovementCandidate | None, str | None]:
-        matches = _matching_records(
+        exact_matches = _exact_matching_records(
+            candidate,
+            records,
+        )
+        family_matches = _family_matching_records(
             candidate,
             records,
         )
 
-        if not matches:
+        if not family_matches:
             return candidate, None
 
+        exact_successes = tuple(
+            record
+            for record in exact_matches
+            if record.outcome == "success"
+        )
+        exact_failures = tuple(
+            record
+            for record in exact_matches
+            if record.outcome == "failure"
+        )
         successes = tuple(
             record
-            for record in matches
+            for record in family_matches
             if record.outcome == "success"
         )
         failures = tuple(
             record
-            for record in matches
+            for record in family_matches
             if record.outcome == "failure"
         )
 
         profile = self.repository.reliability_profile(
-            matches
+            family_matches
         )
         success_count = profile.successful_observations
         failure_count = profile.failed_observations
-
-        if failure_count > 0 and success_count == 0:
+        exact_success_count = self._observation_total(
+            exact_successes
+        )
+        exact_failure_count = self._observation_total(
+            exact_failures
+        )
+        if (
+            exact_failure_count > 0
+            and exact_success_count == 0
+        ):
             return (
                 None,
                 (
@@ -265,7 +363,8 @@ class KnowledgeAwareSelfImprovementPlanner:
             f"{success_count} successful and "
             f"{failure_count} failed historical observation(s); "
             f"strategy reliability={profile.reliability_score}, "
-            f"success rate={profile.success_rate}%: "
+            f"success rate={profile.success_rate}%, "
+            f"family matches={len(family_matches)}: "
             f"{candidate.candidate_id}"
         )
         return adjusted, warning

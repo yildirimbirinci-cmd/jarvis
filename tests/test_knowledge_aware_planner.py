@@ -431,3 +431,94 @@ def test_warning_reports_strategy_reliability(
         for warning in plan.warnings
     )
 
+
+def test_strategy_family_success_informs_candidate(
+    tmp_path: Path,
+) -> None:
+    project = create_project(tmp_path)
+    snapshot = tmp_path / "snapshot.json"
+    result = tmp_path / "success.json"
+    repository_path = tmp_path / "knowledge.json"
+
+    write_snapshot(
+        snapshot,
+        solution="Memoize deterministic result.",
+    )
+    write_result(
+        result,
+        status="passed",
+        experiment_id="exp1-success",
+        solution="Cache deterministic results.",
+        confidence=90,
+    )
+    KnowledgeRepository(repository_path).add_result(result)
+
+    plan = KnowledgeAwareSelfImprovementPlanner(
+        project,
+        repository_path,
+    ).build_plan(snapshot)
+
+    assert plan.candidate_count == 1
+    assert plan.candidates[0].confidence_score > 90
+    assert any(
+        "family matches=1" in warning
+        for warning in plan.warnings
+    )
+
+
+def test_family_failure_does_not_suppress_non_exact_solution(
+    tmp_path: Path,
+) -> None:
+    project = create_project(tmp_path)
+    snapshot = tmp_path / "snapshot.json"
+    result = tmp_path / "failure.json"
+    repository_path = tmp_path / "knowledge.json"
+
+    write_snapshot(
+        snapshot,
+        solution="Memoize deterministic result.",
+    )
+    write_result(
+        result,
+        status="failed",
+        experiment_id="exp1-failure",
+        solution="Cache deterministic results.",
+    )
+    KnowledgeRepository(repository_path).add_result(result)
+
+    plan = KnowledgeAwareSelfImprovementPlanner(
+        project,
+        repository_path,
+    ).build_plan(snapshot)
+
+    assert plan.candidate_count == 1
+
+
+def test_family_matching_requires_same_problem(
+    tmp_path: Path,
+) -> None:
+    project = create_project(tmp_path)
+    snapshot = tmp_path / "snapshot.json"
+    result = tmp_path / "success.json"
+    repository_path = tmp_path / "knowledge.json"
+
+    write_snapshot(
+        snapshot,
+        problem="A separate bottleneck exists.",
+        solution="Memoize deterministic result.",
+    )
+    write_result(
+        result,
+        status="passed",
+        experiment_id="exp1-success",
+        solution="Cache deterministic results.",
+        confidence=90,
+    )
+    KnowledgeRepository(repository_path).add_result(result)
+
+    plan = KnowledgeAwareSelfImprovementPlanner(
+        project,
+        repository_path,
+    ).build_plan(snapshot)
+
+    assert plan.candidates[0].confidence_score == 60
