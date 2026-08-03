@@ -278,6 +278,9 @@ class SelfImprovementLoopRuntime:
             knowledge_repository_path=(
                 self.knowledge_repository_path
             ),
+            repository_health_knowledge_path=(
+                self.repository_health_knowledge_path
+            ),
         )
         result = pipeline.run()
         self._pipeline_result = result

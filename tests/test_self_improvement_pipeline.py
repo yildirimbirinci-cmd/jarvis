@@ -328,3 +328,53 @@ def test_pipeline_accepts_shared_knowledge_repository(
         repository.resolve()
     )
 
+
+
+def test_pipeline_passes_repository_health_knowledge_to_planner(
+    tmp_path: Path,
+) -> None:
+    project = create_project(tmp_path)
+    journal = tmp_path / "journal" / "research.json"
+    artifacts = tmp_path / "artifacts"
+    write_journal(journal)
+
+    pipeline = SelfImprovementPipeline(
+        project,
+        journal,
+        artifacts,
+    )
+    planner = pipeline._planner()
+
+    expected = (
+        artifacts / "knowledge" / "repository_health.json"
+    ).resolve()
+    assert pipeline.repository_health_knowledge_path == expected
+    assert planner.repository_health_knowledge_path == expected
+    assert planner.health_repository is not None
+
+
+def test_pipeline_accepts_shared_repository_health_knowledge(
+    tmp_path: Path,
+) -> None:
+    project = create_project(tmp_path)
+    journal = tmp_path / "journal" / "research.json"
+    artifacts = tmp_path / "artifacts"
+    repository = tmp_path / "runtime" / "knowledge.json"
+    health_repository = tmp_path / "runtime" / "health.json"
+    write_journal(journal)
+
+    pipeline = SelfImprovementPipeline(
+        project,
+        journal,
+        artifacts,
+        knowledge_repository_path=repository,
+        repository_health_knowledge_path=health_repository,
+    )
+    planner = pipeline._planner()
+
+    assert pipeline.repository_health_knowledge_path == (
+        health_repository.resolve()
+    )
+    assert planner.repository_health_knowledge_path == (
+        health_repository.resolve()
+    )

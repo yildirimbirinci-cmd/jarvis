@@ -109,6 +109,7 @@ class SelfImprovementPipeline:
         journal_path: str | Path,
         artifact_root: str | Path,
         knowledge_repository_path: str | Path | None = None,
+        repository_health_knowledge_path: str | Path | None = None,
     ) -> None:
         self.project_root = (
             Path(project_root).expanduser().resolve(strict=False)
@@ -134,6 +135,15 @@ class SelfImprovementPipeline:
             if knowledge_repository_path is not None
             else self.artifact_root / "knowledge" / "repository.json"
         )
+        self.repository_health_knowledge_path = (
+            Path(repository_health_knowledge_path)
+            .expanduser()
+            .resolve(strict=False)
+            if repository_health_knowledge_path is not None
+            else self.knowledge_repository_path.with_name(
+                "repository_health.json"
+            )
+        )
         self.state_path = (
             self.artifact_root / "self_improvement_pipeline_state.json"
         )
@@ -150,6 +160,7 @@ class SelfImprovementPipeline:
         return KnowledgeAwareSelfImprovementPlanner(
             self.project_root,
             self.knowledge_repository_path,
+            self.repository_health_knowledge_path,
         )
 
     def _snapshot_path(
