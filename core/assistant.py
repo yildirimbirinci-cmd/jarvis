@@ -3693,12 +3693,13 @@ class AssistantEngine:
             if natural_self_repair_request:
                 finding = self._latest_runtime_finding()
                 if finding is None:
-                    return (
-                        "Kendi kodumdaki sorunu onarmak icin henuz "
-                        "dogrulanabilir bir calisma zamani bulgusu yok. "
-                        "Once teshis kaniti olusturmaliyim; kanit olmadan "
-                        "tahmine dayali kod degisikligi yapmayacagim."
+                    diagnosis = self.maintenance_review(
+                        own_code=True,
+                        refresh_architecture=True,
                     )
+                    finding = self._latest_runtime_finding()
+                    if finding is None:
+                        return diagnosis
                 return self.prepare_runtime_improvement_implementation(
                     finding.finding_id
                 )

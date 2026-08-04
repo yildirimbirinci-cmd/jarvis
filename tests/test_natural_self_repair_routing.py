@@ -69,3 +69,25 @@ def test_inactive_old_repair_session_does_not_swallow_new_request() -> None:
             "duzelt",
         )
     )
+
+def test_natural_repair_runs_broader_diagnosis_when_runtime_finding_is_absent() -> None:
+    engine = _engine_without_active_repair()
+    calls: list[tuple[bool, bool]] = []
+
+    def maintenance_review(
+        *,
+        own_code: bool = True,
+        refresh_architecture: bool = True,
+    ) -> str:
+        calls.append((own_code, refresh_architecture))
+        return "Bakim ve mimari teshis tamamlandi; dogrulanabilir bulgu bulunamadi."
+
+    engine.maintenance_review = maintenance_review
+
+    result = engine._reserved_self_repair_request(
+        "Jarvis kendi kodundaki bu sorunu teshis et ve duzelt"
+    )
+
+    assert calls == [(True, True)]
+    assert "teshis" in result.casefold()
+    assert "bulgu" in result.casefold()
