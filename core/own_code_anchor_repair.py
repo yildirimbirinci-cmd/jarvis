@@ -1523,3 +1523,124 @@ def build_missing_anchor_guidance(
             )
 
     return "\n".join(rows).strip()
+
+
+def qualify_inserted_private_helper_calls(
+    payload: dict[str, Any],
+    *,
+    instruction: str,
+) -> dict[str, Any]:
+    """Qualify bare calls to newly inserted private sibling methods.
+
+    A code model may correctly add ``VoiceService._helper`` but use
+    ``_helper(...)`` in the approved method replacement. Inside an instance
+    method that call must be ``self._helper(...)``. Only helpers introduced by
+    ``insert_class_method`` in the explicitly requested class are eligible.
+    """
+    requested = _requested_symbol(instruction)
+    if requested is None:
+        return payload
+
+    requested_class, _requested_method = requested
+    repaired = copy.deepcopy(payload)
+    files = repaired.get("files")
+
+    if not isinstance(files, list):
+        return repaired
+
+    for file_row in files:
+        if not isinstance(file_row, dict):
+            continue
+
+        operations = file_row.get("operations")
+        if not isinstance(operations, list):
+            continue
+
+        helper_names: set[str] = set()
+
+        for operation in operations:
+            if not isinstance(operation, dict):
+                continue
+            if str(operation.get("op", "")).strip().casefold() != (
+                "insert_class_method"
+            ):
+                continue
+            if str(operation.get("class_name", "")).strip() != requested_class:
+                continue
+
+            content = operation.get("content")
+            if not isinstance(content, str) or not content.strip():
+                continue
+
+            try:
+                parsed = ast.parse(textwrap.dedent(content))
+            except SyntaxError:
+                continue
+
+            if (
+                len(parsed.body) == 1
+                and isinstance(
+                    parsed.body[0],
+                    (ast.FunctionDef, ast.AsyncFunctionDef),
+                )
+                and parsed.body[0].name.startswith("_")
+            ):
+                helper_names.add(parsed.body[0].name)
+
+        if not helper_names:
+            continue
+
+        for operation in operations:
+            if not isinstance(operation, dict):
+                continue
+            if str(operation.get("op", "")).strip().casefold() not in {
+                "replace",
+                "replace_exact",
+            }:
+                continue
+
+            new_text = operation.get("new")
+            if not isinstance(new_text, str) or not new_text.strip():
+                continue
+
+            try:
+                tree = ast.parse(new_text)
+            except SyntaxError:
+                try:
+                    expression = ast.parse(new_text, mode="eval")
+                except SyntaxError:
+                    continue
+                tree = expression
+
+            changed = False
+
+            class QualifyCalls(ast.NodeTransformer):
+                def visit_Call(self, node: ast.Call) -> ast.AST:
+                    nonlocal changed
+                    self.generic_visit(node)
+
+                    if (
+                        isinstance(node.func, ast.Name)
+                        and node.func.id in helper_names
+                    ):
+                        node.func = ast.Attribute(
+                            value=ast.Name(id="self", ctx=ast.Load()),
+                            attr=node.func.id,
+                            ctx=ast.Load(),
+                        )
+                        changed = True
+
+                    return node
+
+            tree = QualifyCalls().visit(tree)
+            ast.fix_missing_locations(tree)
+
+            if not changed:
+                continue
+
+            if isinstance(tree, ast.Expression):
+                operation["new"] = ast.unparse(tree.body)
+            else:
+                operation["new"] = ast.unparse(tree)
+
+    return repaired

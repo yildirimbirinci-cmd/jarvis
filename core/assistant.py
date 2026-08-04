@@ -70,6 +70,7 @@ from artmach_assistant.core.own_code_anchor_repair import (
     build_missing_anchor_guidance,
     build_structural_method_block_guidance,
     merge_duplicate_operation_rows,
+    qualify_inserted_private_helper_calls,
     normalize_structural_class_method_insertions,
     normalize_structural_method_block_replacements,
     remove_redundant_noop_replaces,
@@ -1387,6 +1388,10 @@ class AssistantEngine:
                 payload = self._validate_own_code_payload_shape(raw)
                 payload = merge_duplicate_operation_rows(payload)
                 payload = remove_redundant_noop_replaces(payload)
+                payload = qualify_inserted_private_helper_calls(
+                    payload,
+                    instruction=prompt,
+                )
                 payload = normalize_structural_class_method_insertions(
                     payload,
                     project_root=self.own_project_root(),

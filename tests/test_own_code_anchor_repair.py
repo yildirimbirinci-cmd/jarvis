@@ -5,6 +5,7 @@ from artmach_assistant.core.own_code_anchor_repair import (
     build_ambiguous_anchor_guidance,
     build_structural_method_block_guidance,
     merge_duplicate_operation_rows,
+    qualify_inserted_private_helper_calls,
     normalize_structural_class_method_insertions,
     normalize_structural_method_block_replacements,
     remove_redundant_noop_replaces,
@@ -965,4 +966,80 @@ def test_insert_class_method_supports_last_top_level_class(
     assert (
         "    def _check_repeated_run(self, tokens):"
         in rendered
+    )
+
+def test_qualify_inserted_private_helper_call_in_approved_method() -> None:
+    payload = {
+        "summary": "repair repeated run",
+        "files": [
+            {
+                "path": "core/voice_service.py",
+                "reason": "repair",
+                "operations": [
+                    {
+                        "op": "insert_class_method",
+                        "class_name": "VoiceService",
+                        "content": (
+                            "def _check_repeated_run(self, tokens):\n"
+                            "    return len(tokens)\n"
+                        ),
+                    },
+                    {
+                        "op": "replace",
+                        "old": "max_repeated_run >= 4",
+                        "new": "_check_repeated_run(tokens) >= 4",
+                    },
+                ],
+            }
+        ],
+    }
+
+    repaired = qualify_inserted_private_helper_calls(
+        payload,
+        instruction=(
+            "VoiceService.recognize_wav hatasini duzelt"
+        ),
+    )
+
+    operation = repaired["files"][0]["operations"][1]
+
+    assert operation["new"] == (
+        "self._check_repeated_run(tokens) >= 4"
+    )
+
+
+def test_helper_call_qualifier_ignores_unrelated_functions() -> None:
+    payload = {
+        "summary": "repair",
+        "files": [
+            {
+                "path": "core/example.py",
+                "reason": "repair",
+                "operations": [
+                    {
+                        "op": "insert_class_method",
+                        "class_name": "Example",
+                        "content": (
+                            "def _helper(self, value):\n"
+                            "    return value\n"
+                        ),
+                    },
+                    {
+                        "op": "replace",
+                        "old": "parse(value)",
+                        "new": "parse(value)",
+                    },
+                ],
+            }
+        ],
+    }
+
+    repaired = qualify_inserted_private_helper_calls(
+        payload,
+        instruction="Example.run hatasini duzelt",
+    )
+
+    assert (
+        repaired["files"][0]["operations"][1]["new"]
+        == "parse(value)"
     )
