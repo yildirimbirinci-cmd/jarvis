@@ -30,7 +30,7 @@ def test_voice_stage_helper_emits_bounded_runtime_event(monkeypatch) -> None:
     row = captured[0]
     assert row["component"] == "VoiceService"
     assert row["action"] == "tts_cache_lookup"
-    assert row["status"] == "success"
+    assert row["status"] == "completed"
     assert row["scope"] == "voice"
     assert row["correlation_id"] == "speech-test"
     assert row["metadata"]["cache_hit"] is True
