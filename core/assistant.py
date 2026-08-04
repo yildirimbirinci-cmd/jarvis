@@ -3104,11 +3104,21 @@ class AssistantEngine:
             "taslagi onayla", "taslagi uygula", "degisikligi onayla",
             "degisikligi uygula", "kod degisikligini uygula",
         }
+        explicit_patch_approval = normalized in {
+            "uygula",
+            "taslagi uygula",
+            "degisikligi uygula",
+            "kod degisikligini uygula",
+        }
         state_bound_rejection = normalized in {
             "hayir", "iptal", "reddet", "vazgec", "taslagi reddet",
             "degisikligi iptal et",
         }
-        if pending is None and state_bound_approval:
+        if (
+            pending is None
+            and state_bound_approval
+            and not explicit_patch_approval
+        ):
             collaborative_store = getattr(self, "collaborative_problems", None)
             collaborative_session = (
                 collaborative_store.load()
@@ -3165,6 +3175,11 @@ class AssistantEngine:
                     "tutulmadı. Yeni onay kimliği üretmek için taslağı yeniden "
                     "hazırlıyorum. " + self.prepare_own_code_repair_proposal()
                 )
+        if pending is None and explicit_patch_approval:
+            return (
+                "Uygulanacak bekleyen bir kod degisikligi taslagi yok. "
+                "Once dogrulanabilir bir onarim taslagi hazirlanmali."
+            )
         if not refers_to_proposal:
             return None
         if any(word.startswith(("iptal", "reddet", "vazgec")) for word in words):
