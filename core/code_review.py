@@ -199,7 +199,7 @@ class CodeReviewService:
             size = path.stat().st_size
             if size < 0 or size > _MAX_FILE_BYTES:
                 return None
-            with path.open("r", encoding="utf-8", errors="ignore") as handle:
+            with path.open("r", encoding="utf-8-sig", errors="ignore") as handle:
                 return handle.read(_MAX_FILE_BYTES + 1)[:_MAX_FILE_BYTES]
         except (OSError, RuntimeError):
             return None
