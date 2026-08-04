@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import uuid
 import urllib.error
 import urllib.request
 from dataclasses import replace
@@ -6283,9 +6284,91 @@ class AssistantEngine:
             "Kesin sonuç için aynı kullanıcı senaryosunu birkaç kez daha çalıştırmak gerekir."
         )
 
+    def _start_voice_diagnostic_session(self) -> str:
+        from artmach_assistant.core.voice_diagnostic_session import (
+            VoiceDiagnosticSession,
+        )
+
+        store = getattr(self, "runtime_events", None)
+        if store is None:
+            return (
+                "Ses tanilama oturumu baslatilamadi: "
+                "runtime olay deposu kullanilabilir degil."
+            )
+
+        events = tuple(store.recent(limit=2000))
+        session_id = "VDG-" + uuid.uuid4().hex[:10].upper()
+        self._active_voice_diagnostic = VoiceDiagnosticSession.start(
+            events,
+            session_id=session_id,
+        )
+        return (
+            f"Kontrollu ses tanilama oturumu {session_id} baslatildi.\n"
+            "Bu oturumdan onceki olaylar guncel kok neden analizine "
+            "dahil edilmeyecek.\n"
+            "Simdi sorunlu ses senaryosunu bir kez calistir. "
+            "Bitirdiginde 'tanilama tamamlandi' yaz."
+        )
+
+    def _finish_voice_diagnostic_session(self) -> str:
+        session = getattr(self, "_active_voice_diagnostic", None)
+        if session is None:
+            return (
+                "Aktif bir kontrollu ses tanilama oturumu yok. "
+                "Once 'kontrollu ses tanilamasini baslat' yaz."
+            )
+
+        store = getattr(self, "runtime_events", None)
+        if store is None:
+            return (
+                "Ses tanilama sonucu okunamadi: "
+                "runtime olay deposu kullanilabilir degil."
+            )
+
+        result = session.finish(store.recent(limit=2000))
+        self._active_voice_diagnostic = None
+        return result.render()
+
+    def _voice_diagnostic_request(self, text: str) -> str | None:
+        normalized = normalize_text(str(text or ""))
+
+        finish_markers = (
+            "tanilama tamamlandi",
+            "tanilamayi tamamla",
+            "olcumu bitir",
+            "ses tanilamasini bitir",
+        )
+        if any(marker in normalized for marker in finish_markers):
+            return self._finish_voice_diagnostic_session()
+
+        start_markers = (
+            "kontrollu tanilama",
+            "kontrollu ses tanilama",
+            "ses tanilamasini baslat",
+            "ucuncu cozumle devam",
+        )
+        requests_measurement = any(marker in normalized for marker in (
+            "surelerini olc",
+            "asamalara ayir",
+            "eski olaylari",
+            "yalniz bu calismada",
+            "kodu degistirmeden",
+        ))
+        if (
+            any(marker in normalized for marker in start_markers)
+            and requests_measurement
+        ):
+            return self._start_voice_diagnostic_session()
+
+        return None
+
     def _collaborative_problem_request(self, text: str) -> str | None:
         normalized = normalize_text(str(text or ""))
         words = normalized.split()
+
+        voice_diagnostic = self._voice_diagnostic_request(text)
+        if voice_diagnostic is not None:
+            return voice_diagnostic
         own_intent = classify_own_code_intent(
             text,
             active_own_editor=str((getattr(self, "last_action_context", None) or {}).get("kind", ""))
