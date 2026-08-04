@@ -112,7 +112,7 @@ def test_command_dispatcher_preserves_legacy_plan() -> None:
 
 def test_command_dispatcher_preserves_explicit_apply() -> None:
     engine = FakeEngine(
-        apply_result="De?i?iklik do?ruland? ve uyguland?."
+        apply_result="Değişiklik doğrulandı ve uygulandı."
     )
 
     result = run_self_development_command(

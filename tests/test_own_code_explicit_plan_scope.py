@@ -12,7 +12,7 @@ def test_explicit_scope_extracts_file_and_symbol() -> None:
 
 def test_explicit_scope_ignores_file_name_as_symbol() -> None:
     paths, symbols = AssistantEngine._explicit_own_code_scope(
-        "core/app.py i?inde WakeWordWorker.run metodunu d?zenle"
+        "core/app.py içinde WakeWordWorker.run metodunu düzenle"
     )
 
     assert paths == ("core/app.py",)

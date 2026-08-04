@@ -688,7 +688,7 @@ def test_file_name_before_symbol_does_not_hide_requested_method(
         project_root=tmp_path,
         instruction=(
             "app.py dosyas?ndaki WakeWordWorker.run metodunu "
-            "davran??? de?i?tirmeden refakt?r et"
+            "davranışı değiştirmeden refaktör et"
         ),
     )
 
@@ -768,7 +768,7 @@ def test_duplicate_operation_rows_for_same_file_are_merged() -> None:
             },
             {
                 "path": "./app.py",
-                "reason": "run ?a?r?s?n? de?i?tir",
+                "reason": "run çağrısını değiştir",
                 "operations": [
                     {
                         "op": "replace",
@@ -787,7 +787,7 @@ def test_duplicate_operation_rows_for_same_file_are_merged() -> None:
     assert row["path"] == "app.py"
     assert len(row["operations"]) == 2
     assert "helper ekle" in row["reason"]
-    assert "run ?a?r?s?n? de?i?tir" in row["reason"]
+    assert "run çağrısını değiştir" in row["reason"]
 
 
 def test_content_rows_are_not_silently_merged() -> None:

@@ -3049,6 +3049,31 @@ class AssistantEngine:
         """Accept only unambiguous spoken approval or rejection of a proposal."""
         normalized = self.command_key(text)
         words = normalized.split()
+
+        diagnostic_only_markers = (
+            "kodu degistirmeden",
+            "kod degisikligi uygulama",
+            "degisiklik uygulama",
+            "kontrollu yeniden uret",
+            "yeniden uret",
+            "surelerini olc",
+            "asama surelerini olc",
+            "eski olaylari ayir",
+            "kok nedeni belirle",
+            "yalniz kok neden",
+            "rapor hazirla",
+            "taslak hazirla",
+            "onayima sun",
+        )
+        requests_diagnostic_work = any(
+            marker in normalized for marker in diagnostic_only_markers
+        )
+        if requests_diagnostic_work:
+            # Diagnostic follow-ups belong to the active collaborative problem
+            # session. Words such as "devam et" or "taslak hazırla" must not be
+            # interpreted as approval to apply a pending source edit.
+            return None
+
         pending = getattr(getattr(self, "editor", None), "pending", None)
         supplied_ids = re.findall(r"(?<![0-9a-f])[0-9a-f]{12}(?![0-9a-f])", normalized)
         if supplied_ids:
