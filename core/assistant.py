@@ -39,7 +39,9 @@ from artmach_assistant.core.agent_runner import AgentRunResult
 from artmach_assistant.core.snapshot_manager import SnapshotManager
 from artmach_assistant.core.code_review import CodeReviewService
 from artmach_assistant.core.evidence_maintenance import build_evidence_maintenance_report
-from artmach_assistant.core.evidence_retest import build_retest_plan
+from artmach_assistant.core.evidence_retest import RetestPlan, build_retest_plan
+from artmach_assistant.core.evidence_retest_command import RetestCommandCoordinator
+from artmach_assistant.core.evidence_retest_session import RetestApprovalStore
 from artmach_assistant.core.system_control import SystemControlService
 from artmach_assistant.core.voice_service import VoiceService
 from artmach_assistant.core.tts_output_routing import TtsOutputRouter
@@ -422,6 +424,15 @@ class AssistantEngine:
         )
         self.self_repair_sessions = SelfRepairSessionStore(
             SELF_REPAIR_SESSION_FILE
+        )
+        self.retest_command_coordinator = RetestCommandCoordinator(
+            store=RetestApprovalStore(
+                DATA_DIR
+                / "diagnostics"
+                / "pending_retest.json"
+            ),
+            source_root=self.own_project_root(),
+            plan_provider=self._build_evidence_retest_plan,
         )
         self.project_memory = ProjectDevelopmentMemory(DATA_DIR / "project_memory")
         self.project_development_planner = ProjectDevelopmentPlanner(
@@ -5555,6 +5566,70 @@ class AssistantEngine:
     def code_review_report(self) -> str:
         return self.reviewer.report()
 
+    def _build_evidence_retest_plan(self) -> RetestPlan:
+        """Build a read-only retest plan from current evidence."""
+        own_root = self.own_project_root().resolve(
+            strict=False
+        )
+        reviewer = CodeReviewService(
+            WorkspaceService(str(own_root))
+        )
+        analyze = getattr(reviewer, "analyze", None)
+
+        if not callable(analyze):
+            return RetestPlan(())
+
+        static_analysis = analyze()
+        runtime_findings: tuple[RuntimeFinding, ...] = ()
+
+        try:
+            runtime_report = self._runtime_health_service().analyze(
+                workspace=own_root,
+            )
+        except Exception:
+            runtime_report = None
+        else:
+            self._last_runtime_health_report = runtime_report
+            runtime_findings = tuple(
+                runtime_report.findings
+            )
+
+        evidence_report = build_evidence_maintenance_report(
+            static_analysis.issues,
+            runtime_findings,
+            source_root=own_root,
+        )
+
+        return build_retest_plan(
+            evidence_report.findings,
+            source_root=own_root,
+        )
+
+    def _retest_command_request(
+        self,
+        text: str,
+    ) -> str | None:
+        """Handle explicit retest planning and exact approval."""
+        coordinator = getattr(
+            self,
+            "retest_command_coordinator",
+            None,
+        )
+
+        if coordinator is None:
+            coordinator = RetestCommandCoordinator(
+                store=RetestApprovalStore(
+                    DATA_DIR
+                    / "diagnostics"
+                    / "pending_retest.json"
+                ),
+                source_root=self.own_project_root(),
+                plan_provider=self._build_evidence_retest_plan,
+            )
+            self.retest_command_coordinator = coordinator
+
+        return coordinator.handle(text)
+
     def own_code_review_report(self) -> str:
         """Return an evidence-ranked read-only source review."""
         own_root = Path(__file__).resolve().parents[1]
@@ -9425,6 +9500,9 @@ class AssistantEngine:
         reserved_self_repair = self._reserved_self_repair_request(text)
         if reserved_self_repair is not None:
             return reserved_self_repair
+        retest_command = self._retest_command_request(text)
+        if retest_command is not None:
+            return retest_command
         own_code_read_only = self._own_code_read_only_request(text)
         if own_code_read_only is not None:
             return own_code_read_only
