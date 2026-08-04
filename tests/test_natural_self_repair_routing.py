@@ -42,3 +42,30 @@ def test_unrelated_general_problem_does_not_enter_self_repair() -> None:
     )
 
     assert result is None
+
+def test_inactive_old_repair_session_does_not_swallow_new_request() -> None:
+    engine = _engine_without_active_repair()
+    inactive_session = SimpleNamespace(
+        active=False,
+        state="completed",
+        plan_id="RPR-OLDSESSION",
+    )
+    engine._self_repair_store = lambda: SimpleNamespace(
+        load=lambda: inactive_session
+    )
+
+    result = engine._reserved_self_repair_request(
+        "Jarvis kendi kodundaki bu sorunu teshis et ve duzelt"
+    )
+
+    assert result is not None
+    assert any(
+        marker in result.casefold()
+        for marker in (
+            "bulgu",
+            "teshis",
+            "kanit",
+            "onar",
+            "duzelt",
+        )
+    )

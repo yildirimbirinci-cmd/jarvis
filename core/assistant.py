@@ -3687,7 +3687,7 @@ class AssistantEngine:
                 "rpr plani", "onarimi iptal", "onarim planini iptal",
             )
         )
-        if session is None:
+        if session is None or not session.active:
             if repair_subject or plan_id:
                 return "Etkin bir hedefli kendi-kod onarim oturumu yok."
             if natural_self_repair_request:
