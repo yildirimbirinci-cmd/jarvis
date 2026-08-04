@@ -3108,6 +3108,22 @@ class AssistantEngine:
             "hayir", "iptal", "reddet", "vazgec", "taslagi reddet",
             "degisikligi iptal et",
         }
+        if pending is None and state_bound_approval:
+            collaborative_store = getattr(self, "collaborative_problems", None)
+            collaborative_session = (
+                collaborative_store.load()
+                if collaborative_store is not None
+                else None
+            )
+            if (
+                collaborative_session is not None
+                and collaborative_session.stage
+                not in {"completed", "cancelled", "proposal_ready"}
+            ):
+                # Aktif problem oturumundaki k?sa onay, eski own-code
+                # tasla??n? yeniden ?retmemeli.
+                return None
+
         if pending is not None and project_pending and state_bound_rejection:
             return project_runtime.reject_pending()
         if pending is not None and project_pending and state_bound_approval:
