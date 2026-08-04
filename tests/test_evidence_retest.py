@@ -249,6 +249,129 @@ def test_report_contains_command_and_merged_titles(tmp_path) -> None:
     ).report()
 
     assert "Birlestirilen bulgular:" in rendered
-    assert "Komut:" in rendered
+    assert "Primary komut:" in rendered
     assert "python -m pytest" in rendered
     assert "test_piper_tts_cache.py" in rendered
+
+def test_primary_and_supporting_tests_are_separated(
+    tmp_path,
+) -> None:
+    tests_root = tmp_path / "tests"
+    tests_root.mkdir()
+
+    for index in range(5):
+        (
+            tests_root
+            / f"test_recognize_wav_{index}.py"
+        ).write_text(
+            "def test_recognize_wav():\n"
+            "    pass\n",
+            encoding="utf-8",
+        )
+
+    item = build_retest_plan(
+        (_finding(),),
+        source_root=tmp_path,
+    ).items[0]
+
+    assert len(item.primary_test_paths) == 3
+    assert len(item.supporting_test_paths) == 2
+    assert item.command[-1] == "-q"
+    assert item.supporting_command[-1] == "-q"
+
+
+def test_planner_does_not_select_its_own_test(
+    tmp_path,
+) -> None:
+    tests_root = tmp_path / "tests"
+    tests_root.mkdir()
+
+    (
+        tests_root / "test_evidence_retest.py"
+    ).write_text(
+        "def test_recognize_wav():\n"
+        "    pass\n",
+        encoding="utf-8",
+    )
+    (
+        tests_root / "test_voice_recognition.py"
+    ).write_text(
+        "def test_recognize_wav():\n"
+        "    pass\n",
+        encoding="utf-8",
+    )
+
+    item = build_retest_plan(
+        (_finding(),),
+        source_root=tmp_path,
+    ).items[0]
+
+    assert (
+        "tests/test_evidence_retest.py"
+        not in item.test_paths
+    )
+    assert (
+        "tests/test_voice_recognition.py"
+        in item.test_paths
+    )
+
+
+def test_general_infrastructure_test_requires_direct_symbol(
+    tmp_path,
+) -> None:
+    tests_root = tmp_path / "tests"
+    tests_root.mkdir()
+
+    (
+        tests_root
+        / "test_own_code_anchor_repair.py"
+    ).write_text(
+        "def test_voice_alias():\n"
+        "    pass\n",
+        encoding="utf-8",
+    )
+    (
+        tests_root
+        / "test_voice_recognition.py"
+    ).write_text(
+        "def test_recognize_wav():\n"
+        "    pass\n",
+        encoding="utf-8",
+    )
+
+    item = build_retest_plan(
+        (_finding(),),
+        source_root=tmp_path,
+    ).items[0]
+
+    assert (
+        "tests/test_own_code_anchor_repair.py"
+        not in item.test_paths
+    )
+
+
+def test_report_shows_primary_and_supporting_commands(
+    tmp_path,
+) -> None:
+    tests_root = tmp_path / "tests"
+    tests_root.mkdir()
+
+    for index in range(5):
+        (
+            tests_root
+            / f"test_recognize_wav_{index}.py"
+        ).write_text(
+            "def test_recognize_wav():\n"
+            "    pass\n",
+            encoding="utf-8",
+        )
+
+    rendered = build_retest_plan(
+        (_finding(),),
+        source_root=tmp_path,
+    ).report()
+
+    assert "Primary testler:" in rendered
+    assert "Supporting testler:" in rendered
+    assert "Primary komut:" in rendered
+    assert "Supporting komut:" in rendered

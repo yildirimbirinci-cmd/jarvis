@@ -27,8 +27,11 @@ class RetestItem:
     symbol: str
     status: str
     finding_titles: tuple[str, ...] = ()
+    primary_test_paths: tuple[str, ...] = ()
+    supporting_test_paths: tuple[str, ...] = ()
     test_paths: tuple[str, ...] = ()
     command: tuple[str, ...] = ()
+    supporting_command: tuple[str, ...] = ()
     reason: str = ""
 
 
@@ -89,16 +92,36 @@ class RetestPlan:
                     + ", ".join(item.finding_titles)
                 )
 
-            if item.test_paths:
+            if item.primary_test_paths:
                 sections.append(
-                    "Testler:\n- "
-                    + "\n- ".join(item.test_paths)
+                    "Primary testler:\n- "
+                    + "\n- ".join(
+                        item.primary_test_paths
+                    )
+                )
+
+            if item.supporting_test_paths:
+                sections.append(
+                    "Supporting testler:\n- "
+                    + "\n- ".join(
+                        item.supporting_test_paths
+                    )
                 )
 
             if item.command:
                 sections.append(
-                    "Komut:\n"
-                    + subprocess.list2cmdline(item.command)
+                    "Primary komut:\n"
+                    + subprocess.list2cmdline(
+                        item.command
+                    )
+                )
+
+            if item.supporting_command:
+                sections.append(
+                    "Supporting komut:\n"
+                    + subprocess.list2cmdline(
+                        item.supporting_command
+                    )
                 )
 
             sections.append(f"Neden: {item.reason}")
@@ -259,6 +282,26 @@ def _test_score(
     return score
 
 
+def _is_planner_self_test(relative: str) -> bool:
+    return Path(relative).name.casefold() == (
+        "test_evidence_retest.py"
+    )
+
+
+def _is_general_infrastructure_test(
+    relative: str,
+) -> bool:
+    name = Path(relative).name.casefold()
+    return any(
+        marker in name
+        for marker in (
+            "evidence_",
+            "own_code_",
+            "diagnostic_engine",
+        )
+    )
+
+
 def _candidate_tests(
     root: Path,
     findings: tuple[EvidenceMaintenanceFinding, ...],
@@ -276,10 +319,13 @@ def _candidate_tests(
             item.title,
         ),
     )
-    path_stem = Path(representative.path).stem.casefold()
+    path_stem = Path(
+        representative.path
+    ).stem.casefold()
     symbol_tail = _symbol_tail(representative)
     aliases = _specific_aliases(symbol_tail)
     components = _symbol_components(symbol_tail)
+
     minimum_score = (
         _WARNING_MIN_TEST_SCORE
         if _is_warning_group(findings)
@@ -291,6 +337,9 @@ def _candidate_tests(
     for path in tests_root.rglob("test_*.py"):
         relative = path.relative_to(root).as_posix()
 
+        if _is_planner_self_test(relative):
+            continue
+
         try:
             content = path.read_text(
                 encoding="utf-8-sig",
@@ -298,6 +347,21 @@ def _candidate_tests(
             ).casefold()
         except OSError:
             content = ""
+
+        filename = relative.casefold()
+        direct_symbol_match = bool(
+            symbol_tail
+            and (
+                symbol_tail in filename
+                or symbol_tail in content
+            )
+        )
+
+        if (
+            _is_general_infrastructure_test(relative)
+            and not direct_symbol_match
+        ):
+            continue
 
         score = _test_score(
             relative=relative,
@@ -423,12 +487,27 @@ def build_retest_plan(
             )
             continue
 
+        primary_paths = test_paths[:3]
+        supporting_paths = test_paths[3:5]
+
         command = (
             "python",
             "-m",
             "pytest",
-            *test_paths,
+            *primary_paths,
             "-q",
+        )
+
+        supporting_command = (
+            (
+                "python",
+                "-m",
+                "pytest",
+                *supporting_paths,
+                "-q",
+            )
+            if supporting_paths
+            else ()
         )
 
         items.append(
@@ -438,11 +517,14 @@ def build_retest_plan(
                 symbol=representative.symbol,
                 status=AUTOMATED,
                 finding_titles=titles,
+                primary_test_paths=primary_paths,
+                supporting_test_paths=supporting_paths,
                 test_paths=test_paths,
                 command=command,
+                supporting_command=supporting_command,
                 reason=(
-                    "Kaynak dosya son olaydan sonra degisti; "
-                    "en guclu ilgili testler yeniden calistirilmali."
+                    "Primary testler once calistirilmali; "
+                    "basarili olursa supporting testlere gecilmeli."
                 ),
             )
         )
