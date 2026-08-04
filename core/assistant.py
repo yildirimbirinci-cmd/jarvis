@@ -6284,6 +6284,72 @@ class AssistantEngine:
             "Kesin sonuç için aynı kullanıcı senaryosunu birkaç kez daha çalıştırmak gerekir."
         )
 
+    @staticmethod
+    def _selected_option_is_controlled_voice_diagnostic(
+        session: CollaborativeProblemSession,
+    ) -> bool:
+        """Return True only for a selected, non-mutating voice measurement plan."""
+        option = session.selected_option()
+        if option is None:
+            return False
+        problem_text = normalize_text(str(session.problem or ""))
+        option_text = normalize_text(
+            " ".join(
+                (
+                    str(option.title or ""),
+                    str(option.approach or ""),
+                    str(option.expected_result or ""),
+                )
+            )
+        )
+        voice_markers = (
+            "ses", "mikrofon", "wake", "uyandirma", "whisper",
+            "stt", "tts", "piper", "konusma", "transkripsiyon",
+        )
+        diagnostic_markers = (
+            "kod degistirmeden",
+            "kontrollu yeniden uret",
+            "kontrollu yeniden uretim",
+            "once kontrollu",
+            "surelerini olc",
+            "asamalari olc",
+            "asamalara ayir",
+            "hatayi tek asamaya",
+            "kok nedeni daralt",
+        )
+        has_voice_context = any(
+            marker in problem_text or marker in option_text
+            for marker in voice_markers
+        )
+        has_non_mutating_diagnostic = any(
+            marker in option_text for marker in diagnostic_markers
+        )
+        return has_voice_context and has_non_mutating_diagnostic
+
+    def _active_voice_diagnostic_plan_request(self, text: str) -> str | None:
+        """Give an active controlled voice plan priority over stale code plans."""
+        normalized = self.command_key(text)
+        if normalized not in {
+            "basla", "uygula", "devam", "devam et", "onayla",
+            "tamam", "tamam basla", "tanilamayi baslat",
+        }:
+            return None
+        store = getattr(self, "collaborative_problems", None)
+        if store is None:
+            return None
+        session = store.load()
+        if (
+            session is None
+            or session.stage != "awaiting_plan_approval"
+            or not self._selected_option_is_controlled_voice_diagnostic(session)
+        ):
+            return None
+        result = self._start_voice_diagnostic_session()
+        session.last_result = str(result)
+        session.touch(stage="diagnostic_running")
+        store.save(session)
+        return str(result)
+
     def _start_voice_diagnostic_session(self) -> str:
         from artmach_assistant.core.voice_diagnostic_session import (
             VoiceDiagnosticSession,
@@ -6328,7 +6394,15 @@ class AssistantEngine:
         result = session.finish(store.recent(limit=2000))
         self._active_voice_diagnostic = None
         self._last_voice_diagnostic_result = result
-        return result.render()
+        rendered = result.render()
+        problem_store = getattr(self, "collaborative_problems", None)
+        if problem_store is not None:
+            problem_session = problem_store.load()
+            if problem_session is not None and problem_session.stage == "diagnostic_running":
+                problem_session.last_result = rendered
+                problem_session.touch(stage="discussing")
+                problem_store.save(problem_session)
+        return rendered
 
     def _voice_diagnostic_request(self, text: str) -> str | None:
         normalized = normalize_text(str(text or ""))
@@ -6495,6 +6569,12 @@ class AssistantEngine:
                 return self._collaborative_plan_response(session)
 
             if session.stage == "awaiting_plan_approval":
+                if self._selected_option_is_controlled_voice_diagnostic(session):
+                    result = self._start_voice_diagnostic_session()
+                    session.last_result = str(result)
+                    session.touch(stage="diagnostic_running")
+                    self.collaborative_problems.save(session)
+                    return str(result)
                 paths = tuple(session.selected_option().affected_paths if session.selected_option() else ()) or session.candidate_paths
                 if not paths:
                     return (
@@ -9143,6 +9223,10 @@ class AssistantEngine:
             "uctan uca kabul raporu",
         }:
             return self.latest_end_to_end_acceptance_report()
+        voice_diagnostic_follow_up = self._active_voice_diagnostic_plan_request(text)
+        if voice_diagnostic_follow_up is not None:
+            return voice_diagnostic_follow_up
+
         # A pending own-code plan owns short, generic approval phrases such as
         # "Onaylıyorum".  The generic agent-tool bridge also accepts those
         # phrases, but when no tool task exists it would consume the command
