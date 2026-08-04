@@ -1915,6 +1915,11 @@ class AssistantEngine:
                 "Test dosyaları yalnızca hatanın beklenen davranışını anlamak için bağlamdır. "
                 "tests/ altındaki dosyaları, test_*.py dosyalarını ve test beklentilerini değiştirme. "
                 "Yalnızca hatanın gerçek nedenini oluşturan üretim kaynak kodunu düzelt."
+                "\n\nPRIVATE YARDIMCI METOT SOZLESMESI:\n"
+                "Onayli sembolu duzeltmek icin yeni bir private yardimci metot "
+                "eklersen, ayni taslakta onayli sembolu de degistir ve yardimciyi "
+                "dogrudan self.<yardimci>(...) biciminde cagir. Cagirilmayan, "
+                "bagimsiz veya baska sinifa eklenen yardimci metot reddedilir."
             )
         proposal = self._prepare_deterministic_own_code_refactor(raw_instruction)
         if proposal is None:
@@ -3729,6 +3734,26 @@ class AssistantEngine:
             for word in normalized.split()
         ):
             return self._self_repair_status(session)
+
+        if (
+            self._self_repair_apply_intent(normalized)
+            and session.state != "proposal_ready"
+        ):
+            state_names = {
+                "planned": "taslak henuz hazirlanmadi",
+                "generating": "taslak halen hazirlaniyor",
+                "proposal_failed": "guvenli taslak uretilemedi",
+                "applying": "uygulama zaten devam ediyor",
+            }
+            state_detail = state_names.get(
+                session.state,
+                f"onarim durumu {session.state}",
+            )
+            return (
+                f"{session.plan_id} icin uygulanabilir bekleyen taslak yok; "
+                f"{state_detail}. Hicbir dosya degistirilmedi. "
+                "Basarisiz bir taslagi uygulanmis gibi raporlamayacagim."
+            )
 
         if session.state == "planned" and self._self_repair_start_intent(normalized):
             return self._prepare_active_self_repair_proposal(session)
