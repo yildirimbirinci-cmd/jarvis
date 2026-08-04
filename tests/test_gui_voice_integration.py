@@ -477,3 +477,25 @@ def test_current_tts_completion_finishes_only_its_own_turn(tmp_path) -> None:
     assert window.engine.conversation_runtime.phase == ConversationPhase.COMPLETED
     assert window._active_speech_session_id == ""
     assert window.engine.voice.speak_calls[-1]["kwargs"]["speech_session_id"] == session
+
+
+def test_tts_worker_starts_before_answer_barge_in_is_armed(tmp_path) -> None:
+    window, _cls = _window(tmp_path)
+    window.voice_command_pending = True
+    turn_id = window._submit_conversation_turn("özelliklerini anlat", source="voice")
+    response_worker = window.worker
+
+    response_worker.succeed()
+
+    tts_worker = window.tts_worker
+    assert tts_worker is not None and tts_worker.isRunning() is True
+    # The thinking listener may still be present, but the answer listener must
+    # not seize the microphone before the output worker owns playback.
+    assert window._barge_source != "answer"
+    callbacks = [callback for delay, callback in _Timer.scheduled if delay == 700]
+    assert callbacks
+
+    callbacks[-1]()
+
+    assert window._barge_source == "answer"
+    assert window._barge_turn_id == turn_id

@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from pathlib import Path
 
@@ -16,18 +16,16 @@ except ImportError as exc:  # Linux CI image may not provide Qt's libEGL.
 
 class _FastStopVoice:
     def __init__(self) -> None:
-        self.capture_kwargs: dict[str, object] = {}
-        self.capture_device = None
-        self.capture_calls = 0
-        self.owner_threshold = 0.0
+        self.listen_kwargs: dict[str, object] = {}
+        self.listen_seconds = 0.0
 
     def has_owner_voice_profile(self) -> bool:
         return True
 
-    def record_utterance_wav(self, device_index, **kwargs) -> None:
-        self.capture_calls += 1
-        self.capture_device = device_index
-        self.capture_kwargs = dict(kwargs)
+    def record_utterance_wav(self, _device, *, max_seconds, **kwargs):
+        self.listen_seconds = float(max_seconds)
+        self.listen_kwargs = dict(kwargs)
+        return Path("barge-in.wav")
 
     def verify_owner_voice(self, *, threshold: float):
         self.owner_threshold = threshold
@@ -49,13 +47,11 @@ def test_barge_in_uses_short_dedicated_capture_profile() -> None:
     worker.run()
 
     assert interruptions == ["owner:answer"]
-    assert voice.capture_calls == 1
-    assert voice.capture_kwargs["max_seconds"] == 1.20
-    assert voice.capture_kwargs["wait_for_speech_seconds"] == 0.35
-    assert voice.capture_kwargs["silence_stop_seconds"] == 0.30
-    assert voice.capture_kwargs["min_capture_seconds"] == 0.30
-    assert "wake_mode" not in voice.capture_kwargs
-    assert callable(voice.capture_kwargs["cancel_check"])
+    assert voice.listen_seconds == 1.20
+    assert voice.listen_kwargs["wait_for_speech_seconds"] == 0.35
+    assert voice.listen_kwargs["silence_stop_seconds"] == 0.30
+    assert voice.listen_kwargs["min_capture_seconds"] == 0.30
+    assert "wake_mode" not in voice.listen_kwargs
     assert voice.owner_threshold == 0.82
 
 
@@ -71,20 +67,17 @@ def test_barge_in_preserves_calibrated_owner_threshold_below_082() -> None:
 
     worker.run()
 
-    assert voice.capture_calls == 1
     assert voice.owner_threshold == 0.73
 
 
-class _NoWhisperVoice(_FastStopVoice):
-    def listen_utterance(self, *_args, **_kwargs) -> str:
-        raise AssertionError("barge-in capture must not invoke Whisper")
-
-    def listen_for_local_stop(self, *_args, **_kwargs):
-        raise AssertionError("capture-only barge-in must not use the old stop-profile path")
-
-
-def test_barge_in_interrupts_without_whisper_or_stop_word_profile() -> None:
-    voice = _NoWhisperVoice()
+def test_owner_barge_in_needs_neither_stop_profile_nor_whisper() -> None:
+    voice = _FastStopVoice()
+    voice.has_stop_word_profile = lambda: (_ for _ in ()).throw(
+        AssertionError("barge-in must not require a DUR profile")
+    )
+    voice.listen_utterance = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+        AssertionError("barge-in must not wait for Whisper")
+    )
     worker = BargeInWorker(
         voice,
         None,
@@ -98,7 +91,7 @@ def test_barge_in_interrupts_without_whisper_or_stop_word_profile() -> None:
     worker.run()
 
     assert interruptions == ["owner:answer"]
-    assert voice.capture_calls == 1
+    assert voice.listen_seconds == 1.20
     assert voice.owner_threshold == 0.73
 
 
@@ -107,3 +100,40 @@ def test_answer_tts_worker_is_bound_to_the_armed_speech_session() -> None:
 
     assert "speech_session_id = self.engine.voice.begin_speech_session()" in source
     assert "speech_session_id=speech_session_id" in source
+
+class _SilenceThenOwnerVoice(_FastStopVoice):
+    def __init__(self) -> None:
+        super().__init__()
+        self.capture_calls = 0
+
+    def record_utterance_wav(self, _device, *, max_seconds, **kwargs):
+        self.capture_calls += 1
+        self.listen_seconds = float(max_seconds)
+        self.listen_kwargs = dict(kwargs)
+        if self.capture_calls <= 2:
+            raise RuntimeError(
+                "Konuşma algılanamadı; wake word bekleme süresi doldu."
+            )
+        return Path("barge-in.wav")
+
+
+def test_barge_in_treats_silence_as_idle_not_device_failure() -> None:
+    voice = _SilenceThenOwnerVoice()
+    worker = BargeInWorker(
+        voice,
+        None,
+        0.73,
+        ["dur"],
+        "answer",
+    )
+    statuses: list[str] = []
+    interruptions: list[str] = []
+    worker.status.connect(statuses.append)
+    worker.interrupted.connect(interruptions.append)
+
+    worker.run()
+
+    assert voice.capture_calls == 3
+    assert interruptions == ["owner:answer"]
+    assert not any("üç" in row.casefold() and "hata" in row.casefold() for row in statuses)
+    assert not any("kesme sesi alınamadı" in row.casefold() for row in statuses)

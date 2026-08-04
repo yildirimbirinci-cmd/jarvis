@@ -775,11 +775,6 @@ def install_main_window_voice_integration(
                         spoken_text
                     )
                     self._tts_guard_until = time.monotonic() + 120.0
-                    self._start_barge_in(
-                        "answer",
-                        spoken_text,
-                        turn_id=active_turn,
-                    )
                     turn_token = (
                         runtime.token_for(active_turn)
                         if runtime is not None
@@ -826,7 +821,31 @@ def install_main_window_voice_integration(
                             active_turn,
                             session_id,
                         )
+                    # Give Piper/output playback ownership first. Starting a
+                    # microphone capture before the output stream could starve
+                    # PortAudio on some Windows headset drivers and leave the
+                    # reply visible but silent for minutes.
                     tts_worker.start()
+
+                    def arm_answer_barge_in(
+                        tid: str = active_turn,
+                        sid: str = session_id,
+                        row=tts_worker,
+                        reference: str = spoken_text,
+                    ) -> None:
+                        if self.tts_worker is not row or not row.isRunning():
+                            return
+                        if self._active_speech_session_id != sid:
+                            return
+                        if not coordinator.is_current(tid):
+                            return
+                        self._start_barge_in(
+                            "answer",
+                            reference,
+                            turn_id=tid,
+                        )
+
+                    timer_cls.singleShot(700, arm_answer_barge_in)
             if should_exit and not started_tts:
                 timer_cls.singleShot(0, self.shutdown_application)
             elif not started_tts:

@@ -189,13 +189,26 @@ class BargeInWorker(QThread):
             except InterruptedError:
                 return
             except Exception as exc:
+                message = str(exc).casefold()
+                no_speech = (
+                    "konuşma algılanamadı" in message
+                    or "bekleme süresi doldu" in message
+                    or "no speech" in message
+                    or "timed out waiting for speech" in message
+                )
+                if no_speech:
+                    # Silence is the expected state while Jarvis is speaking.
+                    # It must not poison the failure counter or stop barge-in.
+                    consecutive_failures = 0
+                    self.msleep(120)
+                    continue
                 consecutive_failures += 1
                 if consecutive_failures == 1:
                     self.status.emit(f"Kesme sesi alınamadı: {exc}")
                 if consecutive_failures >= 3:
                     self.status.emit(
-                        "Diyalog kesme dinleyicisi art arda üç hata nedeniyle "
-                        "güvenli biçimde durduruldu; ana konuşma akışı devam ediyor."
+                        "Diyalog kesme dinleyicisi art arda üç gerçek aygıt hatası "
+                        "nedeniyle güvenli biçimde durduruldu; ana konuşma akışı devam ediyor."
                     )
                     return
                 self.msleep(250)
@@ -1241,6 +1254,12 @@ class MainWindow(QMainWindow):
             self.refresh_output_devices()
             self.refresh_voices()
             self.refresh_piper_models()
+            self._output_route_sync_timer = QTimer(self)
+            self._output_route_sync_timer.setInterval(250)
+            self._output_route_sync_timer.timeout.connect(
+                self._sync_output_combo_to_active_route
+            )
+            self._output_route_sync_timer.start()
         self._update_tts_controls()
         # Arayüz ve ses aygıtları hazır olduktan sonra Jarvis otomatik başlar.
         if not self.smoke_test:
@@ -1794,20 +1813,49 @@ class MainWindow(QMainWindow):
             outputs = self.engine.voice.output_devices()
             default_index = self.engine.voice.default_output_index()
             configured = int(self.config.voice_output_index)
+            self.output_combo.blockSignals(True)
             self.output_combo.clear()
             self.output_combo.addItem("Windows varsayılan ses çıkışı", -1)
             selected_row = 0
             for row, output in enumerate(outputs, start=1):
                 suffix = " (Windows varsayılanı)" if output.index == default_index else ""
                 self.output_combo.addItem(output.label + suffix, output.index)
-                if output.index == configured or (configured < 0 and output.index == default_index):
+                if output.index == configured:
                     selected_row = row
             self.output_combo.setCurrentIndex(selected_row)
+            self.output_combo.blockSignals(False)
             self.voice_log(f"Ses çıkışları yüklendi: {len(outputs)} aygıt bulundu.")
         except Exception as exc:
+            self.output_combo.blockSignals(True)
             self.output_combo.clear()
             self.output_combo.addItem("Windows varsayılan ses çıkışı", -1)
+            self.output_combo.blockSignals(False)
             self.voice_log(f"UYARI: Ses çıkışları listelenemedi: {exc}")
+
+    def _sync_output_combo_to_active_route(self) -> None:
+        """Reflect Jarvis' app-local TTS route without changing Windows default."""
+        if not hasattr(self, "output_combo"):
+            return
+        try:
+            configured = int(getattr(self.config, "voice_output_index", -1))
+        except (TypeError, ValueError, OverflowError):
+            configured = -1
+        current = self.output_combo.currentData()
+        try:
+            current_index = int(current) if current is not None else -1
+        except (TypeError, ValueError, OverflowError):
+            current_index = -1
+        if current_index == configured:
+            return
+        row = self.output_combo.findData(configured)
+        if row < 0 and configured >= 0:
+            self.refresh_output_devices()
+            row = self.output_combo.findData(configured)
+        if row < 0:
+            row = 0
+        self.output_combo.blockSignals(True)
+        self.output_combo.setCurrentIndex(row)
+        self.output_combo.blockSignals(False)
 
     def refresh_voices(self) -> None:
         try:
@@ -2516,10 +2564,9 @@ class MainWindow(QMainWindow):
                 # "dur"/"sus" can cancel in that otherwise silent gap.
                 speech_session_id = self.engine.voice.begin_speech_session()
                 # Normal Jarvis replies use a separate worker from the wake
-                # reply. Start the learned interruption listener here as
-                # well; otherwise it existed only during "Dinliyorum" and a
-                # user could never cut a longer answer short.
-                self._start_barge_in("answer", spoken_text)
+                # reply. Give the output worker ownership before opening the
+                # microphone for interruption capture; some Windows headset
+                # drivers otherwise starve TTS playback.
                 self.tts_worker = Worker(lambda: self.engine.voice.speak(
                     spoken_text, self.config.voice_name, self.config.voice_rate,
                     self.config.voice_volume, self.config.voice_tts_backend,
@@ -2530,7 +2577,15 @@ class MainWindow(QMainWindow):
                 ))
                 self.tts_worker.finished_value.connect(self._on_tts_reply_finished)
                 self.tts_worker.failed.connect(self._on_tts_reply_failed)
-                self.tts_worker.start()
+                worker = self.tts_worker
+                worker.start()
+
+                def arm_answer_barge_in() -> None:
+                    if self.tts_worker is not worker or not worker.isRunning():
+                        return
+                    self._start_barge_in("answer", spoken_text)
+
+                QTimer.singleShot(700, arm_answer_barge_in)
             # Hoparlör ve sürücü tamponlarının mikrofona geri beslenmesini önlemek için
             # konuşma bittikten sonra kısa ama güvenli bir sessizlik penceresi bırak.
             if should_exit and self.config.wake_auto_speak and not is_silent:
