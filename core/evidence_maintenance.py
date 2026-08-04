@@ -5,6 +5,7 @@ from typing import Iterable
 
 from artmach_assistant.core.code_review import CodeReviewIssue
 from artmach_assistant.core.runtime_observability import RuntimeFinding
+from artmach_assistant.core.evidence_lifecycle import ACTIVE, NEEDS_RETEST, SourceLifecycleResolver
 
 
 _CLASS_ORDER = {"A": 0, "B": 1, "C": 2}
@@ -20,6 +21,7 @@ class EvidenceMaintenanceFinding:
     symbol: str = ""
     evidence: str = ""
     repair_candidate: bool = False
+    lifecycle: str = ACTIVE
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,6 +40,20 @@ class EvidenceMaintenanceReport:
         }
 
     @property
+    def lifecycle_counts(self) -> dict[str, int]:
+        return {
+            key: sum(
+                1
+                for finding in self.findings
+                if finding.lifecycle == key
+            )
+            for key in (
+                ACTIVE,
+                NEEDS_RETEST,
+            )
+        }
+
+    @property
     def repair_candidate_count(self) -> int:
         return sum(
             1
@@ -47,6 +63,7 @@ class EvidenceMaintenanceReport:
 
     def report(self, *, limit: int = 12) -> str:
         counts = self.class_counts
+        lifecycle = self.lifecycle_counts
         rows = [
             "KANITA DAYALI SISTEM SAGLIK RAPORU",
             (
@@ -55,15 +72,22 @@ class EvidenceMaintenanceReport:
                 f"C-statik inceleme ipucu: {counts['C']} | "
                 f"onarim adayi: {self.repair_candidate_count}"
             ),
+            (
+                f"Aktif runtime bulgusu: {lifecycle[ACTIVE]} | "
+                f"yeniden test edilmeli: "
+                f"{lifecycle[NEEDS_RETEST]}"
+            ),
         ]
 
         for finding in self.findings[:max(1, int(limit))]:
             location = finding.path or "dosya baglantisi yok"
             if finding.symbol:
                 location += f" - {finding.symbol}"
+
             rows.append(
                 f"[{finding.classification}] Risk {finding.score} - "
                 f"{finding.title}\n"
+                f"Durum: {finding.lifecycle}\n"
                 f"Konum: {location}\n"
                 f"Kanit: {finding.evidence or finding.source}\n"
                 f"Otomatik onarim adayi: "
@@ -302,9 +326,16 @@ def _merge_runtime_findings(
 def build_evidence_maintenance_report(
     static_issues: Iterable[CodeReviewIssue],
     runtime_findings: Iterable[RuntimeFinding],
+    *,
+    source_root: str | Path | None = None,
 ) -> EvidenceMaintenanceReport:
     runtime_rows = _merge_runtime_findings(
         runtime_findings
+    )
+    lifecycle_resolver = (
+        SourceLifecycleResolver(source_root)
+        if source_root is not None
+        else None
     )
 
     runtime_symbols_by_path: dict[
@@ -339,6 +370,11 @@ def build_evidence_maintenance_report(
         classification = _runtime_classification(
             finding
         )
+        lifecycle = (
+            lifecycle_resolver.classify(finding)
+            if lifecycle_resolver is not None
+            else ACTIVE
+        )
         path = (
             finding.affected_paths[0]
             if finding.affected_paths
@@ -350,7 +386,8 @@ def build_evidence_maintenance_report(
             else ""
         )
         repair_candidate = bool(
-            classification in {"A", "B"}
+            lifecycle == ACTIVE
+            and classification in {"A", "B"}
             and finding.affected_paths
             and finding.affected_symbols
             and finding.category not in {
@@ -374,6 +411,7 @@ def build_evidence_maintenance_report(
                     f"son olay={finding.last_seen}"
                 ),
                 repair_candidate=repair_candidate,
+                lifecycle=lifecycle,
             )
         )
 
@@ -410,14 +448,14 @@ def build_evidence_maintenance_report(
                 repair_candidate=(
                     classification == "A"
                 ),
+                lifecycle="STATIC",
             )
         )
 
     findings.sort(
         key=lambda item: (
-            _CLASS_ORDER[
-                item.classification
-            ],
+            0 if item.lifecycle == ACTIVE else 1,
+            _CLASS_ORDER[item.classification],
             -item.score,
             item.path.casefold(),
             item.title.casefold(),

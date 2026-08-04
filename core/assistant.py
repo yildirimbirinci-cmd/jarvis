@@ -5600,6 +5600,7 @@ class AssistantEngine:
         evidence_report = build_evidence_maintenance_report(
             static_analysis.issues,
             runtime_findings,
+            source_root=own_root,
         )
 
         if static_analysis.issues or runtime_findings:
