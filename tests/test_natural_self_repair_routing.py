@@ -159,3 +159,72 @@ def test_latest_runtime_finding_prefers_repairable_failure_over_newer_warning() 
 
     assert selected is not None
     assert selected.finding_id == repairable_failure.finding_id
+
+def test_latest_runtime_finding_prefers_source_target_over_untargeted_repeat() -> None:
+    from pathlib import Path
+    from artmach_assistant.core.runtime_observability import (
+        RuntimeFinding,
+        RuntimeHealthReport,
+    )
+
+    engine = _engine_without_active_repair()
+
+    untargeted_repeat = RuntimeFinding(
+        finding_id="RUN-CCCCCCCCCC",
+        severity="critical",
+        category="repeated_runtime_failure",
+        title="Tekrarlanan fakat hedeflenemeyen hata",
+        explanation="Hata tekrarlandi ancak kaynak baglantisi yok.",
+        confidence=0.99,
+        occurrence_count=8,
+        last_seen="2026-08-04T12:00:00+00:00",
+        workspace="C:/Users/yildi/Desktop/artmach_assistant",
+        scope="own_code",
+        affected_paths=(),
+        affected_symbols=(),
+        evidence=(),
+        recommendation="Kaynak baglantisini bul.",
+        acceptance_criteria=("Hata tekrar olusmamali.",),
+        research_query="",
+    )
+    targeted_failure = RuntimeFinding(
+        finding_id="RUN-DDDDDDDDDD",
+        severity="high",
+        category="runtime_failure",
+        title="Hedeflenebilir VoiceService hatasi",
+        explanation="Dosya ve sembol baglantisi dogrulandi.",
+        confidence=0.90,
+        occurrence_count=1,
+        last_seen="2026-08-04T11:00:00+00:00",
+        workspace="C:/Users/yildi/Desktop/artmach_assistant",
+        scope="own_code",
+        affected_paths=("core/voice_service.py",),
+        affected_symbols=("VoiceService.speech_turn",),
+        evidence=(),
+        recommendation="Hedefli kaynak duzeltmesi hazirla.",
+        acceptance_criteria=("Hata tekrar olusmamali.",),
+        research_query="",
+    )
+    report = RuntimeHealthReport(
+        generated_at="2026-08-04T12:01:00+00:00",
+        workspace="C:/Users/yildi/Desktop/artmach_assistant",
+        lookback_hours=168,
+        event_count=9,
+        completed_count=0,
+        failed_count=9,
+        cancelled_count=0,
+        warning_count=0,
+        findings=(untargeted_repeat, targeted_failure),
+    )
+    engine._last_runtime_health_report = report
+    engine._runtime_health_service = lambda: SimpleNamespace(
+        analyze=lambda **_kwargs: report
+    )
+    engine._development_root = lambda *, own_code: Path(
+        "C:/Users/yildi/Desktop/artmach_assistant"
+    )
+
+    selected = AssistantEngine._latest_runtime_finding(engine)
+
+    assert selected is not None
+    assert selected.finding_id == targeted_failure.finding_id

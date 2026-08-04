@@ -3831,8 +3831,8 @@ class AssistantEngine:
                 item.affected_paths and item.affected_symbols
             )
             return (
-                category_priority.get(item.category, 0),
                 int(has_source_target),
+                category_priority.get(item.category, 0),
                 severity_priority.get(item.severity, 0),
                 float(item.confidence),
                 int(item.occurrence_count),
