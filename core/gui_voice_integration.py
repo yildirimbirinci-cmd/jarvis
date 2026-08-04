@@ -745,6 +745,17 @@ def install_main_window_voice_integration(
             )
             self.chat.appendPlainText(f"JARVIS: {self.last_answer}\n")
             self.voice_log(f"JARVIS YANITI: {self.last_answer}")
+            take_notice = getattr(
+                self.engine, "take_pending_maintenance_notice", None
+            )
+            maintenance_notice = (
+                str(take_notice() or "").strip()
+                if callable(take_notice)
+                else ""
+            )
+            if maintenance_notice:
+                self.chat.appendPlainText(f"{maintenance_notice}\n")
+                self.voice_log(f"BAKIM BİLDİRİMİ: {maintenance_notice}")
         self.statusBar().showMessage(
             "Kapatılıyor…"
             if should_exit

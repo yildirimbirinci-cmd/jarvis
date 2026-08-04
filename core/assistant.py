@@ -359,6 +359,7 @@ class AssistantEngine:
         self.conversation_runtime = ConversationRuntime()
         self._interaction_context = threading.local()
         self._dialogue_runtime_managed = False
+        self._pending_maintenance_notice = ""
         chat_selection = self.model_roles.chat
         self.dialogue = LocalDialogueManager(
             chat_selection.model,
@@ -5607,6 +5608,12 @@ class AssistantEngine:
         # disagree.
         return re.sub(r"\s+", " ", spoken).strip()
 
+    def take_pending_maintenance_notice(self) -> str:
+        """Return and clear the latest operational maintenance notification."""
+        notice = str(getattr(self, "_pending_maintenance_notice", "") or "").strip()
+        self._pending_maintenance_notice = ""
+        return notice
+
     def response_packet(self, visible: str, *, turn_id: str | None = None):
         runtime = getattr(self, "conversation_runtime", None)
         if runtime is None:
@@ -9621,9 +9628,11 @@ class AssistantEngine:
                 return final_answer
             if runtime is not None:
                 runtime.raise_if_cancelled(turn_id)
+            # Maintenance findings are operational notifications, not part of
+            # the conversational answer. Keep them pending for the GUI/log layer
+            # so they never enter the response packet or TTS text.
             maintenance_note = self._automatic_maintenance_note()
-            if maintenance_note:
-                final_answer = f"{final_answer}\n\n{maintenance_note}"
+            self._pending_maintenance_notice = maintenance_note or ""
             if runtime is not None:
                 runtime.raise_if_cancelled(turn_id)
                 runtime.response_ready(

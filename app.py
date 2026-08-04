@@ -165,7 +165,11 @@ class BargeInWorker(QThread):
         return probable_tts_echo(heard, self.reference_text)
 
     def run(self) -> None:
-        self.status.emit("Diyalog kesme dinleyicisi hazır; 'dur' diyebilirsin.")
+        # The thinking listener is short-lived and is replaced before TTS.
+        # Announce only the answer-phase listener so one turn produces one
+        # user-visible readiness message.
+        if self.source == "answer":
+            self.status.emit("Diyalog kesme dinleyicisi hazır; 'dur' diyebilirsin.")
         consecutive_failures = 0
         while not self.isInterruptionRequested():
             if not self.voice.has_owner_voice_profile():
@@ -2543,6 +2547,17 @@ class MainWindow(QMainWindow):
             self.last_answer = "Tamam, kapanıyorum." if should_exit else packet.visible_text
             self.chat.appendPlainText(f"JARVIS: {self.last_answer}\n")
             self.voice_log(f"JARVIS YANITI: {self.last_answer}")
+            take_notice = getattr(
+                self.engine, "take_pending_maintenance_notice", None
+            )
+            maintenance_notice = (
+                str(take_notice() or "").strip()
+                if callable(take_notice)
+                else ""
+            )
+            if maintenance_notice:
+                self.chat.appendPlainText(f"{maintenance_notice}\n")
+                self.voice_log(f"BAKIM BİLDİRİMİ: {maintenance_notice}")
         self.statusBar().showMessage("Kapatılıyor…" if should_exit else ("Beklemede" if is_idle else "Hazır"))
         if self.voice_command_pending:
             self.voice_command_pending = False

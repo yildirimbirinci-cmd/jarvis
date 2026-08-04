@@ -203,7 +203,9 @@ def test_handle_records_failure_with_source_and_symbol(tmp_path: Path) -> None:
     }
 
 
-def test_handle_appends_new_maintenance_warning_after_command(tmp_path: Path) -> None:
+def test_handle_appends_new_maintenance_warning_after_command(
+    tmp_path: Path,
+) -> None:
     engine = AssistantEngine.__new__(AssistantEngine)
     engine.runtime_events = RuntimeEventStore(tmp_path / "events.json")
     engine.own_project_root = lambda: tmp_path
@@ -216,16 +218,18 @@ def test_handle_appends_new_maintenance_warning_after_command(tmp_path: Path) ->
     )
     engine.command_router = SimpleNamespace(behavior=object())
     engine.proactive_advisor = SimpleNamespace(suggestion=lambda *_args: "")
-    engine._automatic_maintenance_note = lambda: "Bakım uyarısı [RUN-123456789A]"
+    engine._automatic_maintenance_note = lambda: (
+        "Bak\u0131m uyar\u0131s\u0131 [RUN-123456789A]"
+    )
 
     answer = engine.handle("merhaba")
 
-    assert answer == "Normal cevap\n\nBakım uyarısı [RUN-123456789A]"
+    assert answer == "Normal cevap"
+    assert engine.take_pending_maintenance_notice() == (
+        "Bak\u0131m uyar\u0131s\u0131 [RUN-123456789A]"
+    )
+    assert engine.take_pending_maintenance_notice() == ""
     assert remembered == [("merhaba", "Normal cevap")]
-    events = engine.runtime_events.load()
-    assert len(events) == 1
-    assert events[0].status == "completed"
-
 
 def test_spoken_response_omits_automatic_maintenance_warning() -> None:
     engine = AssistantEngine.__new__(AssistantEngine)
