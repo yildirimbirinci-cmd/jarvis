@@ -1755,10 +1755,7 @@ class VoiceService:
             repeated_run = repeated_run + 1 if current == previous else 1
             max_repeated_run = max(max_repeated_run, repeated_run)
         token_counts = {token: tokens.count(token) for token in set(tokens)}
-        if (
-            not wake_match
-            and (max_repeated_run >= 4 or any(count >= 7 for count in token_counts.values()))
-        ):
+        if self._check_repeated_run(tokens) >= 4:
             raise RuntimeError("Ses kaydı tekrar eden gürültü olarak algılandı; komut işlenmedi.")
         no_speech_values = [float(getattr(segment, "no_speech_prob", 0.0) or 0.0) for segment in segments]
         if (
@@ -3173,3 +3170,11 @@ $s.Dispose()
                     self._output_stream = None
                     self._piper_process = None
                     self._windows_tts_process = None
+
+    def _check_repeated_run(self, tokens):
+        repeated_run = 1
+        max_repeated_run = 1
+        for previous, current in zip(tokens, tokens[1:]):
+            repeated_run = repeated_run + 1 if current == previous else 1
+            max_repeated_run = max(max_repeated_run, repeated_run)
+        return max_repeated_run
