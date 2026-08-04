@@ -367,6 +367,11 @@ class WakeWordWorker(QThread):
             aliases.update({
                 "jarvis", "carvis", "cervis", "jervis", "jarviz", "carviz",
                 "cerviz", "jarves", "charvis", "cerwis", "carves", "jarwis",
+                # Turkish Whisper can render the owner's short "Jarvis"
+                # pronunciation as "çarif". Normalization turns that into
+                # "carif"; keep these narrowly scoped wake-only spellings
+                # explicit instead of weakening the global similarity gate.
+                "carif", "jarif", "cerif",
             })
         return tuple(sorted(aliases, key=len, reverse=True))
 
