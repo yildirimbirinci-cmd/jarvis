@@ -3620,9 +3620,42 @@ class AssistantEngine:
         normalized = self.command_key(text)
         run_id = extract_self_repair_run_id(text)
         plan_id = extract_self_repair_plan_id(text)
+        words = normalized.split()
         fix_intent = any(
             word.startswith(("duzelt", "onar", "iyilestir", "gelistir"))
-            for word in normalized.split()
+            for word in words
+        )
+        diagnostic_intent = any(
+            word.startswith(("teshis", "incele", "bul", "neden"))
+            for word in words
+        )
+        own_code_subject = any(
+            marker in normalized
+            for marker in (
+                "kendi kod",
+                "kendi kaynak",
+                "senin kod",
+                "jarvis kod",
+                "kodundaki",
+                "kaynak kodundaki",
+            )
+        )
+        natural_self_repair_request = (
+            own_code_subject
+            and fix_intent
+            and (
+                diagnostic_intent
+                or any(
+                    marker in normalized
+                    for marker in (
+                        "bu sorun",
+                        "bu hata",
+                        "hatani",
+                        "arizani",
+                        "problemi",
+                    )
+                )
+            )
         )
 
         if run_id:
@@ -3656,9 +3689,20 @@ class AssistantEngine:
         )
         if session is None:
             if repair_subject or plan_id:
-                return "Etkin bir hedefli kendi-kod onarım oturumu yok."
+                return "Etkin bir hedefli kendi-kod onarim oturumu yok."
+            if natural_self_repair_request:
+                finding = self._latest_runtime_finding()
+                if finding is None:
+                    return (
+                        "Kendi kodumdaki sorunu onarmak icin henuz "
+                        "dogrulanabilir bir calisma zamani bulgusu yok. "
+                        "Once teshis kaniti olusturmaliyim; kanit olmadan "
+                        "tahmine dayali kod degisikligi yapmayacagim."
+                    )
+                return self.prepare_runtime_improvement_implementation(
+                    finding.finding_id
+                )
             return None
-
         if plan_id and plan_id != session.plan_id:
             return (
                 f"{plan_id} etkin plan değil. Etkin hedefli plan: {session.plan_id}. "
