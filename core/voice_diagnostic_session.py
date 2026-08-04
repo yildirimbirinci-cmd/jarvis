@@ -77,6 +77,124 @@ class VoiceDiagnosticResult:
         )
         return "\n".join(rows)
 
+    def build_low_risk_plan(self) -> str:
+        stage_rows: list[tuple[float, str, float, int]] = []
+
+        for stage, values in self.stage_durations.items():
+            clean = tuple(float(value) for value in values)
+            if not clean:
+                continue
+            stage_rows.append(
+                (
+                    float(median(clean)),
+                    str(stage),
+                    float(max(clean)),
+                    len(clean),
+                )
+            )
+
+        stage_rows.sort(reverse=True)
+        top = stage_rows[:4]
+
+        rows = [
+            "Kontrollü ses tanılama sonucuna dayalı "
+            "en düşük riskli plan:",
+            f"- Kanıt oturumu: {self.session_id}",
+            f"- Yalnız bu oturumdaki olay sayısı: "
+            f"{self.event_count}",
+        ]
+
+        if top:
+            rows.append("- En yavaş güncel aşamalar:")
+            for median_ms, stage, maximum_ms, count in top:
+                rows.append(
+                    f"  - {stage}: ortanca {median_ms:.0f} ms; "
+                    f"en yüksek {maximum_ms:.0f} ms; "
+                    f"örnek {count}"
+                )
+        else:
+            rows.append(
+                "- Plan üretmek için yeterli aşama "
+                "süresi oluşmadı."
+            )
+
+        tts_focus = any(
+            marker in stage.casefold()
+            for _, stage, _, _ in top
+            for marker in ("tts", "piper", "audio_output_playback")
+        )
+
+        if tts_focus:
+            rows.extend(
+                (
+                    "",
+                    "Güncel kök neden hipotezi:",
+                    "- Darboğaz TTS yönlendirme, Piper "
+                    "hazırlama/sentez veya oynatma zincirinde.",
+                    "- Mikrofon, wake, Bluetooth ve barge-in bu planın "
+                    "kapsamı dışında tutulacak.",
+                    "",
+                    "Ölçüm planı:",
+                    "1. VoiceService.speak içinde kuyruk bekleme, "
+                    "hazır ses önbelleği, Piper sentezi, "
+                    "ses akışı açma ve oynatma "
+                    "sürelerini ayrı olaylar olarak ölç.",
+                    "2. Davranışı değiştirmeden "
+                    "aynı VDG senaryosunu tekrar çalıştır.",
+                    "3. Yalnız en yavaş alt aşamaya hedefli "
+                    "düzeltme taslağı hazırla.",
+                    "",
+                    "Muhtemel dosya kapsamı:",
+                    "- core/voice_service.py",
+                    "- core/runtime_instrumentation.py",
+                    "- tests/test_voice_speech_sessions.py",
+                    "- tests/test_voice_diagnostic_session.py",
+                    "",
+                    "Beklenen kazanım:",
+                    "- TTS başlama gecikmesinin sentez, önbellek, "
+                    "oynatma veya iş parçacığı "
+                    "beklemesine kesin olarak bağlanması.",
+                    "",
+                    "Risk:",
+                    "- Düşük. İlk adım yalnız "
+                    "ölçüm ekler; ses davranışını "
+                    "değiştirmez.",
+                    "",
+                    "Odaklı test planı:",
+                    "- Alt aşama olaylarının tek TTS turuna "
+                    "doğru oturum kimliğiyle yazıldığını "
+                    "doğrula.",
+                    "- Hazır ses önbelleği ve normal Piper "
+                    "yollarını ayrı test et.",
+                    "- TTS iptali ve kapanış regresyonlarını "
+                    "çalıştır.",
+                    "- Tam pytest regresyonunu çalıştır.",
+                )
+            )
+        else:
+            rows.extend(
+                (
+                    "",
+                    "Plan:",
+                    "1. En yavaş iki aşamayı alt "
+                    "ölçümlere ayır.",
+                    "2. Davranış değişikliği yapmadan "
+                    "tanılamayı tekrar et.",
+                    "3. Yalnız yeni kanıtla doğrulanan "
+                    "aşamaya düzeltme taslağı hazırla.",
+                )
+            )
+
+        rows.extend(
+            (
+                "",
+                "Henüz hiçbir kaynak dosya değiştirilmedi.",
+                "Bu ölçüm planını uygulamamı "
+                "istiyorsan açıkça onay vermelisin.",
+            )
+        )
+        return "\n".join(rows)
+
 
 @dataclass(slots=True)
 class VoiceDiagnosticSession:

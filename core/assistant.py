@@ -6327,6 +6327,7 @@ class AssistantEngine:
 
         result = session.finish(store.recent(limit=2000))
         self._active_voice_diagnostic = None
+        self._last_voice_diagnostic_result = result
         return result.render()
 
     def _voice_diagnostic_request(self, text: str) -> str | None:
@@ -6340,6 +6341,34 @@ class AssistantEngine:
         )
         if any(marker in normalized for marker in finish_markers):
             return self._finish_voice_diagnostic_session()
+
+        plan_markers = (
+            "plan hazirla",
+            "duzeltme plani",
+            "olcum plani",
+            "en dusuk riskli",
+            "test plani",
+            "devam et",
+        )
+        last_result = getattr(
+            self,
+            "_last_voice_diagnostic_result",
+            None,
+        )
+        if (
+            last_result is not None
+            and any(marker in normalized for marker in plan_markers)
+            and any(marker in normalized for marker in (
+                "tts",
+                "piper",
+                "tanilama",
+                "gecikme",
+                "ses",
+                "plan",
+                "devam",
+            ))
+        ):
+            return last_result.build_low_risk_plan()
 
         start_markers = (
             "kontrollu tanilama",
