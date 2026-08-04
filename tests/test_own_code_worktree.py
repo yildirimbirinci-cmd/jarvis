@@ -82,3 +82,33 @@ def test_stale_proposal_is_rejected_inside_worktree(tmp_path: Path) -> None:
         OwnCodeWorktreeValidator(root).validate(stale, lambda _root: (True, ""))
 
     assert (root / "app.py").read_text(encoding="utf-8") == "VALUE = 1\n"
+
+def test_line_ending_difference_does_not_make_proposal_stale(
+    tmp_path: Path,
+) -> None:
+    root = _repo(tmp_path)
+    proposal = EditProposal(
+        "change value",
+        [
+            ProposedFileChange(
+                "app.py",
+                "test",
+                "VALUE = 1\r\n",
+                "VALUE = 2\r\n",
+                True,
+            )
+        ],
+    )
+
+    result = OwnCodeWorktreeValidator(root).validate(
+        proposal,
+        lambda worktree: (
+            (worktree / "app.py").read_text(encoding="utf-8")
+            == "VALUE = 2\n",
+            "line endings accepted",
+        ),
+    )
+
+    assert result.ok
+    assert result.output == "line endings accepted"
+    assert (root / "app.py").read_text(encoding="utf-8") == "VALUE = 1\n"

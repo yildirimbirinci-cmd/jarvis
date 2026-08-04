@@ -62,7 +62,15 @@ class OwnCodeWorktreeValidator:
             )
 
     @staticmethod
-    def _write_proposal(worktree: Path, proposal: EditProposal) -> None:
+    def _normalize_source_text(text: str) -> str:
+        return text.replace("\r\n", "\n").replace("\r", "\n")
+
+    @classmethod
+    def _write_proposal(
+        cls,
+        worktree: Path,
+        proposal: EditProposal,
+    ) -> None:
         for change in proposal.files:
             target = (worktree / change.path).resolve(strict=False)
             try:
@@ -72,8 +80,12 @@ class OwnCodeWorktreeValidator:
             exists = target.is_file()
             if exists != change.existed:
                 raise WorkspaceError(f"Worktree kaynak durumu taslakla eşleşmiyor: {change.path}")
-            if exists and target.read_text(encoding="utf-8") != change.old_content:
-                raise WorkspaceError(f"Worktree içeriği taslağın kaynak sürümüyle eşleşmiyor: {change.path}")
+            if exists:
+                worktree_content = target.read_text(encoding="utf-8")
+                if cls._normalize_source_text(
+                    worktree_content
+                ) != cls._normalize_source_text(change.old_content):
+                    raise WorkspaceError(f"Worktree içeriği taslağın kaynak sürümüyle eşleşmiyor: {change.path}")
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(change.new_content, encoding="utf-8", newline="")
 
