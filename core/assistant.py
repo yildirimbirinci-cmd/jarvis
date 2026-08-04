@@ -39,6 +39,7 @@ from artmach_assistant.core.agent_runner import AgentRunResult
 from artmach_assistant.core.snapshot_manager import SnapshotManager
 from artmach_assistant.core.code_review import CodeReviewService
 from artmach_assistant.core.evidence_maintenance import build_evidence_maintenance_report
+from artmach_assistant.core.evidence_retest import build_retest_plan
 from artmach_assistant.core.system_control import SystemControlService
 from artmach_assistant.core.voice_service import VoiceService
 from artmach_assistant.core.tts_output_routing import TtsOutputRouter
@@ -5615,9 +5616,18 @@ class AssistantEngine:
                 "Dogrulanabilir bir bakim bulgusu bulunamadi."
             )
 
+        retest_plan = build_retest_plan(
+            evidence_report.findings,
+            source_root=own_root,
+        )
+        if retest_plan.items:
+            report += "\n\n" + retest_plan.report()
+
         report += (
             "\n\nBu inceleme salt okunurdur. "
-            "Plan, patch veya dosya degisikligi olusturulmadi."
+            "Plan, patch veya dosya degisikligi olusturulmadi. "
+            "Yeniden dogrulama testleri calistirilmadi; "
+            "yalnizca test plani hazirlandi."
         )
 
         self._remember_action_context(
