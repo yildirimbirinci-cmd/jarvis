@@ -3155,6 +3155,16 @@ class AssistantEngine:
             if self.editor.pending is None:
                 return "Reddedilecek bekleyen bir kod değişikliği önerisi yok."
             return self.reject_pending_edit()
+        plan_to_draft_markers = (
+            "uygulanabilir bir kod degisikligi taslagi",
+            "kod degisikligi taslagina donustur",
+            "taslaga donustur",
+            "taslagina donustur",
+            "henuz kodu degistirme",
+            "once kodu degistirme",
+        )
+        if any(marker in normalized for marker in plan_to_draft_markers):
+            return None
         approval_stems = ("uygula", "onayla", "hayata", "devam")
         if any(word.startswith(approval_stems) for word in words):
             if self.editor.pending is not None:
