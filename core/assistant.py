@@ -3827,10 +3827,23 @@ class AssistantEngine:
         }
 
         def repair_priority(item: RuntimeFinding) -> tuple[object, ...]:
+            normalized_paths = tuple(
+                str(path).replace("\\", "/").casefold()
+                for path in item.affected_paths
+            )
             has_source_target = bool(
-                item.affected_paths and item.affected_symbols
+                normalized_paths and item.affected_symbols
+            )
+            has_production_target = bool(
+                item.affected_symbols
+                and any(
+                    not path.startswith("tests/")
+                    and "/tests/" not in path
+                    for path in normalized_paths
+                )
             )
             return (
+                int(has_production_target),
                 int(has_source_target),
                 category_priority.get(item.category, 0),
                 severity_priority.get(item.severity, 0),
