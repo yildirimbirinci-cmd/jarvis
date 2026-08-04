@@ -180,6 +180,27 @@ def _target_payload(proposal: object, targets: RepairTargets) -> dict[str, objec
     return {"summary": payload.get("summary", ""), "files": rows}
 
 
+
+def merge_approved_repair_targets(
+    targets: RepairTargets,
+    *,
+    approved_paths: tuple[str, ...] = (),
+    approved_symbols: tuple[str, ...] = (),
+) -> RepairTargets:
+    """Keep approved repair scope visible during validator retries."""
+    return RepairTargets(
+        paths=_unique(
+            (*approved_paths, *targets.paths),
+            limit=_MAX_TARGET_FILES,
+        ),
+        symbols=_unique(
+            (*approved_symbols, *targets.symbols),
+            limit=_MAX_TARGET_SYMBOLS,
+        ),
+        issue_codes=targets.issue_codes,
+        used_fallback=targets.used_fallback,
+    )
+
 def build_validation_repair_prompt(
     instruction: str,
     report: str,

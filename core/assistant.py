@@ -1996,11 +1996,28 @@ class AssistantEngine:
             if not symbol_scope.valid:
                 rejected_report = symbol_scope.report()
                 self.editor.reject()
+                extracted_symbol_targets = extract_repair_targets(
+                    rejected_report,
+                    proposal,
+                )
+                symbol_repair_targets = RepairTargets(
+                    paths=tuple(dict.fromkeys((
+                        *approved_path_rows,
+                        *extracted_symbol_targets.paths,
+                    ))),
+                    symbols=tuple(dict.fromkeys((
+                        *approved_symbol_rows,
+                        *extracted_symbol_targets.symbols,
+                    ))),
+                    issue_codes=extracted_symbol_targets.issue_codes,
+                    used_fallback=extracted_symbol_targets.used_fallback,
+                )
                 repaired = self._request_targeted_validation_repair(
                     raw_instruction,
                     proposal,
                     rejected_report,
                     stage="sembol kapsamı",
+                    targets=symbol_repair_targets,
                 )
                 if repaired is None:
                     self.own_code_history.record(
