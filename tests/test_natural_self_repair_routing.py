@@ -91,3 +91,71 @@ def test_natural_repair_runs_broader_diagnosis_when_runtime_finding_is_absent() 
     assert calls == [(True, True)]
     assert "teshis" in result.casefold()
     assert "bulgu" in result.casefold()
+
+def test_latest_runtime_finding_prefers_repairable_failure_over_newer_warning() -> None:
+    from artmach_assistant.core.runtime_observability import (
+        RuntimeFinding,
+        RuntimeHealthReport,
+    )
+
+    engine = _engine_without_active_repair()
+
+    repairable_failure = RuntimeFinding(
+        finding_id="RUN-AAAAAAAAAA",
+        severity="high",
+        category="repeated_runtime_failure",
+        title="Tekrarlanan hata: VoiceService.speech_turn",
+        explanation="Ayni hata iki kez olustu.",
+        confidence=0.90,
+        occurrence_count=2,
+        last_seen="2026-08-04T10:00:00+00:00",
+        workspace="C:/Users/yildi/Desktop/artmach_assistant",
+        scope="own_code",
+        affected_paths=("core/voice_service.py",),
+        affected_symbols=("VoiceService.speech_turn",),
+        evidence=(),
+        recommendation="En kucuk kaynak duzeltmesini hazirla.",
+        acceptance_criteria=("Hata tekrar olusmamali.",),
+        research_query="",
+    )
+    newer_warning = RuntimeFinding(
+        finding_id="RUN-BBBBBBBBBB",
+        severity="low",
+        category="repeated_runtime_warning",
+        title="Tekrarlanan uyari: LocalDialogueManager.intent_model",
+        explanation="Geri donus yolu kullanildi.",
+        confidence=0.80,
+        occurrence_count=4,
+        last_seen="2026-08-04T11:00:00+00:00",
+        workspace="C:/Users/yildi/Desktop/artmach_assistant",
+        scope="own_code",
+        affected_paths=("core/local_dialogue.py",),
+        affected_symbols=("LocalDialogueManager.intent_model",),
+        evidence=(),
+        recommendation="Uyariyi incele.",
+        acceptance_criteria=("Uyari azaltilmali.",),
+        research_query="",
+    )
+    report = RuntimeHealthReport(
+        generated_at="2026-08-04T11:01:00+00:00",
+        workspace="C:/Users/yildi/Desktop/artmach_assistant",
+        lookback_hours=168,
+        event_count=6,
+        completed_count=0,
+        failed_count=2,
+        cancelled_count=0,
+        warning_count=4,
+        findings=(repairable_failure, newer_warning),
+    )
+    engine._last_runtime_health_report = report
+    engine._runtime_health_service = lambda: SimpleNamespace(
+        analyze=lambda **_kwargs: report
+    )
+    engine._development_root = lambda *, own_code: Path(
+        "C:/Users/yildi/Desktop/artmach_assistant"
+    )
+
+    selected = AssistantEngine._latest_runtime_finding(engine)
+
+    assert selected is not None
+    assert selected.finding_id == repairable_failure.finding_id

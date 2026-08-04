@@ -3812,7 +3812,34 @@ class AssistantEngine:
         self._last_runtime_health_report = report
         if not report.findings:
             return None
-        return max(report.findings, key=lambda item: item.last_seen)
+
+        category_priority = {
+            "repeated_runtime_failure": 4,
+            "runtime_failure": 3,
+            "repeated_runtime_warning": 2,
+            "runtime_warning": 1,
+        }
+        severity_priority = {
+            "critical": 4,
+            "high": 3,
+            "medium": 2,
+            "low": 1,
+        }
+
+        def repair_priority(item: RuntimeFinding) -> tuple[object, ...]:
+            has_source_target = bool(
+                item.affected_paths and item.affected_symbols
+            )
+            return (
+                category_priority.get(item.category, 0),
+                int(has_source_target),
+                severity_priority.get(item.severity, 0),
+                float(item.confidence),
+                int(item.occurrence_count),
+                item.last_seen,
+            )
+
+        return max(report.findings, key=repair_priority)
 
     def runtime_health_assessment(
         self,
