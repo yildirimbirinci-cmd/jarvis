@@ -687,3 +687,38 @@ def test_duplicate_structural_retry_requires_a_different_control_flow_protocol(
     assert len(prompts) == 3
     assert "farkli ve acik bir sonuc protokoluyle" in prompts[2]
     assert "gercek break/continue yalniz WakeWordWorker.run" in prompts[2]
+
+def test_generic_duplicate_retry_does_not_receive_wakeword_specific_guidance(
+    tmp_path,
+) -> None:
+    engine = _engine(tmp_path)
+    repeated = json.dumps(
+        {
+            "summary": "invalid repeated generic draft",
+            "files": [
+                {
+                    "path": "core/example.py",
+                    "reason": "generic repair",
+                    "operations": [],
+                }
+            ],
+        }
+    )
+    prompts: list[str] = []
+
+    def respond(prompt: str, **_kwargs) -> str:
+        prompts.append(prompt)
+        return repeated
+
+    engine._request_code_model_json = respond
+
+    with pytest.raises(WorkspaceError):
+        engine._generate_validated_own_code_proposal(
+            "core/example.py icindeki read_value hatasini duzelt",
+            max_attempts=3,
+        )
+
+    assert len(prompts) == 3
+    assert "WakeWordWorker.run" not in prompts[2]
+    assert "break/continue" not in prompts[2]
+    assert "self.msleep" not in prompts[2]
