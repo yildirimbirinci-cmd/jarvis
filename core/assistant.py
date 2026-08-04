@@ -2005,10 +2005,7 @@ class AssistantEngine:
                         *approved_path_rows,
                         *extracted_symbol_targets.paths,
                     ))),
-                    symbols=tuple(dict.fromkeys((
-                        *approved_symbol_rows,
-                        *extracted_symbol_targets.symbols,
-                    ))),
+                    symbols=tuple(approved_symbol_rows),
                     issue_codes=extracted_symbol_targets.issue_codes,
                     used_fallback=extracted_symbol_targets.used_fallback,
                 )

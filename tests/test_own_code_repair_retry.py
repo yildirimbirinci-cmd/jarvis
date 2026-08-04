@@ -445,3 +445,60 @@ def test_non_symbol_retry_does_not_receive_symbol_scope_guidance() -> None:
     )
 
     assert "SEMBOL KAPSAMI ONARIM KURALI" not in prompt
+
+def test_symbol_scope_retry_targets_only_approved_symbols() -> None:
+    extracted = RepairTargets(
+        paths=("core/voice_service.py",),
+        symbols=("VoiceService._check_repeated_run",),
+        issue_codes=("symbol_scope",),
+    )
+    approved_paths = ("core/voice_service.py",)
+    approved_symbols = ("VoiceService.recognize_wav",)
+
+    targets = RepairTargets(
+        paths=tuple(dict.fromkeys((
+            *approved_paths,
+            *extracted.paths,
+        ))),
+        symbols=tuple(approved_symbols),
+        issue_codes=extracted.issue_codes,
+        used_fallback=extracted.used_fallback,
+    )
+
+    prompt = build_validation_repair_prompt(
+        "VoiceService.recognize_wav hatasini duzelt",
+        (
+            "core/voice_service.py [symbol_scope] "
+            "onay disi sembol degisti: "
+            "VoiceService._check_repeated_run"
+        ),
+        {
+            "summary": "unused helper",
+            "files": [
+                {
+                    "path": "core/voice_service.py",
+                    "reason": "repair",
+                    "content": "class VoiceService:\\n    pass\\n",
+                }
+            ],
+        },
+        stage="sembol kapsami",
+        targets=targets,
+    )
+
+    prompt_lines = prompt.splitlines()
+    heading_index = prompt_lines.index("HEDEF SEMBOLLER:")
+    target_lines: list[str] = []
+
+    for line in prompt_lines[heading_index + 1:]:
+        if line.startswith("- "):
+            target_lines.append(line[2:])
+            continue
+        if target_lines:
+            break
+
+    assert target_lines == [
+        "VoiceService.recognize_wav",
+    ]
+    assert "VoiceService._check_repeated_run" in prompt
+    assert "yardimciyi tamamen kaldir" in prompt
