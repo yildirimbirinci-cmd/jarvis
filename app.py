@@ -2509,6 +2509,10 @@ class MainWindow(QMainWindow):
 
     def on_answer(self, answer: object) -> None:
         raw_answer = str(answer)
+        # Release the thinking-phase microphone listener before TTS takes
+        # ownership of the output device.  A fresh answer-phase listener is
+        # armed only after playback starts.
+        self._stop_barge_in()
         is_hidden = raw_answer == APP_HIDE_SIGNAL
         is_shown = raw_answer == APP_SHOW_SIGNAL
         is_silent = raw_answer in {"__ARTMACH_SILENT__", APP_IDLE_SIGNAL, APP_HIDE_SIGNAL, APP_SHOW_SIGNAL}

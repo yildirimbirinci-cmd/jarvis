@@ -697,6 +697,11 @@ def install_main_window_voice_integration(
         if turn_id and not coordinator.is_current(turn_id):
             return
         raw_answer = str(answer)
+        # The thinking-phase interruption listener owns the microphone while
+        # the answer is being prepared.  Release it before starting TTS so
+        # input capture cannot starve the Windows output stream.  The answer
+        # phase arms one new listener after playback has started.
+        self._stop_barge_in(turn_id=active_turn or None)
         is_hidden = raw_answer == app_hide_signal
         is_shown = raw_answer == app_show_signal
         is_silent = raw_answer in {

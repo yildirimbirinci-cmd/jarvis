@@ -5518,7 +5518,15 @@ class AssistantEngine:
         # not part of the answer to the user's current question.  They remain
         # visible in the chat/log, but must not be read aloud as if they were
         # a continuation of the conversational answer.
-        text = text.partition("\n\nBakım uyarısı [RUN-")[0].strip()
+        # Maintenance findings can be appended on the same line or after any
+        # amount of whitespace.  They are operational UI notifications and
+        # must never be synthesized as part of the conversational reply.
+        text = re.split(
+            r"\s*Bakım uyarısı\s*\[RUN-[^\]]+\]\s*:",
+            text,
+            maxsplit=1,
+            flags=re.IGNORECASE,
+        )[0].strip()
         if "KANITA DAYALI MİMARİ İYİLEŞTİRME RAPORU" in text:
             totals = re.search(
                 r"İncelenen dosya:\s*(\d+)\s*\|\s*Bulgu:\s*(\d+)",
@@ -7744,13 +7752,19 @@ class AssistantEngine:
             "uykuya gec", "normale don", "dinlemeyi kapat",
         ), lambda _text: self._enter_sleep_mode(), 0.70))
         register(Intent("tts_output_outside", (
-            "sesi disari ver", "sesi dışarı ver", "sesi hoparlore ver",
-            "sesi hoparlöre ver", "hoparlorden konus", "hoparlörden konuş",
+            "sesi disa", "sesi dışa", "sesi disari", "sesi dışarı",
+            "sesi disari ver", "sesi dışarı ver", "disari ver", "dışarı ver",
+            "sesi hoparlore", "sesi hoparlöre", "sesi hoparlore ver",
+            "sesi hoparlöre ver", "hoparlore al", "hoparlöre al",
+            "hoparlorden konus", "hoparlörden konuş",
             "bluetooth hoparlore gec", "bluetooth hoparlöre geç",
         ), lambda _text: self.tts_output_router.switch("outside"), 0.90))
         register(Intent("tts_output_inside", (
-            "sesi ice al", "sesi içe al", "sesi kulakliga al",
-            "sesi kulaklığa al", "kulakliktan konus", "kulaklıktan konuş",
+            "sesi ice", "sesi içe", "sesi iceri", "sesi içeri",
+            "sesi ice al", "sesi içe al", "sesi iceri al", "sesi içeri al",
+            "iceri ver", "içeri ver", "sesi kulakliga", "sesi kulaklığa",
+            "sesi kulakliga al", "sesi kulaklığa al", "kulakliga al", "kulaklığa al",
+            "kulakliktan konus", "kulaklıktan konuş",
             "kulakliga geri don", "kulaklığa geri dön",
         ), lambda _text: self.tts_output_router.switch("inside"), 0.90))
         register(Intent("open_system_app", (
