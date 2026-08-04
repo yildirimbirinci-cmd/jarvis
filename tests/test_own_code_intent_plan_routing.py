@@ -31,3 +31,23 @@ def test_show_before_change_routes_to_change_plan() -> None:
 def test_plain_review_stays_review() -> None:
     intent = classify_own_code_intent("Kendi kodunu incele ve sorunları göster")
     assert intent.kind is OwnCodeIntentKind.REVIEW
+
+def test_system_wide_scan_with_no_change_is_read_only() -> None:
+    intent = classify_own_code_intent(
+        "Jarvis, butun sistemini tara ve hatali, riskli veya "
+        "dogrulanabilir teknik borc iceren yerleri bana listele. "
+        "Hicbir dosyayi degistirme."
+    )
+
+    assert intent.kind is OwnCodeIntentKind.REVIEW
+    assert intent.read_only is True
+
+
+def test_system_wide_change_plan_is_not_downgraded_to_review() -> None:
+    intent = classify_own_code_intent(
+        "Butun sistemini gelistirmek icin once bir degisiklik plani hazirla. "
+        "Hicbir dosyayi degistirme."
+    )
+
+    assert intent.kind is OwnCodeIntentKind.CHANGE
+    assert intent.read_only is False

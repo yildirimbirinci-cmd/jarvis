@@ -134,6 +134,19 @@ def classify_own_code_intent(
             for word in words
         )
 
+    broad_system_subject = any(
+        phrase in normalized
+        for phrase in (
+            "butun sistem",
+            "tum sistem",
+            "sistemin tamam",
+            "butun yapini",
+            "tum yapini",
+        )
+    )
+    if not subject and broad_system_subject:
+        subject = True
+
     # JARVIS_READ_ONLY_INTENT_FIX
     # Salt-okuma ifadeleri, kelimelerin icindeki degisiklik koklerinden
     # once degerlendirilmelidir.
@@ -194,6 +207,7 @@ def classify_own_code_intent(
             normalized,
             "show active review findings",
         )
+
 
     if not subject:
         return OwnCodeIntent(OwnCodeIntentKind.NONE, normalized)
