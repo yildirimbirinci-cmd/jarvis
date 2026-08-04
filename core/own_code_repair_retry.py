@@ -222,6 +222,19 @@ def build_validation_repair_prompt(
             for path in selected.paths
         ],
     }
+    symbol_scope_guidance = ""
+    if "sembol" in str(stage or "").casefold():
+        symbol_scope_guidance = (
+            "\nSEMBOL KAPSAMI ONARIM KURALI:\n"
+            "Dogrulayici onay disi yeni bir private yardimci metot "
+            "bildirdiyse iki guvenli secenekten birini uygula: "
+            "yardimciyi tamamen kaldirip onayli sembolu yerinde duzelt "
+            "veya ayni siniftaki onayli sembolu de ayni taslakta "
+            "degistirerek yardimciyi dogrudan self.<yardimci>(...) "
+            "biciminde cagir. Cagirilmayan veya bagimsiz yardimci "
+            "metot yeniden reddedilir.\n"
+        )
+
     semantic_guidance = ""
     if "semantik" in str(stage or "").casefold():
         semantic_guidance = (
@@ -253,6 +266,7 @@ def build_validation_repair_prompt(
         + f"\nHEDEF DOSYALAR:\n{target_files}\n"
         + f"\nHEDEF SEMBOLLER:\n{target_symbols}\n"
         + f"\nDOĞRULAYICI RAPORU:\n{str(report or '').strip()}\n"
+        + symbol_scope_guidance
         + semantic_guidance
         + "\nYALNIZCA HEDEF DOSYALARIN REDDEDİLEN TASLAĞI:\n"
         + json.dumps(_target_payload(proposal, selected), ensure_ascii=False, sort_keys=True)

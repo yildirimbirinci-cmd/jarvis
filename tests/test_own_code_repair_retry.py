@@ -9,6 +9,7 @@ import pytest
 from artmach_assistant.core.assistant import AssistantEngine
 from artmach_assistant.core.own_code_repair_retry import (
     RepairRetryPolicy,
+    RepairTargets,
     build_semantic_repair_prompt,
     build_validation_repair_prompt,
     extract_repair_targets,
@@ -377,3 +378,70 @@ def test_assistant_repair_request_merges_only_validator_target(monkeypatch) -> N
         "core/b.py",
     ]
     assert merged_payloads[0]["files"][1]["content"] == "VALUE = 2\n"
+
+def test_symbol_scope_retry_requires_private_helper_to_be_called_or_removed() -> None:
+    proposal = {
+        "summary": "unused helper",
+        "files": [
+            {
+                "path": "core/voice_service.py",
+                "reason": "repair",
+                "content": (
+                    "class VoiceService:\n"
+                    "    def recognize_wav(self, path):\n"
+                    "        return path\n\n"
+                    "    def _check_repeated_tokens(self, tokens):\n"
+                    "        return len(tokens) > 3\n"
+                ),
+            }
+        ],
+    }
+    targets = RepairTargets(
+        paths=("core/voice_service.py",),
+        symbols=(
+            "VoiceService.recognize_wav",
+            "VoiceService._check_repeated_tokens",
+        ),
+    )
+
+    prompt = build_validation_repair_prompt(
+        "VoiceService.recognize_wav hatasini duzelt",
+        (
+            "core/voice_service.py [symbol_scope] "
+            "onay disi sembol degisti: "
+            "VoiceService._check_repeated_tokens"
+        ),
+        proposal,
+        stage="sembol kapsami",
+        targets=targets,
+    )
+
+    assert "SEMBOL KAPSAMI ONARIM KURALI" in prompt
+    assert "yardimciyi tamamen kaldir" in prompt
+    assert "self.<yardimci>(...)" in prompt
+    assert "Cagirilmayan veya bagimsiz" in prompt
+
+
+def test_non_symbol_retry_does_not_receive_symbol_scope_guidance() -> None:
+    proposal = {
+        "summary": "anchor repair",
+        "files": [
+            {
+                "path": "core/example.py",
+                "reason": "repair",
+                "content": "VALUE = 2\n",
+            }
+        ],
+    }
+
+    prompt = build_validation_repair_prompt(
+        "degeri duzelt",
+        "Patch anchor bulunamadi",
+        proposal,
+        stage="anchor",
+        targets=RepairTargets(
+            paths=("core/example.py",),
+        ),
+    )
+
+    assert "SEMBOL KAPSAMI ONARIM KURALI" not in prompt
