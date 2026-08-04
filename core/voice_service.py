@@ -233,46 +233,6 @@ class VoiceService:
             return True
 
     @staticmethod
-    def _record_tts_stage(
-        action: str,
-        started_at: float,
-        *,
-        session_id: str = "",
-        status: str = "success",
-        metadata: dict[str, object] | None = None,
-        error: BaseException | None = None,
-    ) -> None:
-        """Emit one TTS sub-stage without allowing telemetry to affect audio."""
-
-        try:
-            from artmach_assistant.core.runtime_instrumentation import (
-                record_runtime_stage,
-            )
-
-            record_runtime_stage(
-                component="VoiceService",
-                action=str(action),
-                status=str(status),
-                duration_ms=max(
-                    0.0,
-                    (time.perf_counter() - float(started_at)) * 1000.0,
-                ),
-                source_path="core/voice_service.py",
-                symbol="VoiceService._speak_with_piper",
-                scope="voice",
-                error=error,
-                error_type=type(error).__name__ if error is not None else "",
-                metadata={
-                    "speech_session_id": str(session_id)[:64],
-                    **dict(metadata or {}),
-                },
-                correlation_id=str(session_id)[:64],
-            )
-        except Exception:
-            # Telemetry must never alter synthesis, playback or cancellation.
-            return
-
-    @staticmethod
     def _cancel_backend_handles(
         stream: object | None,
         piper_process: object | None,
@@ -2493,7 +2453,6 @@ $s.Dispose()
                             sd.wait()
                             frames_written = int(prepared.shape[0])
                         else:
-                            stream_open_started = time.perf_counter()
                             stream = sd.OutputStream(
                                 samplerate=play_rate,
                                 device=device.index,
@@ -2523,17 +2482,6 @@ $s.Dispose()
                                     )
                                 self._output_stream = stream
                             stream.start()
-                            self._record_tts_stage(
-                                "tts_stream_open",
-                                stream_open_started,
-                                session_id=session_id,
-                                metadata={
-                                    "output_device": device.index,
-                                    "play_rate": play_rate,
-                                    "channels": stream_channels,
-                                    "latency": latency,
-                                },
-                            )
                             block_frames = max(
                                 512,
                                 int(play_rate * (0.04 if latency == "low" else 0.08)),
@@ -2544,42 +2492,9 @@ $s.Dispose()
                                         "Ses çıkışı kullanıcı tarafından kesildi."
                                     )
                                 block = prepared[start : start + block_frames]
-                                first_write = frames_written == 0
-                                first_audio_started = (
-                                    time.perf_counter()
-                                    if first_write
-                                    else 0.0
-                                )
                                 stream.write(block)
                                 frames_written += int(block.shape[0])
-                                if first_write:
-                                    self._record_tts_stage(
-                                        "tts_first_audio_write",
-                                        first_audio_started,
-                                        session_id=session_id,
-                                        metadata={
-                                            "output_device": device.index,
-                                            "play_rate": play_rate,
-                                            "channels": stream_channels,
-                                            "latency": latency,
-                                            "frames_written": int(block.shape[0]),
-                                        },
-                                    )
                             stream.stop()
-                        self._record_tts_stage(
-                            "tts_playback_complete",
-                            stream_open_started
-                            if stream is not None
-                            else time.perf_counter(),
-                            session_id=session_id,
-                            metadata={
-                                "output_device": device.index,
-                                "play_rate": play_rate,
-                                "channels": stream_channels,
-                                "latency": latency,
-                                "frames_written": frames_written,
-                            },
-                        )
                         self._remember_audio_route(
                             "output",
                             index=device.index,
@@ -2739,18 +2654,7 @@ $s.Dispose()
             cache_key = hashlib.sha256(fingerprint.encode("utf-8")).hexdigest()
             PIPER_CACHE_DIR.mkdir(parents=True, exist_ok=True)
             target = PIPER_CACHE_DIR / f"{cache_key}.wav"
-            cache_started = time.perf_counter()
-            cache_hit = target.is_file() and target.stat().st_size >= 100
-            self._record_tts_stage(
-                "tts_cache_lookup",
-                cache_started,
-                session_id=session_id,
-                metadata={
-                    "cache_hit": cache_hit,
-                    "chunk_chars": len(chunk),
-                },
-            )
-            if cache_hit:
+            if target.is_file() and target.stat().st_size >= 100:
                 cache_used = True
             else:
                 temporary = PIPER_CACHE_DIR / (
@@ -2761,7 +2665,6 @@ $s.Dispose()
                     "--length_scale", length_scale_text,
                     "--output_file", str(temporary),
                 ]
-                synthesis_started = time.perf_counter()
                 try:
                     self._set_speech_state(session_id, "synthesizing", text_chars=len(text))
                     result = self._run_cancellable_piper_process(
@@ -2781,28 +2684,6 @@ $s.Dispose()
                     if temporary.stat().st_size < 100:
                         raise RuntimeError("Piper boş veya geçersiz bir WAV dosyası oluşturdu.")
                     os.replace(temporary, target)
-                    self._record_tts_stage(
-                        "tts_piper_synthesis",
-                        synthesis_started,
-                        session_id=session_id,
-                        metadata={
-                            "chunk_chars": len(chunk),
-                            "cache_hit": False,
-                        },
-                    )
-                except Exception as exc:
-                    self._record_tts_stage(
-                        "tts_piper_synthesis",
-                        synthesis_started,
-                        session_id=session_id,
-                        status="failed",
-                        metadata={
-                            "chunk_chars": len(chunk),
-                            "cache_hit": False,
-                        },
-                        error=exc,
-                    )
-                    raise
                 finally:
                     try:
                         temporary.unlink(missing_ok=True)
@@ -2810,7 +2691,6 @@ $s.Dispose()
                         pass
             if self._speech_cancelled(cancel_event, cancel_check):
                 return "Piper seslendirmesi kesildi."
-            decode_started = time.perf_counter()
             try:
                 with wave.open(str(target), "rb") as wav_file:
                     if wav_file.getnframes() <= 0 or wav_file.getframerate() <= 0:
@@ -2823,19 +2703,6 @@ $s.Dispose()
                 channels = wav_file.getnchannels()
                 source_rate = wav_file.getframerate()
                 width = wav_file.getsampwidth()
-            self._record_tts_stage(
-                "tts_wav_decode",
-                decode_started,
-                session_id=session_id,
-                metadata={
-                    "chunk_chars": len(chunk),
-                    "channels": channels,
-                    "source_rate": source_rate,
-                    "sample_width": width,
-                    "cache_hit": cache_hit,
-                },
-            )
-            prepare_started = time.perf_counter()
             sample_types = {1: np.uint8, 2: np.int16, 4: np.int32}
             if width not in sample_types:
                 raise RuntimeError(f"Piper WAV bit derinliği desteklenmiyor: {width * 8} bit.")
@@ -2888,18 +2755,6 @@ $s.Dispose()
                     audio.astype(np.float32, copy=False),
                     np.zeros((tail_frames, audio.shape[1]), dtype=np.float32),
                 ))
-            self._record_tts_stage(
-                "tts_audio_prepare",
-                prepare_started,
-                session_id=session_id,
-                metadata={
-                    "chunk_chars": len(chunk),
-                    "frames": int(audio.shape[0]),
-                    "channels": 1 if audio.ndim == 1 else int(audio.shape[1]),
-                    "play_rate": play_rate,
-                    "cache_hit": cache_hit,
-                },
-            )
             if not play_audio:
                 if prepared_audio is not None:
                     prepared_audio.append((audio.copy(), play_rate))

@@ -106,44 +106,6 @@ def _recorder() -> Recorder | None:
         return _dereference(_RECORDER_WEAK, _RECORDER_STRONG)
 
 
-def record_runtime_stage(
-    *,
-    component: str,
-    action: str,
-    duration_ms: float,
-    status: str = "success",
-    source_path: str = "",
-    symbol: str = "",
-    scope: str = "runtime",
-    message: str = "",
-    error: BaseException | None = None,
-    error_type: str = "",
-    metadata: Mapping[str, object] | None = None,
-    correlation_id: str = "",
-) -> bool:
-    """Record one bounded internal runtime stage without affecting behavior."""
-
-    active_correlation = str(
-        correlation_id or _CORRELATION_ID.get() or uuid.uuid4().hex
-    )
-
-    return _emit(
-        component=component,
-        action=action,
-        status=status,
-        duration_ms=duration_ms,
-        workspace=_default_workspace(),
-        scope=scope,
-        source_path=source_path,
-        symbol=symbol,
-        message=message,
-        error=error,
-        error_type=error_type,
-        metadata=metadata,
-        correlation_id=active_correlation,
-    )
-
-
 def _default_workspace() -> str:
     with _LOCK:
         provider = _dereference(_WORKSPACE_WEAK, _WORKSPACE_STRONG)
