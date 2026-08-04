@@ -87,3 +87,30 @@ def test_audio_playback_records_expected_internal_stages() -> None:
 
     for action in expected:
         assert action in source
+
+
+def test_piper_wait_boundaries_are_instrumented() -> None:
+    source = (
+        Path(__file__).resolve().parents[1]
+        / "core"
+        / "voice_service.py"
+    ).read_text(encoding="utf-8")
+
+    assert '"tts_piper_discovery"' in source
+    assert '"tts_piper_chunk_ready"' in source
+
+    discovery_start = source.index("discovery_started = time.perf_counter()")
+    discovery_call = source.index(
+        "self._discover_piper(executable, model_path)",
+        discovery_start,
+    )
+    discovery_event = source.index(
+        '"tts_piper_discovery"',
+        discovery_call,
+    )
+    assert discovery_start < discovery_call < discovery_event
+
+    chunk_start = source.index("chunk_started = time.perf_counter()")
+    cache_lookup = source.index('"tts_cache_lookup"', chunk_start)
+    chunk_ready = source.index('"tts_piper_chunk_ready"', cache_lookup)
+    assert chunk_start < cache_lookup < chunk_ready

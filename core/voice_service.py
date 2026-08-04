@@ -2706,7 +2706,27 @@ $s.Dispose()
         prepared_audio: list[tuple[object, int]] | None = None,
     ) -> str:
         session_id, cancel_event = self._resolve_speech_session(session_id, cancel_event)
-        exe, model = self._discover_piper(executable, model_path)
+        discovery_started = time.perf_counter()
+        try:
+            exe, model = self._discover_piper(executable, model_path)
+        except Exception as exc:
+            self._record_tts_stage(
+                "tts_piper_discovery",
+                discovery_started,
+                session_id=session_id,
+                status="failed",
+                error=exc,
+            )
+            raise
+        self._record_tts_stage(
+            "tts_piper_discovery",
+            discovery_started,
+            session_id=session_id,
+            metadata={
+                "executable_name": Path(exe).name,
+                "model_name": Path(model).name,
+            },
+        )
         model_config = Path(f"{model}.json")
         if not model_config.is_file():
             raise RuntimeError(
@@ -2724,6 +2744,7 @@ $s.Dispose()
         length_scale_text = f"{length_scale:.3f}"
         cache_used = False
         for chunk in chunks:
+            chunk_started = time.perf_counter()
             if self._speech_cancelled(cancel_event, cancel_check):
                 return "Piper seslendirmesi kesildi."
             fingerprint = "\n".join(
@@ -2898,6 +2919,18 @@ $s.Dispose()
                     "channels": 1 if audio.ndim == 1 else int(audio.shape[1]),
                     "play_rate": play_rate,
                     "cache_hit": cache_hit,
+                },
+            )
+            self._record_tts_stage(
+                "tts_piper_chunk_ready",
+                chunk_started,
+                session_id=session_id,
+                metadata={
+                    "chunk_chars": len(chunk),
+                    "cache_hit": cache_hit,
+                    "frames": int(audio.shape[0]),
+                    "play_rate": play_rate,
+                    "play_audio": bool(play_audio),
                 },
             )
             if not play_audio:
