@@ -17,10 +17,11 @@ def _finding(
     path: str = "core/voice_service.py",
     symbol: str = "VoiceService.recognize_wav",
     title: str = "Tekrarlanan hata: VoiceService.stt_transcription",
+    score: int = 100,
 ) -> EvidenceMaintenanceFinding:
     return EvidenceMaintenanceFinding(
         classification="A",
-        score=100,
+        score=score,
         source="runtime",
         title=title,
         path=path,
@@ -96,6 +97,7 @@ def test_hardware_retest_is_blocked(tmp_path) -> None:
 
 def test_active_and_static_findings_are_ignored(tmp_path) -> None:
     finding = _finding()
+
     active = EvidenceMaintenanceFinding(
         classification=finding.classification,
         score=finding.score,
@@ -124,19 +126,129 @@ def test_active_and_static_findings_are_ignored(tmp_path) -> None:
     assert plan.items == ()
 
 
-def test_retest_plan_report_contains_summary(tmp_path) -> None:
+def test_same_path_and_symbol_are_merged(tmp_path) -> None:
     tests_root = tmp_path / "tests"
     tests_root.mkdir()
-    (tests_root / "test_voice_service.py").write_text(
-        "def test_recognize_wav():\n    pass\n",
+    (tests_root / "test_piper_tts_cache.py").write_text(
+        "def test_speak_with_piper():\n    pass\n",
+        encoding="utf-8",
+    )
+
+    plan = build_retest_plan(
+        (
+            _finding(
+                symbol="VoiceService._speak_with_piper",
+                title="Tekrarlanan yavas islem: VoiceService.tts_piper",
+                score=68,
+            ),
+            _finding(
+                symbol="VoiceService._speak_with_piper",
+                title=(
+                    "Tekrarlanan yavas islem: "
+                    "VoiceService.tts_piper_discovery"
+                ),
+                score=64,
+            ),
+        ),
+        source_root=tmp_path,
+    )
+
+    assert len(plan.items) == 1
+    assert len(plan.items[0].finding_titles) == 2
+
+
+def test_plan_selects_at_most_five_tests(tmp_path) -> None:
+    tests_root = tmp_path / "tests"
+    tests_root.mkdir()
+
+    for index in range(8):
+        (tests_root / f"test_recognize_wav_{index}.py").write_text(
+            "def test_recognize_wav():\n    pass\n",
+            encoding="utf-8",
+        )
+
+    plan = build_retest_plan(
+        (_finding(),),
+        source_root=tmp_path,
+    )
+
+    assert len(plan.items[0].test_paths) == 5
+
+
+def test_broad_voice_name_alone_is_not_enough(tmp_path) -> None:
+    tests_root = tmp_path / "tests"
+    tests_root.mkdir()
+    (tests_root / "test_voice_unrelated.py").write_text(
+        "def test_unrelated():\n    pass\n",
+        encoding="utf-8",
+    )
+
+    plan = build_retest_plan(
+        (
+            _finding(
+                path="core/unknown_module.py",
+                symbol="Unknown.special_operation",
+                title="Tekrarlanan hata: Unknown.special_operation",
+            ),
+        ),
+        source_root=tmp_path,
+    )
+
+    assert plan.items[0].status == NO_TEST_FOUND
+
+
+def test_warning_requires_strong_direct_match(tmp_path) -> None:
+    tests_root = tmp_path / "tests"
+    tests_root.mkdir()
+    (tests_root / "test_targeted_validation.py").write_text(
+        "def test_request_targeted_validation_repair():\n"
+        "    pass\n",
+        encoding="utf-8",
+    )
+
+    plan = build_retest_plan(
+        (
+            _finding(
+                path="core/assistant.py",
+                symbol=(
+                    "AssistantEngine."
+                    "_request_targeted_validation_repair"
+                ),
+                title=(
+                    "Tekrarlanan uyari: "
+                    "AssistantEngine.targeted_code_model_repair"
+                ),
+            ),
+        ),
+        source_root=tmp_path,
+    )
+
+    assert plan.items[0].status == AUTOMATED
+
+
+def test_report_contains_command_and_merged_titles(tmp_path) -> None:
+    tests_root = tmp_path / "tests"
+    tests_root.mkdir()
+    (tests_root / "test_piper_tts_cache.py").write_text(
+        "def test_speak_with_piper():\n    pass\n",
         encoding="utf-8",
     )
 
     rendered = build_retest_plan(
-        (_finding(),),
+        (
+            _finding(
+                symbol="VoiceService._speak_with_piper",
+                title="tts_piper",
+            ),
+            _finding(
+                symbol="VoiceService._speak_with_piper",
+                title="tts_piper_discovery",
+            ),
+        ),
         source_root=tmp_path,
     ).report()
 
-    assert "YENIDEN DOGRULAMA PLANI" in rendered
-    assert "otomatik: 1" in rendered
-    assert "[AUTOMATED]" in rendered
+    assert "Birlestirilen bulgular:" in rendered
+    assert "Komut:" in rendered
+    assert "python -m pytest" in rendered
+    assert "test_piper_tts_cache.py" in rendered
