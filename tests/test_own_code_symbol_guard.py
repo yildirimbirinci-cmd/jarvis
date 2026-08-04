@@ -59,3 +59,70 @@ class Other:
     )
     assert not result.valid
     assert "Other" in result.report()
+
+def test_called_private_companion_must_be_new_same_class_and_directly_called() -> None:
+    valid_new = """
+class Worker:
+    def execute(self):
+        return self._execute_impl()
+
+    def _execute_impl(self):
+        return 1
+
+    def untouched(self):
+        return 2
+"""
+    valid_change = SimpleNamespace(
+        path="core/worker.py",
+        old_content=OLD,
+        new_content=valid_new,
+    )
+    assert validate_approved_symbol_scope(
+        [valid_change],
+        ["Worker.execute"],
+        allow_called_private_companions=True,
+    ).valid
+
+    uncalled_new = """
+class Worker:
+    def execute(self):
+        return 1
+
+    def _execute_impl(self):
+        return 1
+
+    def untouched(self):
+        return 2
+"""
+    uncalled_change = SimpleNamespace(
+        path="core/worker.py",
+        old_content=OLD,
+        new_content=uncalled_new,
+    )
+    uncalled_result = validate_approved_symbol_scope(
+        [uncalled_change],
+        ["Worker.execute"],
+        allow_called_private_companions=True,
+    )
+    assert not uncalled_result.valid
+    assert "Worker._execute_impl" in uncalled_result.report()
+
+    other_class_new = OLD + """
+class Other:
+    def call(self):
+        return self._execute_impl()
+
+    def _execute_impl(self):
+        return 9
+"""
+    other_change = SimpleNamespace(
+        path="core/worker.py",
+        old_content=OLD,
+        new_content=other_class_new,
+    )
+    other_result = validate_approved_symbol_scope(
+        [other_change],
+        ["Worker.execute"],
+        allow_called_private_companions=True,
+    )
+    assert not other_result.valid

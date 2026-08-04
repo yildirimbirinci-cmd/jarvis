@@ -1973,10 +1973,14 @@ class AssistantEngine:
                 )
         if approved_symbol_rows:
             allow_extraction_companions = (
-                "davranisi degistirmeden" in self.command_key(raw_instruction)
-                and any(
-                    word in self.command_key(raw_instruction)
-                    for word in ("refaktor", "cikar", "ayir", "extract")
+                production_repair
+                or (
+                    "davranisi degistirmeden"
+                    in self.command_key(raw_instruction)
+                    and any(
+                        word in self.command_key(raw_instruction)
+                        for word in ("refaktor", "cikar", "ayir", "extract")
+                    )
                 )
             )
             symbol_scope = validate_approved_symbol_scope(
