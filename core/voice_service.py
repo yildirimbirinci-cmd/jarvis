@@ -238,7 +238,7 @@ class VoiceService:
         started_at: float,
         *,
         session_id: str = "",
-        status: str = "completed",
+        status: str = "success",
         metadata: dict[str, object] | None = None,
         error: BaseException | None = None,
     ) -> None:

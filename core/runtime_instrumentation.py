@@ -111,7 +111,7 @@ def record_runtime_stage(
     component: str,
     action: str,
     duration_ms: float,
-    status: str = "completed",
+    status: str = "success",
     source_path: str = "",
     symbol: str = "",
     scope: str = "runtime",
