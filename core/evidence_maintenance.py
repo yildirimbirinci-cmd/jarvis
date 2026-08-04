@@ -137,23 +137,50 @@ def _is_test_path(value: str) -> bool:
     )
 
 
+def _static_issue_symbol(
+    issue: CodeReviewIssue,
+) -> str:
+    if issue.kind != "COMPLEXITY":
+        return ""
+
+    symbol, separator, _detail = str(
+        issue.message
+    ).partition(":")
+
+    if not separator:
+        return ""
+
+    return symbol.strip().casefold()
+
+
 def _static_classification(
     issue: CodeReviewIssue,
-    runtime_paths: set[str],
+    runtime_symbols_by_path: dict[str, set[str]],
 ) -> str:
     normalized_path = _normalized_path(issue.path)
 
     if issue.kind in {"SYNTAX", "SECURITY"}:
         return "A"
 
-    if normalized_path in runtime_paths and issue.kind in {
-        "QUALITY",
-        "COMPLEXITY",
-        "DUPLICATE",
-    }:
-        return "B"
+    if issue.kind != "COMPLEXITY":
+        return "C"
 
-    return "C"
+    issue_symbol = _static_issue_symbol(issue)
+    if not issue_symbol:
+        return "C"
+
+    runtime_symbols = runtime_symbols_by_path.get(
+        normalized_path,
+        set(),
+    )
+
+    matches_runtime_symbol = any(
+        runtime_symbol == issue_symbol
+        or runtime_symbol.endswith("." + issue_symbol)
+        for runtime_symbol in runtime_symbols
+    )
+
+    return "B" if matches_runtime_symbol else "C"
 
 
 _SEVERITY_ORDER = {
@@ -276,18 +303,42 @@ def build_evidence_maintenance_report(
     static_issues: Iterable[CodeReviewIssue],
     runtime_findings: Iterable[RuntimeFinding],
 ) -> EvidenceMaintenanceReport:
-    runtime_rows = _merge_runtime_findings(runtime_findings)
-    runtime_paths = {
-        _normalized_path(path)
-        for finding in runtime_rows
-        for path in finding.affected_paths
-        if _normalized_path(path)
-    }
+    runtime_rows = _merge_runtime_findings(
+        runtime_findings
+    )
 
-    findings: list[EvidenceMaintenanceFinding] = []
+    runtime_symbols_by_path: dict[
+        str,
+        set[str],
+    ] = {}
 
     for finding in runtime_rows:
-        classification = _runtime_classification(finding)
+        normalized_symbols = {
+            str(symbol).casefold().strip()
+            for symbol in finding.affected_symbols
+            if str(symbol).strip()
+        }
+
+        for affected_path in finding.affected_paths:
+            normalized_path = _normalized_path(
+                affected_path
+            )
+            if not normalized_path:
+                continue
+
+            runtime_symbols_by_path.setdefault(
+                normalized_path,
+                set(),
+            ).update(normalized_symbols)
+
+    findings: list[
+        EvidenceMaintenanceFinding
+    ] = []
+
+    for finding in runtime_rows:
+        classification = _runtime_classification(
+            finding
+        )
         path = (
             finding.affected_paths[0]
             if finding.affected_paths
@@ -308,6 +359,7 @@ def build_evidence_maintenance_report(
                 "repeated_cancellation",
             }
         )
+
         findings.append(
             EvidenceMaintenanceFinding(
                 classification=classification,
@@ -331,36 +383,47 @@ def build_evidence_maintenance_report(
 
         classification = _static_classification(
             issue,
-            runtime_paths,
+            runtime_symbols_by_path,
         )
         base_score = {
             "A": 70,
             "B": 40,
             "C": 10,
         }[classification]
+
         findings.append(
             EvidenceMaintenanceFinding(
                 classification=classification,
                 score=base_score,
                 source="static",
-                title=f"[{issue.kind}] {issue.message}",
+                title=(
+                    f"[{issue.kind}] "
+                    f"{issue.message}"
+                ),
                 path=issue.path,
                 evidence=(
-                    "runtime ile eslesti"
+                    "runtime dosya ve sembol "
+                    "kanitiyla eslesti"
                     if classification == "B"
                     else "yalnizca statik tarama"
                 ),
-                repair_candidate=classification == "A",
+                repair_candidate=(
+                    classification == "A"
+                ),
             )
         )
 
     findings.sort(
         key=lambda item: (
-            _CLASS_ORDER[item.classification],
+            _CLASS_ORDER[
+                item.classification
+            ],
             -item.score,
             item.path.casefold(),
             item.title.casefold(),
         )
     )
 
-    return EvidenceMaintenanceReport(tuple(findings))
+    return EvidenceMaintenanceReport(
+        tuple(findings)
+    )
