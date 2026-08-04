@@ -171,37 +171,78 @@ def normalize_structural_class_method_insertions(
                 )
 
             owner_index = tree.body.index(owner)
-            if owner_index + 1 >= len(tree.body):
-                raise WorkspaceError(
-                    f"Yapısal metot ekleme için sınıf sonu sınırı bulunamadı: "
-                    f"{raw_path} işlem {operation_index}"
+            rendered = textwrap.indent(dedented, "    ") + "\n"
+
+            if owner_index + 1 < len(tree.body):
+                following = tree.body[owner_index + 1]
+                decorator_lines = [
+                    int(getattr(row, "lineno", 0))
+                    for row in getattr(following, "decorator_list", ())
+                    if int(getattr(row, "lineno", 0)) > 0
+                ]
+                anchor_line = min(
+                    [int(getattr(following, "lineno", 0)), *decorator_lines]
                 )
-            following = tree.body[owner_index + 1]
-            decorator_lines = [
-                int(getattr(row, "lineno", 0))
-                for row in getattr(following, "decorator_list", ())
-                if int(getattr(row, "lineno", 0)) > 0
-            ]
-            anchor_line = min(
-                [int(getattr(following, "lineno", 0)), *decorator_lines]
-            )
-            if not anchor_line or anchor_line > len(lines):
-                raise WorkspaceError(
-                    f"Yapısal metot ekleme sınırı çözülemedi: "
-                    f"{raw_path} işlem {operation_index}"
+                if not anchor_line or anchor_line > len(lines):
+                    raise WorkspaceError(
+                        f"Yapisal metot ekleme siniri cozumlenemedi: "
+                        f"{raw_path} islem {operation_index}"
+                    )
+                anchor = lines[anchor_line - 1]
+                operation_kind = "insert_before"
+                operation_content = rendered
+            else:
+                if not owner.body:
+                    raise WorkspaceError(
+                        f"Yapisal metot hedef sinifi bos: "
+                        f"{raw_path} islem {operation_index}"
+                    )
+
+                last_member = owner.body[-1]
+                member_start = int(getattr(last_member, "lineno", 0))
+                member_end = int(
+                    getattr(last_member, "end_lineno", 0)
                 )
-            anchor = lines[anchor_line - 1]
+
+                decorator_lines = [
+                    int(getattr(row, "lineno", 0))
+                    for row in getattr(last_member, "decorator_list", ())
+                    if int(getattr(row, "lineno", 0)) > 0
+                ]
+                if decorator_lines:
+                    member_start = min(
+                        [member_start, *decorator_lines]
+                    )
+
+                if (
+                    not member_start
+                    or not member_end
+                    or member_start > member_end
+                    or member_end > len(lines)
+                ):
+                    raise WorkspaceError(
+                        f"Yapisal metot sinif sonu siniri cozumlenemedi: "
+                        f"{raw_path} islem {operation_index}"
+                    )
+
+                anchor = "".join(
+                    lines[member_start - 1:member_end]
+                )
+                operation_kind = "insert_after"
+                operation_content = "\n" + rendered
+
             if source.count(anchor) != 1:
                 raise WorkspaceError(
-                    f"Yapısal metot sınıf sonu sınırı benzersiz değil: "
-                    f"{raw_path} işlem {operation_index}; bulunan={source.count(anchor)}"
+                    f"Yapisal metot sinif sonu siniri benzersiz degil: "
+                    f"{raw_path} islem {operation_index}; "
+                    f"bulunan={source.count(anchor)}"
                 )
-            rendered = textwrap.indent(dedented, "    ") + "\n"
+
             operation.clear()
             operation.update({
-                "op": "insert_before",
+                "op": operation_kind,
                 "anchor": anchor,
-                "content": rendered,
+                "content": operation_content,
                 "_structural_method": method_name,
             })
     return repaired

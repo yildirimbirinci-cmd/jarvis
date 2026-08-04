@@ -5,6 +5,7 @@ from artmach_assistant.core.own_code_anchor_repair import (
     build_ambiguous_anchor_guidance,
     build_structural_method_block_guidance,
     merge_duplicate_operation_rows,
+    normalize_structural_class_method_insertions,
     normalize_structural_method_block_replacements,
     remove_redundant_noop_replaces,
     repair_ambiguous_replace_anchors,
@@ -901,3 +902,67 @@ def test_whitespace_repair_refuses_multiple_matches(tmp_path: Path) -> None:
     )
 
     assert repaired == payload
+
+def test_insert_class_method_supports_last_top_level_class(
+    tmp_path: Path,
+) -> None:
+    source = (
+        "class VoiceService:\n"
+        "    def recognize_wav(self, tokens):\n"
+        "        return tokens\n"
+    )
+    target = tmp_path / "core" / "voice_service.py"
+    target.parent.mkdir(parents=True)
+    target.write_text(source, encoding="utf-8")
+
+    payload = {
+        "summary": "add helper",
+        "files": [
+            {
+                "path": "core/voice_service.py",
+                "reason": "repair",
+                "operations": [
+                    {
+                        "op": "insert_class_method",
+                        "class_name": "VoiceService",
+                        "content": (
+                            "def _check_repeated_run(self, tokens):\n"
+                            "    return len(tokens) >= 4\n"
+                        ),
+                    }
+                ],
+            }
+        ],
+    }
+
+    repaired = normalize_structural_class_method_insertions(
+        payload,
+        project_root=tmp_path,
+        instruction=(
+            "VoiceService.recognize_wav hatasini duzelt"
+        ),
+    )
+
+    operation = repaired["files"][0]["operations"][0]
+
+    assert operation["op"] == "insert_after"
+    assert "def recognize_wav" in operation["anchor"]
+    assert (
+        "    def _check_repeated_run(self, tokens):"
+        in operation["content"]
+    )
+    assert operation["_structural_method"] == (
+        "_check_repeated_run"
+    )
+
+    rendered = EditManager._apply_operations(
+        source,
+        [operation],
+        path="core/voice_service.py",
+    )
+
+    compile(rendered, "core/voice_service.py", "exec")
+    assert (
+        "    def _check_repeated_run(self, tokens):"
+        in rendered
+    )
