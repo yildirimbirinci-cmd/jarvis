@@ -121,11 +121,27 @@ def _runtime_classification(finding: RuntimeFinding) -> str:
     return "C"
 
 
+def _normalized_path(value: str) -> str:
+    return str(value or "").replace("\\", "/").casefold().strip()
+
+
+def _is_test_path(value: str) -> bool:
+    normalized = _normalized_path(value)
+    name = normalized.rsplit("/", 1)[-1]
+
+    return bool(
+        normalized.startswith("tests/")
+        or "/tests/" in f"/{normalized}"
+        or name.startswith("test_")
+        or name.endswith("_test.py")
+    )
+
+
 def _static_classification(
     issue: CodeReviewIssue,
     runtime_paths: set[str],
 ) -> str:
-    normalized_path = issue.path.replace("\\", "/").casefold()
+    normalized_path = _normalized_path(issue.path)
 
     if issue.kind in {"SYNTAX", "SECURITY"}:
         return "A"
@@ -140,22 +156,143 @@ def _static_classification(
     return "C"
 
 
+_SEVERITY_ORDER = {
+    "critical": 4,
+    "high": 3,
+    "medium": 2,
+    "low": 1,
+}
+
+
+def _runtime_group_key(
+    finding: RuntimeFinding,
+) -> tuple[str, str, tuple[str, ...], tuple[str, ...]]:
+    return (
+        str(finding.category or "").casefold(),
+        str(finding.title or "").casefold().strip(),
+        tuple(
+            sorted(
+                {
+                    _normalized_path(path)
+                    for path in finding.affected_paths
+                    if _normalized_path(path)
+                }
+            )
+        ),
+        tuple(
+            sorted(
+                {
+                    str(symbol).casefold().strip()
+                    for symbol in finding.affected_symbols
+                    if str(symbol).strip()
+                }
+            )
+        ),
+    )
+
+
+def _merge_runtime_findings(
+    findings: Iterable[RuntimeFinding],
+) -> tuple[RuntimeFinding, ...]:
+    grouped: dict[
+        tuple[str, str, tuple[str, ...], tuple[str, ...]],
+        list[RuntimeFinding],
+    ] = {}
+
+    for finding in findings:
+        grouped.setdefault(
+            _runtime_group_key(finding),
+            [],
+        ).append(finding)
+
+    merged: list[RuntimeFinding] = []
+
+    for rows in grouped.values():
+        primary = max(
+            rows,
+            key=lambda item: (
+                _SEVERITY_ORDER.get(item.severity, 0),
+                item.confidence,
+                item.last_seen,
+            ),
+        )
+        latest = max(
+            rows,
+            key=lambda item: item.last_seen,
+        )
+
+        paths = tuple(
+            dict.fromkeys(
+                path
+                for row in rows
+                for path in row.affected_paths
+                if str(path).strip()
+            )
+        )
+        symbols = tuple(
+            dict.fromkeys(
+                symbol
+                for row in rows
+                for symbol in row.affected_symbols
+                if str(symbol).strip()
+            )
+        )
+        evidence = tuple(
+            dict.fromkeys(
+                item
+                for row in rows
+                for item in row.evidence
+            )
+        )[:12]
+
+        merged.append(
+            RuntimeFinding(
+                finding_id=primary.finding_id,
+                severity=primary.severity,
+                category=primary.category,
+                title=primary.title,
+                explanation=primary.explanation,
+                confidence=max(row.confidence for row in rows),
+                occurrence_count=sum(
+                    max(0, int(row.occurrence_count))
+                    for row in rows
+                ),
+                last_seen=latest.last_seen,
+                workspace=primary.workspace,
+                scope=primary.scope,
+                affected_paths=paths,
+                affected_symbols=symbols,
+                evidence=evidence,
+                recommendation=primary.recommendation,
+                acceptance_criteria=primary.acceptance_criteria,
+                research_query=primary.research_query,
+            )
+        )
+
+    return tuple(merged)
+
+
 def build_evidence_maintenance_report(
     static_issues: Iterable[CodeReviewIssue],
     runtime_findings: Iterable[RuntimeFinding],
 ) -> EvidenceMaintenanceReport:
-    runtime_rows = tuple(runtime_findings)
+    runtime_rows = _merge_runtime_findings(runtime_findings)
     runtime_paths = {
-        str(path).replace("\\", "/").casefold()
+        _normalized_path(path)
         for finding in runtime_rows
         for path in finding.affected_paths
+        if _normalized_path(path)
     }
 
     findings: list[EvidenceMaintenanceFinding] = []
 
     for finding in runtime_rows:
         classification = _runtime_classification(finding)
-        path = finding.affected_paths[0] if finding.affected_paths else ""
+        path = (
+            finding.affected_paths[0]
+            if finding.affected_paths
+            else ""
+        )
         symbol = (
             finding.affected_symbols[0]
             if finding.affected_symbols
@@ -189,6 +326,9 @@ def build_evidence_maintenance_report(
         )
 
     for issue in static_issues:
+        if _is_test_path(issue.path):
+            continue
+
         classification = _static_classification(
             issue,
             runtime_paths,
