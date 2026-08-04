@@ -38,6 +38,7 @@ from artmach_assistant.core.build_analyzer import BuildLogAnalyzer
 from artmach_assistant.core.agent_runner import AgentRunResult
 from artmach_assistant.core.snapshot_manager import SnapshotManager
 from artmach_assistant.core.code_review import CodeReviewService
+from artmach_assistant.core.evidence_maintenance import build_evidence_maintenance_report
 from artmach_assistant.core.system_control import SystemControlService
 from artmach_assistant.core.voice_service import VoiceService
 from artmach_assistant.core.tts_output_routing import TtsOutputRouter
@@ -5554,26 +5555,80 @@ class AssistantEngine:
         return self.reviewer.report()
 
     def own_code_review_report(self) -> str:
-        """Review Jarvis' source tree without changing the user's workspace."""
+        """Return an evidence-ranked read-only source review."""
         own_root = Path(__file__).resolve().parents[1]
-        reviewer = CodeReviewService(WorkspaceService(str(own_root)))
-        report = reviewer.report()
-        if report == "Belirgin statik kod sorunu bulunamadı.":
-            self._remember_action_context(
-                "own_code_review", "Kendi kaynak kodu incelemesi", report
-            )
-            return "Kendi kaynak kodlarımı inceledim. Belirgin bir statik kod sorunu bulamadım."
-        self._remember_action_context(
-            "own_code_review", "Kendi kaynak kodu incelemesi", report
-        )
-        # The user asked what should be improved, not for raw category
-        # counters. Return prioritized, actionable locations in the first
-        # answer and retain the full report for natural follow-up questions.
-        return (
-            "Kendi kaynak kodlarımı inceledim.\n"
-            + self._review_follow_up_report(report, limit=8)
+        reviewer = CodeReviewService(
+            WorkspaceService(str(own_root))
         )
 
+        analyze = getattr(reviewer, "analyze", None)
+        if not callable(analyze):
+            legacy_report = reviewer.report()
+            self._remember_action_context(
+                "own_code_review",
+                "Kendi kaynak kodu incelemesi",
+                legacy_report,
+            )
+            if legacy_report == (
+                "Belirgin statik kod sorunu bulunamad?."
+            ):
+                return (
+                    "Kendi kaynak kodlar?m? inceledim. "
+                    "Belirgin bir statik kod sorunu bulamad?m."
+                )
+            return (
+                "Kendi kaynak kodlar?m? inceledim.\n"
+                + self._review_follow_up_report(
+                    legacy_report,
+                    limit=8,
+                )
+            )
+
+        static_analysis = analyze()
+
+        runtime_findings: tuple[RuntimeFinding, ...] = ()
+        try:
+            runtime_report = self._runtime_health_service().analyze(
+                workspace=own_root,
+            )
+        except Exception:
+            runtime_report = None
+        else:
+            self._last_runtime_health_report = runtime_report
+            runtime_findings = tuple(runtime_report.findings)
+
+        evidence_report = build_evidence_maintenance_report(
+            static_analysis.issues,
+            runtime_findings,
+        )
+
+        if static_analysis.issues or runtime_findings:
+            report = evidence_report.report(limit=12)
+        else:
+            report = (
+                "KANITA DAYALI SISTEM SAGLIK RAPORU\n"
+                "A-gercek hata/guvenlik: 0 | "
+                "B-kanitli teknik borc: 0 | "
+                "C-statik inceleme ipucu: 0 | "
+                "onarim adayi: 0\n\n"
+                "Dogrulanabilir bir bakim bulgusu bulunamadi."
+            )
+
+        report += (
+            "\n\nBu inceleme salt okunurdur. "
+            "Plan, patch veya dosya degisikligi olusturulmadi."
+        )
+
+        self._remember_action_context(
+            "own_code_review",
+            "Kanita dayali kendi kaynak kodu incelemesi",
+            report,
+        )
+
+        return (
+            "Kendi kaynak kodlarimi inceledim.\n"
+            + report
+        )
     def own_code_summary_report(self) -> str:
         """Return a compact, read-only map of Jarvis' current source tree."""
 
