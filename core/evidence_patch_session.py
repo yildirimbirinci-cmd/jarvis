@@ -59,6 +59,8 @@ class EvidencePatchSession:
     user_approval_required: bool = True
     edit_summary: str = ""
     validation_summary: str = ""
+    worktree_summary: str = ""
+    test_summary: str = ""
     error: str = ""
 
     @classmethod
@@ -87,6 +89,8 @@ class EvidencePatchSession:
         *,
         edit_summary: str | None = None,
         validation_summary: str | None = None,
+        worktree_summary: str | None = None,
+        test_summary: str | None = None,
         error: str | None = None,
     ) -> "EvidencePatchSession":
         allowed = _ALLOWED.get(self.status, set())
@@ -99,6 +103,12 @@ class EvidencePatchSession:
             edit_summary=self.edit_summary if edit_summary is None else str(edit_summary),
             validation_summary=(
                 self.validation_summary if validation_summary is None else str(validation_summary)
+            ),
+            worktree_summary=(
+                self.worktree_summary if worktree_summary is None else str(worktree_summary)
+            ),
+            test_summary=(
+                self.test_summary if test_summary is None else str(test_summary)
             ),
             error=self.error if error is None else str(error),
             apply_allowed=(status == SESSION_APPROVED),
@@ -117,6 +127,8 @@ class EvidencePatchSession:
                 f"Uygulama izni: {'evet' if self.apply_allowed else 'hayir'}",
                 f"Edit ozeti: {self.edit_summary or '(yok)'}",
                 f"Dogrulama ozeti: {self.validation_summary or '(yok)'}",
+                f"Worktree ozeti: {self.worktree_summary or '(yok)'}",
+                f"Test ozeti: {self.test_summary or '(yok)'}",
                 f"Hata: {self.error or '(yok)'}",
             )
         )
@@ -141,6 +153,8 @@ class EvidencePatchSession:
             user_approval_required=bool(payload.get("user_approval_required", True)),
             edit_summary=str(payload.get("edit_summary", "")),
             validation_summary=str(payload.get("validation_summary", "")),
+            worktree_summary=str(payload.get("worktree_summary", "")),
+            test_summary=str(payload.get("test_summary", "")),
             error=str(payload.get("error", "")),
         )
         if not session.session_id.startswith("PS-") or not session.proposal_id:

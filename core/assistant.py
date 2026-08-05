@@ -52,9 +52,14 @@ from artmach_assistant.core.evidence_research_command import EvidenceResearchCom
 from artmach_assistant.core.evidence_patch_proposal import EvidencePatchProposal
 from artmach_assistant.core.evidence_patch_handoff import build_evidence_patch_handoff
 from artmach_assistant.core.evidence_patch_session import (
+    SESSION_APPROVAL_PENDING,
+    SESSION_APPROVED,
+    SESSION_APPLIED,
     SESSION_EDIT_PROPOSAL_READY,
     SESSION_FAILED,
     SESSION_HANDOFF_READY,
+    SESSION_REJECTED,
+    SESSION_VALIDATION_PENDING,
     EvidencePatchSession,
     EvidencePatchSessionStore,
 )
@@ -1791,6 +1796,161 @@ class AssistantEngine:
         )
         store.save(session)
         return session.report() + "\n\n" + handoff.report() + "\n\n" + prepared
+
+    def _evidence_patch_session_store(self) -> EvidencePatchSessionStore:
+        return EvidencePatchSessionStore(
+            Path(self.own_project_root())
+            / ".jarvis"
+            / "evidence_patch_session.json"
+        )
+
+    def validate_evidence_patch_session(self) -> str:
+        """Validate the pending evidence edit proposal in an isolated worktree."""
+        store = self._evidence_patch_session_store()
+        session = store.load()
+        if session is None:
+            return "Dogrulanacak aktif bir kanit patch oturumu yok."
+        if session.status != SESSION_EDIT_PROPOSAL_READY:
+            return session.report() + "\n\nDogrulama yalnizca EDIT_PROPOSAL_READY durumunda baslatilabilir."
+
+        proposal = getattr(getattr(self, "editor", None), "pending", None)
+        proposal_files = getattr(proposal, "files", None)
+        if (
+            proposal is None
+            or not isinstance(proposal_files, (list, tuple))
+            or not proposal_files
+        ):
+            session = session.transition(
+                SESSION_FAILED,
+                error="Bekleyen gecerli EditProposal bulunamadi.",
+            )
+            store.save(session)
+            return session.report()
+
+        session = session.transition(SESSION_VALIDATION_PENDING)
+        store.save(session)
+        try:
+            baseline_success, baseline_output = self._run_own_tests()
+            baseline_failures = self._test_failure_ids(baseline_output)
+            isolated = OwnCodeWorktreeValidator(
+                self.own_project_root()
+            ).validate(
+                proposal,
+                lambda root: self._validate_own_code_at_root(
+                    root,
+                    baseline_failures=baseline_failures,
+                ),
+            )
+        except Exception as exc:
+            session = session.transition(
+                SESSION_FAILED,
+                validation_summary="Dogrulama baslatilamadi.",
+                worktree_summary=str(exc)[:2000],
+                test_summary=(
+                    "Baseline testleri gecti."
+                    if 'baseline_success' in locals() and baseline_success
+                    else "Baseline testleri basarisiz veya tamamlanamadi."
+                ),
+                error=str(exc)[:2000],
+            )
+            store.save(session)
+            return session.report()
+
+        if not isolated.ok:
+            session = session.transition(
+                SESSION_FAILED,
+                validation_summary="Gecici worktree dogrulamasi basarisiz.",
+                worktree_summary=isolated.output[-2000:],
+                test_summary=(
+                    "Baseline testleri gecti."
+                    if baseline_success
+                    else "Baseline testlerinde mevcut hatalar var."
+                ),
+                error="Taslak worktree dogrulamasindan gecmedi.",
+            )
+            store.save(session)
+            return session.report()
+
+        session = session.transition(
+            SESSION_APPROVAL_PENDING,
+            validation_summary="Gecici worktree dogrulamasi basarili.",
+            worktree_summary=isolated.output[-2000:],
+            test_summary=(
+                "Baseline ve hedef dogrulama zinciri basarili."
+                if baseline_success
+                else "Taslak yeni regresyon uretmedi; baseline hatalari mevcut."
+            ),
+        )
+        store.save(session)
+        return session.report()
+
+    def approve_evidence_patch_session(self, session_id: str) -> str:
+        """Open the apply gate for one validated patch session."""
+        store = self._evidence_patch_session_store()
+        session = store.load()
+        if session is None:
+            return "Onaylanacak aktif bir kanit patch oturumu yok."
+        if str(session_id or "").strip() != session.session_id:
+            return "Patch oturum kimligi eslesmiyor; uygulama izni verilmedi."
+        if session.status != SESSION_APPROVAL_PENDING:
+            return session.report() + "\n\nOturum henuz onay asamasinda degil."
+        session = session.transition(SESSION_APPROVED)
+        store.save(session)
+        return session.report()
+
+    def reject_evidence_patch_session(self, session_id: str) -> str:
+        store = self._evidence_patch_session_store()
+        session = store.load()
+        if session is None:
+            return "Reddedilecek aktif bir kanit patch oturumu yok."
+        if str(session_id or "").strip() != session.session_id:
+            return "Patch oturum kimligi eslesmiyor; oturum degistirilmedi."
+        if session.terminal:
+            return session.report()
+        session = session.transition(SESSION_REJECTED)
+        store.save(session)
+        editor = getattr(self, "editor", None)
+        reject = getattr(editor, "reject", None)
+        if callable(reject):
+            reject()
+        return session.report()
+
+    def apply_evidence_patch_session(self, session_id: str) -> str:
+        """Apply only an explicitly approved and validated patch session."""
+        store = self._evidence_patch_session_store()
+        session = store.load()
+        if session is None:
+            return "Uygulanacak aktif bir kanit patch oturumu yok."
+        if str(session_id or "").strip() != session.session_id:
+            return "Patch oturum kimligi eslesmiyor; hicbir kod degistirilmedi."
+        if session.status != SESSION_APPROVED or not session.apply_allowed:
+            return session.report() + "\n\nAcik uygulama onayi yok; hicbir kod degistirilmedi."
+
+        result = self.apply_pending_own_code_proposal()
+        lowered = str(result or "").casefold()
+        failed_markers = (
+            "uygulanmadi",
+            "basarisiz",
+            "başarısız",
+            "reddedildi",
+            "geri alindi",
+            "geri alındı",
+        )
+        if any(marker in lowered for marker in failed_markers):
+            session = session.transition(
+                SESSION_FAILED,
+                error=str(result or "")[-2000:],
+            )
+        else:
+            session = session.transition(
+                SESSION_APPLIED,
+                validation_summary=(
+                    session.validation_summary
+                    + " Uygulama ve mevcut dogrulama zinciri tamamlandi."
+                ).strip(),
+            )
+        store.save(session)
+        return session.report() + "\n\n" + str(result or "")
 
     def prepare_own_code_proposal(
         self,
