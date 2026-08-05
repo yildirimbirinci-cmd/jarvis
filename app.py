@@ -37,6 +37,7 @@ from artmach_assistant.core.live_operation_dialogue import (
 from artmach_assistant.core.notification_store import NotificationStore
 from artmach_assistant.core.trust_inbox import TrustApprovalInbox
 from artmach_assistant.core.runtime_session import RuntimeSession
+from artmach_assistant.core.safe_release import EXIT_RESTART, write_release_heartbeat
 from artmach_assistant.core.self_improvement_lifecycle import (
     SelfImprovementApplicationLifecycle,
 )
@@ -705,9 +706,8 @@ class MainWindow(QMainWindow):
         )
         self._shutdown_after_tts = False
         self.engine = AssistantEngine(self.config)
-        self.engine.restart_application_callback = (
-            lambda: QTimer.singleShot(150, self.shutdown_application)
-        )
+        self._requested_exit_code = 0
+        self.engine.restart_application_callback = self.request_safe_restart
         self.worker: Worker | None = None
         self.task_orchestrator = TaskOrchestrator()
         self.intent_router = IntentRouter()
@@ -2671,6 +2671,10 @@ class MainWindow(QMainWindow):
         self._tts_guard_until = time.monotonic() + 0.7
         QTimer.singleShot(700, self.resume_wake_after_response)
 
+    def request_safe_restart(self) -> None:
+        self._requested_exit_code = EXIT_RESTART
+        QTimer.singleShot(150, self.shutdown_application)
+
     def shutdown_application(self) -> None:
         """Wake thread'ini durdurur ve uygulamayı güvenli biçimde kapatır."""
         self.voice_status.setText("Jarvis kapatılıyor…")
@@ -2679,7 +2683,7 @@ class MainWindow(QMainWindow):
         if self.wake_worker and self.wake_worker.isRunning():
             self.wake_worker.requestInterruption()
             self.wake_worker.wait(2500)
-        QApplication.instance().quit()
+        QApplication.instance().exit(int(getattr(self, "_requested_exit_code", 0)))
 
     def on_error(self, error: str) -> None:
         self._add_notification(error, level="error")
@@ -2844,6 +2848,21 @@ def main(
         if coordinator is not None:
             coordinator.set_show_callback(window.external_show_requested.emit)
         window.statusBar().showMessage(constitution_status, 8000)
+        heartbeat_path = os.environ.get("JARVIS_RELEASE_HEARTBEAT_FILE", "").strip()
+        if heartbeat_path:
+            release_id = os.environ.get("JARVIS_RELEASE_ID", "")
+            write_release_heartbeat(heartbeat_path, status="ready", release_id=release_id)
+            heartbeat_timer = QTimer(app)
+            heartbeat_timer.setInterval(2000)
+            heartbeat_timer.timeout.connect(
+                lambda: write_release_heartbeat(
+                    heartbeat_path,
+                    status="running",
+                    release_id=release_id,
+                )
+            )
+            heartbeat_timer.start()
+            app._release_heartbeat_timer = heartbeat_timer
         if not smoke_test:
             try:
                 self_improvement_lifecycle = (

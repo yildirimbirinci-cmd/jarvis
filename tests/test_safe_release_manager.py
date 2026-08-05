@@ -88,13 +88,21 @@ def test_supervisor_accepts_release_and_launches_new_process(monkeypatch, tmp_pa
         lambda command, *, cwd, timeout=1200.0: _completed(command, output="acceptance passed"),
     )
     launches = []
-    monkeypatch.setattr(
-        safe_release.subprocess,
-        "Popen",
-        lambda *args, **kwargs: launches.append((args, kwargs)),
-    )
+    class Process:
+        pid = 77
+        def poll(self): return None
+        def terminate(self): pass
+        def wait(self, timeout=None): return 0
+        def kill(self): pass
+    def launch(*args, **kwargs):
+        launches.append((args, kwargs))
+        heartbeat = kwargs.get("env", {}).get("JARVIS_RELEASE_HEARTBEAT_FILE")
+        if heartbeat:
+            safe_release.write_release_heartbeat(heartbeat, status="ready")
+        return Process()
+    monkeypatch.setattr(safe_release.subprocess, "Popen", launch)
 
-    assert safe_release.supervise(state_file, pid=99999) == 0
+    assert safe_release.supervise(state_file, pid=99999, probation_seconds=0, observation_seconds=0) == 0
     result = store.load()
     assert result is not None
     assert result.status == "ACCEPTED"
@@ -119,7 +127,7 @@ def test_supervisor_rolls_back_when_acceptance_fails(monkeypatch, tmp_path: Path
     monkeypatch.setattr(safe_release, "_run", fake_run)
     monkeypatch.setattr(safe_release.subprocess, "Popen", lambda *args, **kwargs: None)
 
-    assert safe_release.supervise(state_file, pid=99999) == 1
+    assert safe_release.supervise(state_file, pid=99999, probation_seconds=0, observation_seconds=0) == 1
     result = store.load()
     assert result is not None
     assert result.status == "ROLLED_BACK"

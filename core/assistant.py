@@ -1999,6 +1999,9 @@ class AssistantEngine:
             state_file=(
                 DATA_DIR / "releases" / "safe_release_state.json"
             ),
+            runtime_event_file=(
+                DATA_DIR / "diagnostics" / "runtime_events.json"
+            ),
         )
 
     def _request_safe_restart(self) -> None:
