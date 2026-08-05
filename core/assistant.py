@@ -38,7 +38,8 @@ from artmach_assistant.core.build_analyzer import BuildLogAnalyzer
 from artmach_assistant.core.agent_runner import AgentRunResult
 from artmach_assistant.core.snapshot_manager import SnapshotManager
 from artmach_assistant.core.code_review import CodeReviewService
-from artmach_assistant.core.evidence_maintenance import build_evidence_maintenance_report
+from artmach_assistant.core.evidence_maintenance import EvidenceMaintenanceReport, build_evidence_maintenance_report
+from artmach_assistant.core.evidence_closeout import apply_retest_closeout
 from artmach_assistant.core.evidence_retest import RetestPlan, build_retest_plan
 from artmach_assistant.core.evidence_retest_command import RetestCommandCoordinator
 from artmach_assistant.core.evidence_retest_session import RetestApprovalStore
@@ -5582,6 +5583,32 @@ class AssistantEngine:
     def code_review_report(self) -> str:
         return self.reviewer.report()
 
+    def _apply_completed_retest_closeout(
+        self,
+        evidence_report: EvidenceMaintenanceReport,
+        *,
+        source_root: Path,
+    ) -> EvidenceMaintenanceReport:
+        """Apply successful retest history without mutating source files."""
+        store = RetestCompletionStore(
+            DATA_DIR
+            / "diagnostics"
+            / "completed_retests.json"
+        )
+
+        try:
+            records = store.load()
+        except Exception:
+            records = ()
+
+        findings = apply_retest_closeout(
+            evidence_report.findings,
+            records,
+            source_root=source_root,
+        )
+
+        return EvidenceMaintenanceReport(findings)
+
     def _build_evidence_retest_plan(self) -> RetestPlan:
         """Build a read-only retest plan from current evidence."""
         own_root = self.own_project_root().resolve(
@@ -5613,6 +5640,10 @@ class AssistantEngine:
         evidence_report = build_evidence_maintenance_report(
             static_analysis.issues,
             runtime_findings,
+            source_root=own_root,
+        )
+        evidence_report = self._apply_completed_retest_closeout(
+            evidence_report,
             source_root=own_root,
         )
 
@@ -5725,6 +5756,10 @@ class AssistantEngine:
         evidence_report = build_evidence_maintenance_report(
             static_analysis.issues,
             runtime_findings,
+            source_root=own_root,
+        )
+        evidence_report = self._apply_completed_retest_closeout(
+            evidence_report,
             source_root=own_root,
         )
 

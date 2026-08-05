@@ -10,6 +10,15 @@ from artmach_assistant.core.evidence_lifecycle import ACTIVE, NEEDS_RETEST, Sour
 
 _CLASS_ORDER = {"A": 0, "B": 1, "C": 2}
 
+RESOLVED_CANDIDATE = "RESOLVED_CANDIDATE"
+
+_LIFECYCLE_ORDER = {
+    ACTIVE: 0,
+    NEEDS_RETEST: 1,
+    RESOLVED_CANDIDATE: 2,
+    "STATIC": 3,
+}
+
 
 @dataclass(frozen=True, slots=True)
 class EvidenceMaintenanceFinding:
@@ -54,6 +63,14 @@ class EvidenceMaintenanceReport:
         }
 
     @property
+    def resolved_candidate_count(self) -> int:
+        return sum(
+            1
+            for finding in self.findings
+            if finding.lifecycle == RESOLVED_CANDIDATE
+        )
+
+    @property
     def repair_candidate_count(self) -> int:
         return sum(
             1
@@ -75,7 +92,9 @@ class EvidenceMaintenanceReport:
             (
                 f"Aktif runtime bulgusu: {lifecycle[ACTIVE]} | "
                 f"yeniden test edilmeli: "
-                f"{lifecycle[NEEDS_RETEST]}"
+                f"{lifecycle[NEEDS_RETEST]} | "
+                f"cozulmus aday: "
+                f"{self.resolved_candidate_count}"
             ),
         ]
 
@@ -454,7 +473,10 @@ def build_evidence_maintenance_report(
 
     findings.sort(
         key=lambda item: (
-            0 if item.lifecycle == ACTIVE else 1,
+            _LIFECYCLE_ORDER.get(
+                item.lifecycle,
+                4,
+            ),
             _CLASS_ORDER[item.classification],
             -item.score,
             item.path.casefold(),
