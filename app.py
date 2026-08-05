@@ -1495,17 +1495,68 @@ class MainWindow(QMainWindow):
 
     def submit(self) -> None:
         text = self.input.text().strip()
+        worker_running = bool(self.worker and self.worker.isRunning())
         trace_event(
             "SUBMIT_HANDLER_ENTERED",
             chars=len(text),
-            worker_running=bool(self.worker and self.worker.isRunning()),
+            worker_running=worker_running,
             input_enabled=bool(self.input.isEnabled()),
         )
-        if text:
-            self.input.clear()
-            self.submit_text(text)
-        else:
+        if not text:
             trace_event("SUBMIT_IGNORED_EMPTY")
+            return
+
+        normalized = normalize_live_operation_text(text)
+        live_status = is_live_operation_status_query(normalized)
+        live_cancel = is_live_operation_cancel_query(normalized)
+        if worker_running and (live_status or live_cancel):
+            message_id = new_message_id()
+            trace_event(
+                "TEXT_SUBMITTED",
+                message_id=message_id,
+                live_query=True,
+                worker_running=True,
+                route="submit_direct_fast_path",
+            )
+            self.input.clear()
+            self.chat.appendPlainText(f"SEN: {text}\n")
+            if live_status:
+                started = time.monotonic()
+                trace_event(
+                    "LIVE_QUERY_CLASSIFIED",
+                    message_id=message_id,
+                    kind="status",
+                    route="submit_direct_fast_path",
+                )
+                answer = build_live_status_answer(self.engine, None)
+                trace_event(
+                    "STATUS_READ",
+                    message_id=message_id,
+                    latency_ms=round((time.monotonic() - started) * 1000.0, 3),
+                    answer_chars=len(answer),
+                )
+                self.chat.appendPlainText(f"JARVIS: {answer}\n")
+                trace_event(
+                    "RESPONSE_RENDERED",
+                    message_id=message_id,
+                    route="submit_direct_fast_path",
+                    latency_ms=round((time.monotonic() - started) * 1000.0, 3),
+                )
+                return
+            self.engine.voice.stop_speaking()
+            self.cancel_active_task()
+            self.chat.appendPlainText(
+                "JARVIS: Tamam, aktif islemi durdurma istegini ilettim.\n"
+            )
+            trace_event(
+                "RESPONSE_RENDERED",
+                message_id=message_id,
+                route="submit_direct_cancel_fast_path",
+            )
+            return
+
+        self.input.clear()
+        self.submit_text(text)
 
     def submit_text(self, text: str) -> None:
         message_id = new_message_id()
