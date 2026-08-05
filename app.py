@@ -33,6 +33,7 @@ from artmach_assistant.core.intent_router import IntentDecision, IntentRouter
 from artmach_assistant.core.live_operation_dialogue import (
     is_live_operation_cancel_query,
     is_live_operation_status_query,
+    should_resume_live_operation_listening,
 )
 from artmach_assistant.core.notification_store import NotificationStore
 from artmach_assistant.core.trust_inbox import TrustApprovalInbox
@@ -2536,6 +2537,34 @@ class MainWindow(QMainWindow):
             self.voice_log(f"AKTİF GÖREV: {record.name} | {start_message}")
         self.worker.start()
         QTimer.singleShot(1000, report_live_progress)
+        if source == "voice":
+            QTimer.singleShot(
+                250,
+                lambda: self._resume_live_operation_listening(record.task_id),
+            )
+
+    def _resume_live_operation_listening(self, task_id: str) -> None:
+        active = self.task_orchestrator.active
+        worker_running = bool(self.worker and self.worker.isRunning())
+        wake_running = bool(self.wake_worker and self.wake_worker.isRunning())
+        if active is None or active.task_id != task_id:
+            return
+        if not should_resume_live_operation_listening(
+            source="voice",
+            worker_running=worker_running,
+            wake_running=wake_running,
+        ):
+            return
+        self.engine.start_dialogue()
+        self.wake_worker.begin_owner_session(seconds=120.0)
+        self.wake_worker.resume_listening("command")
+        self.voice_status.setText(
+            "İşlem sürüyor; durumunu sorabilir veya iptal edebilirsin."
+        )
+        self.voice_log(
+            "CANLI İŞLEM DİYALOĞU: Bakım worker'ı sürerken durum ve iptal "
+            "komutları için sahip sesli dinleme yeniden açıldı."
+        )
 
     def on_answer(self, answer: object) -> None:
         raw_answer = str(answer)

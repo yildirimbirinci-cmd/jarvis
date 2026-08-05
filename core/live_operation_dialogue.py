@@ -44,3 +44,17 @@ def is_live_operation_cancel_query(normalized: str) -> bool:
 
 def is_live_operation_query(normalized: str) -> bool:
     return is_live_operation_status_query(normalized) or is_live_operation_cancel_query(normalized)
+
+
+def should_resume_live_operation_listening(
+    *,
+    source: str,
+    worker_running: bool,
+    wake_running: bool,
+) -> bool:
+    """Return whether voice listening may reopen while a task keeps running."""
+    return (
+        str(source or "").casefold() == "voice"
+        and bool(worker_running)
+        and bool(wake_running)
+    )
