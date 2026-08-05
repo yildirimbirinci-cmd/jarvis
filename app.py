@@ -34,6 +34,7 @@ from artmach_assistant.core.live_operation_dialogue import (
     build_live_status_answer,
     is_live_operation_cancel_query,
     is_live_operation_status_query,
+    normalize_live_operation_text,
     should_resume_live_operation_listening,
 )
 from artmach_assistant.core.acceptance_trace import (
@@ -1197,15 +1198,16 @@ class MainWindow(QMainWindow):
         input_row = QHBoxLayout()
         self.input = QLineEdit()
         self.input.setPlaceholderText("Yerel komut yaz: Hesap makinesini çalıştır veya öğrenme modunu aç")
-        self.input.returnPressed.connect(self.submit)
+        self.input.returnPressed.connect(self._on_input_return_pressed)
+        self.input.textChanged.connect(self._on_input_text_changed)
         propose_btn = QPushButton("Kod Değişikliği Öner")
         propose_btn.setEnabled(False)
         propose_btn.setToolTip("LLM içermeyen sürümde devre dışı")
-        send_btn = QPushButton("Gönder")
-        send_btn.clicked.connect(self.submit)
+        self.send_btn = QPushButton("Gönder")
+        self.send_btn.clicked.connect(self._on_send_button_clicked)
         input_row.addWidget(self.input, 1)
         input_row.addWidget(propose_btn)
-        input_row.addWidget(send_btn)
+        input_row.addWidget(self.send_btn)
         center_layout.addLayout(input_row)
         self.main_splitter.addWidget(center)
 
@@ -1284,8 +1286,51 @@ class MainWindow(QMainWindow):
             self._output_route_sync_timer.start()
         self._update_tts_controls()
         # Arayüz ve ses aygıtları hazır olduktan sonra Jarvis otomatik başlar.
+        self._last_gui_trace_at = 0.0
+        self._gui_trace_timer = QTimer(self)
+        self._gui_trace_timer.setInterval(1000)
+        self._gui_trace_timer.timeout.connect(self._trace_gui_heartbeat)
+        self._gui_trace_timer.start()
         if not self.smoke_test:
             QTimer.singleShot(650, self.auto_start_voice_service)
+
+    def _trace_gui_heartbeat(self) -> None:
+        now = time.monotonic()
+        worker_running = bool(self.worker and self.worker.isRunning())
+        if not worker_running and now - self._last_gui_trace_at < 5.0:
+            return
+        self._last_gui_trace_at = now
+        trace_event(
+            "GUI_EVENT_LOOP_HEARTBEAT",
+            worker_running=worker_running,
+            input_enabled=bool(self.input.isEnabled()),
+            input_has_focus=bool(self.input.hasFocus()),
+            input_chars=len(self.input.text()),
+        )
+
+    def _on_input_text_changed(self, text: str) -> None:
+        trace_event(
+            "INPUT_TEXT_CHANGED",
+            chars=len(str(text or "")),
+            worker_running=bool(self.worker and self.worker.isRunning()),
+            input_enabled=bool(self.input.isEnabled()),
+        )
+
+    def _on_input_return_pressed(self) -> None:
+        trace_event(
+            "INPUT_RETURN_PRESSED",
+            chars=len(self.input.text()),
+            worker_running=bool(self.worker and self.worker.isRunning()),
+        )
+        self.submit()
+
+    def _on_send_button_clicked(self) -> None:
+        trace_event(
+            "SEND_BUTTON_CLICKED",
+            chars=len(self.input.text()),
+            worker_running=bool(self.worker and self.worker.isRunning()),
+        )
+        self.submit()
 
     def _set_left_panel_visible(self, visible: bool) -> None:
         self.left_panel.setVisible(bool(visible))
@@ -1450,45 +1495,55 @@ class MainWindow(QMainWindow):
 
     def submit(self) -> None:
         text = self.input.text().strip()
+        trace_event(
+            "SUBMIT_HANDLER_ENTERED",
+            chars=len(text),
+            worker_running=bool(self.worker and self.worker.isRunning()),
+            input_enabled=bool(self.input.isEnabled()),
+        )
         if text:
             self.input.clear()
             self.submit_text(text)
+        else:
+            trace_event("SUBMIT_IGNORED_EMPTY")
 
     def submit_text(self, text: str) -> None:
         message_id = new_message_id()
-        active = self.task_orchestrator.active
         worker_running = bool(self.worker and self.worker.isRunning())
+        normalized = normalize_live_operation_text(text)
+        live_status = is_live_operation_status_query(normalized)
+        live_cancel = is_live_operation_cancel_query(normalized)
         trace_event(
             "TEXT_SUBMITTED",
             message_id=message_id,
-            live_query=is_live_operation_status_query(self.engine.command_key(text)),
+            live_query=bool(live_status or live_cancel),
             worker_running=worker_running,
-            task_id=getattr(active, "task_id", ""),
         )
-        if self.busy():
-            normalized = self.engine.command_key(text)
+
+        # The live path must not read TaskOrchestrator.active. That property may
+        # wait on a lock held by the maintenance worker and would freeze this
+        # otherwise read-only status request.
+        if (live_status or live_cancel) and worker_running:
             trace_event(
                 "GUI_BUSY",
                 message_id=message_id,
                 busy=True,
-                normalized=normalized if is_live_operation_status_query(normalized) else "",
+                normalized=normalized,
                 worker_running=worker_running,
-                task_id=getattr(active, "task_id", ""),
             )
-            if is_live_operation_status_query(normalized):
+            self.chat.appendPlainText(f"SEN: {text}\n")
+            if live_status:
                 started = time.monotonic()
                 trace_event(
                     "LIVE_QUERY_CLASSIFIED",
                     message_id=message_id,
                     kind="status",
-                    route="direct_snapshot",
+                    route="lock_free_snapshot",
                 )
-                self.chat.appendPlainText(f"SEN: {text}\n")
-                answer = build_live_status_answer(self.engine, active)
+                answer = build_live_status_answer(self.engine, None)
                 trace_event(
                     "STATUS_READ",
                     message_id=message_id,
-                    task_id=getattr(active, "task_id", ""),
                     latency_ms=round((time.monotonic() - started) * 1000.0, 3),
                     answer_chars=len(answer),
                 )
@@ -1496,18 +1551,37 @@ class MainWindow(QMainWindow):
                 trace_event(
                     "RESPONSE_RENDERED",
                     message_id=message_id,
-                    route="direct_snapshot",
+                    route="lock_free_snapshot",
                     latency_ms=round((time.monotonic() - started) * 1000.0, 3),
                 )
                 return
-            if is_live_operation_cancel_query(normalized):
-                self.chat.appendPlainText(f"SEN: {text}\n")
-                self.engine.voice.stop_speaking()
-                self.cancel_active_task()
-                self.chat.appendPlainText(
-                    "JARVIS: Yanıt ve aktif işlem iptal edildi.\n"
-                )
-                return
+            self.engine.voice.stop_speaking()
+            self.cancel_active_task()
+            self.chat.appendPlainText(
+                "JARVIS: Tamam, aktif islemi durdurma istegini ilettim.\n"
+            )
+            trace_event(
+                "RESPONSE_RENDERED",
+                message_id=message_id,
+                route="cancel_fast_path",
+            )
+            return
+
+        active = self.task_orchestrator.active
+        trace_event(
+            "TASK_SNAPSHOT_READ",
+            message_id=message_id,
+            task_id=getattr(active, "task_id", ""),
+        )
+        if self.busy():
+            trace_event(
+                "GUI_BUSY",
+                message_id=message_id,
+                busy=True,
+                normalized="",
+                worker_running=worker_running,
+                task_id=getattr(active, "task_id", ""),
+            )
             if (
                 "kendini kapat" in normalized
                 or "programi kapat" in normalized
@@ -2807,6 +2881,68 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(1000, self.resume_wake_after_response)
 
 
+    def _shutdown_workers(self) -> tuple[str, ...]:
+        workers = (
+            ("tts", getattr(self, "tts_worker", None)),
+            ("task", getattr(self, "worker", None)),
+            ("wake", getattr(self, "wake_worker", None)),
+            ("barge", getattr(self, "barge_worker", None)),
+        )
+        return tuple(
+            name
+            for name, worker in workers
+            if worker is not None and worker.isRunning()
+        )
+
+    def _poll_shutdown_workers(self) -> None:
+        running = self._shutdown_workers()
+        deadline = float(getattr(self, "_shutdown_deadline", 0.0) or 0.0)
+        if running and time.monotonic() < deadline:
+            trace_event("SHUTDOWN_POLL", still_running=list(running))
+            QTimer.singleShot(100, self._poll_shutdown_workers)
+            return
+
+        if running:
+            for name, worker in (
+                ("tts", getattr(self, "tts_worker", None)),
+                ("task", getattr(self, "worker", None)),
+                ("wake", getattr(self, "wake_worker", None)),
+                ("barge", getattr(self, "barge_worker", None)),
+            ):
+                if worker is None or not worker.isRunning():
+                    continue
+                trace_event("SHUTDOWN_WORKER_FORCE_STOP", worker=name)
+                try:
+                    worker.terminate()
+                except Exception as exc:
+                    trace_event("SHUTDOWN_WORKER_ERROR", worker=name, error=str(exc))
+
+        remaining = self._shutdown_workers()
+        trace_event("SHUTDOWN_FINISHED", still_running=list(remaining))
+        app = QApplication.instance()
+        if app is not None:
+            app.exit(int(getattr(self, "_requested_exit_code", 0)))
+
+    def _start_async_shutdown(self) -> None:
+        if bool(getattr(self, "_shutdown_in_progress", False)):
+            return
+        self._shutdown_in_progress = True
+        self._shutdown_deadline = time.monotonic() + 3.0
+        for name, worker in (
+            ("tts", getattr(self, "tts_worker", None)),
+            ("task", getattr(self, "worker", None)),
+            ("wake", getattr(self, "wake_worker", None)),
+            ("barge", getattr(self, "barge_worker", None)),
+        ):
+            if worker is None or not worker.isRunning():
+                continue
+            trace_event("SHUTDOWN_WORKER_INTERRUPT", worker=name)
+            try:
+                worker.requestInterruption()
+            except Exception as exc:
+                trace_event("SHUTDOWN_WORKER_ERROR", worker=name, error=str(exc))
+        QTimer.singleShot(0, self._poll_shutdown_workers)
+
     def closeEvent(self, event) -> None:
         """Close safely even when startup stopped before all GUI workers existed."""
         if not hasattr(self, "tts_worker"):
@@ -2862,42 +2998,9 @@ class MainWindow(QMainWindow):
             if callable(logger):
                 logger(f"Araya girme dinleyicisi durdurulamadı: {exc}")
 
-        for worker, timeout_ms in (
-            (self.tts_worker, 8000),
-            (self.worker, 8000),
-            (self.wake_worker, 8000),
-        ):
-            if worker is None or not worker.isRunning():
-                continue
-            try:
-                worker.requestInterruption()
-                worker.wait(timeout_ms)
-            except Exception as exc:
-                logger = getattr(self, "voice_log", None)
-                if callable(logger):
-                    logger(f"İş parçacığı kapatılamadı: {exc}")
-
-        still_running = [
-            name
-            for name, worker in (
-                ("tts", self.tts_worker),
-                ("task", self.worker),
-                ("wake", self.wake_worker),
-                ("barge", self.barge_worker),
-            )
-            if worker is not None and worker.isRunning()
-        ]
-        if still_running:
-            logger = getattr(self, "voice_log", None)
-            if callable(logger):
-                logger(
-                    "Kapatma bekliyor; çalışan iş parçacıkları: "
-                    + ", ".join(still_running)
-                )
-            event.ignore()
-            QTimer.singleShot(250, self.close)
-            return
-        super().closeEvent(event)
+        trace_event("SHUTDOWN_REQUESTED")
+        self._start_async_shutdown()
+        event.ignore()
 # Jarvis turn-aware voice integration; keeps the current app.py intact.
 install_main_window_voice_integration(MainWindow)
 
