@@ -19,6 +19,10 @@ from artmach_assistant.core.evidence_engineering_plan import (
     EvidenceEngineeringPlan,
     build_evidence_engineering_plan,
 )
+from artmach_assistant.core.evidence_patch_proposal import (
+    EvidencePatchProposal,
+    build_evidence_patch_proposal,
+)
 from artmach_assistant.core.research_manager import (
     ResearchManager,
     ResearchResult,
@@ -89,6 +93,7 @@ class EvidenceResearchExecutionResult:
     decisions: tuple[EvidenceDecision, ...] = ()
     conclusion: EvidenceConclusion | None = None
     engineering_plan: EvidenceEngineeringPlan | None = None
+    patch_proposal: EvidencePatchProposal | None = None
     errors: tuple[str, ...] = ()
     reason: str = ""
 
@@ -211,6 +216,9 @@ class EvidenceResearchExecutionResult:
 
         if self.engineering_plan is not None:
             rows.append(self.engineering_plan.report())
+
+        if self.patch_proposal is not None:
+            rows.append(self.patch_proposal.report())
 
         if self.errors:
             rows.append(
@@ -510,6 +518,12 @@ def execute_approved_research(
             path=session.path,
             symbol=session.symbol,
         )
+        patch_proposal = build_evidence_patch_proposal(
+            engineering_plan,
+            conclusion,
+            path=session.path,
+            symbol=session.symbol,
+        )
         return EvidenceResearchExecutionResult(
             status=RESEARCH_FAILED,
             approval_id=session.approval_id,
@@ -520,6 +534,7 @@ def execute_approved_research(
             decisions=tuple(decisions),
             conclusion=conclusion,
             engineering_plan=engineering_plan,
+            patch_proposal=patch_proposal,
             reason=(
                 "Arastirma tamamlandi ancak "
                 "kullanilabilir kanit kaynagi bulunamadi."
@@ -550,6 +565,12 @@ def execute_approved_research(
         path=session.path,
         symbol=session.symbol,
     )
+    patch_proposal = build_evidence_patch_proposal(
+        engineering_plan,
+        conclusion,
+        path=session.path,
+        symbol=session.symbol,
+    )
 
     return EvidenceResearchExecutionResult(
         status=status,
@@ -562,6 +583,7 @@ def execute_approved_research(
         decisions=tuple(decisions),
         conclusion=conclusion,
         engineering_plan=engineering_plan,
+        patch_proposal=patch_proposal,
         reason=(
             f"{len(sources)} tekil ve ilgili kanit kaynagi "
             "kabul edildi. Kaynaklar otorite, alaka, teknik "
