@@ -68,6 +68,9 @@ class EvidencePatchSession:
     version_summary: str = ""
     retest_summary: str = ""
     closeout_summary: str = ""
+    journal_summary: str = ""
+    memory_summary: str = ""
+    rollback_verified: bool = False
     closed_at: str = ""
     error: str = ""
 
@@ -155,6 +158,28 @@ class EvidencePatchSession:
             apply_allowed=False,
         )
 
+    def with_outcome(
+        self,
+        *,
+        journal_summary: str,
+        memory_summary: str,
+        rollback_verified: bool | None = None,
+        error: str = "",
+    ) -> "EvidencePatchSession":
+        return replace(
+            self,
+            updated_at=_utc_now(),
+            journal_summary=str(journal_summary or ""),
+            memory_summary=str(memory_summary or ""),
+            rollback_verified=(
+                self.rollback_verified
+                if rollback_verified is None
+                else bool(rollback_verified)
+            ),
+            error=str(error or self.error),
+            apply_allowed=False,
+        )
+
     def report(self) -> str:
         return "\n".join(
             (
@@ -175,6 +200,9 @@ class EvidencePatchSession:
                 f"Surum ozeti: {self.version_summary or '(yok)'}",
                 f"Retest ozeti: {self.retest_summary or '(yok)'}",
                 f"Kapatma ozeti: {self.closeout_summary or '(yok)'}",
+                f"Journal ozeti: {self.journal_summary or '(yok)'}",
+                f"Ogrenme ozeti: {self.memory_summary or '(yok)'}",
+                f"Rollback dogrulandi: {'evet' if self.rollback_verified else 'hayir'}",
                 f"Kapanis zamani: {self.closed_at or '(yok)'}",
                 f"Hata: {self.error or '(yok)'}",
             )
@@ -207,6 +235,9 @@ class EvidencePatchSession:
             version_summary=str(payload.get("version_summary", "")),
             retest_summary=str(payload.get("retest_summary", "")),
             closeout_summary=str(payload.get("closeout_summary", "")),
+            journal_summary=str(payload.get("journal_summary", "")),
+            memory_summary=str(payload.get("memory_summary", "")),
+            rollback_verified=bool(payload.get("rollback_verified", False)),
             closed_at=str(payload.get("closed_at", "")),
             error=str(payload.get("error", "")),
         )

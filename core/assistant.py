@@ -51,6 +51,7 @@ from artmach_assistant.core.evidence_research_session import EvidenceResearchApp
 from artmach_assistant.core.evidence_research_command import EvidenceResearchCommandCoordinator
 from artmach_assistant.core.evidence_patch_proposal import EvidencePatchProposal
 from artmach_assistant.core.evidence_patch_handoff import build_evidence_patch_handoff
+from artmach_assistant.core.evidence_patch_outcome import record_patch_outcome
 from artmach_assistant.core.evidence_patch_closeout import run_patch_closeout
 from artmach_assistant.core.evidence_patch_session import (
     SESSION_APPROVAL_PENDING,
@@ -1953,6 +1954,36 @@ class AssistantEngine:
                 error=f"{type(exc).__name__}: {exc}",
             )
 
+    def _record_evidence_patch_outcome(
+        self,
+        session: EvidencePatchSession,
+        *,
+        successful: bool,
+        note: str,
+        rollback_verified: bool | None = None,
+    ) -> EvidencePatchSession:
+        try:
+            outcome = record_patch_outcome(
+                session,
+                history=self.own_code_history,
+                learning=self.learning_memory,
+                successful=successful,
+                note=note,
+            )
+            return session.with_outcome(
+                journal_summary=outcome.journal_summary,
+                memory_summary=outcome.memory_summary,
+                rollback_verified=rollback_verified,
+                error=(outcome.error or session.error),
+            )
+        except Exception as exc:
+            return session.with_outcome(
+                journal_summary="Patch sonucu journal kaydina yazilamadi.",
+                memory_summary="Patch sonucu ogrenme kaydina yazilamadi.",
+                rollback_verified=rollback_verified,
+                error=f"{type(exc).__name__}: {exc}",
+            )
+
     def apply_evidence_patch_session(self, session_id: str) -> str:
         """Apply one explicitly approved patch session and persist the outcome."""
         store = self._evidence_patch_session_store()
@@ -2041,11 +2072,24 @@ class AssistantEngine:
                 ),
                 error=(rendered[-2000:] or "Uygulama sonucu dogrulanamadi."),
             )
+        if session.status == SESSION_FAILED:
+            session = self._record_evidence_patch_outcome(
+                session,
+                successful=False,
+                note=(session.rollback_summary or session.error),
+                rollback_verified=rollback_detected,
+            )
         store.save(session)
         if session.status == SESSION_APPLIED:
             session = self._closeout_applied_evidence_patch_session(
                 session
             )
+            if session.closed_at:
+                session = self._record_evidence_patch_outcome(
+                    session,
+                    successful=True,
+                    note=(session.closeout_summary or session.retest_summary),
+                )
             store.save(session)
         return session.report() + "\n\n" + rendered
 
