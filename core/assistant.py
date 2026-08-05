@@ -462,7 +462,8 @@ class AssistantEngine:
                     DATA_DIR
                     / "diagnostics"
                     / "pending_evidence_research.json"
-                )
+                ),
+                result_handler=self._handle_evidence_research_result,
             )
         )
         self.retest_command_coordinator = RetestCommandCoordinator(
@@ -6310,6 +6311,100 @@ class AssistantEngine:
 
         return outcome.report
 
+    def _handle_evidence_research_result(
+        self,
+        result,
+    ) -> str | None:
+        """Advance successful research to a validated patch session.
+
+        External research remains permission-bound. This callback only runs
+        after exact RS approval. It may prepare and validate an EditProposal,
+        but it never opens the apply gate or changes source files.
+        """
+        proposal = getattr(result, "patch_proposal", None)
+        if proposal is None:
+            return None
+
+        prepared = self.prepare_evidence_patch_proposal(proposal)
+        store = self._evidence_patch_session_store()
+        session = store.load()
+        if (
+            session is None
+            or session.status != SESSION_EDIT_PROPOSAL_READY
+        ):
+            return prepared
+
+        validated = self.validate_evidence_patch_session()
+        return prepared + "\n\n" + validated
+
+    @staticmethod
+    def _extract_patch_session_id(text: str) -> str | None:
+        match = re.search(
+            r"\bPS[-_ ]?([A-Fa-f0-9]{12})\b",
+            str(text or ""),
+        )
+        if match is None:
+            return None
+        return "PS-" + match.group(1).upper()
+
+    def _patch_session_command_request(
+        self,
+        text: str,
+    ) -> str | None:
+        """Handle exact PS approval, rejection and status locally."""
+        normalized = self.command_key(text)
+        session_id = self._extract_patch_session_id(text)
+        patch_subject = bool(session_id) or any(
+            marker in normalized
+            for marker in (
+                "patch oturumu",
+                "kanit patch oturumu",
+                "patch session",
+            )
+        )
+        if not patch_subject:
+            return None
+
+        store = self._evidence_patch_session_store()
+        session = store.load()
+        if session is None:
+            return "Etkin bir kanit patch oturumu yok."
+
+        if session_id is not None and session_id != session.session_id:
+            return (
+                "Patch oturum kimligi eslesmiyor; "
+                "hicbir kod degistirilmedi."
+            )
+
+        effective_id = session_id or session.session_id
+        if any(
+            word.startswith(("reddet", "iptal"))
+            for word in normalized.split()
+        ):
+            return self.reject_evidence_patch_session(effective_id)
+
+        if any(
+            word.startswith(("durum", "goster", "nedir", "anlat"))
+            for word in normalized.split()
+        ):
+            return session.report()
+
+        if any(
+            word.startswith(("onayla", "uygula"))
+            for word in normalized.split()
+        ):
+            approved = self.approve_evidence_patch_session(effective_id)
+            refreshed = store.load()
+            if (
+                refreshed is None
+                or refreshed.status != SESSION_APPROVED
+            ):
+                return approved
+            applied = self.apply_evidence_patch_session(effective_id)
+            return approved + "\n\n" + applied
+
+        return session.report()
+
     def _research_command_request(
         self,
         text: str,
@@ -6327,7 +6422,8 @@ class AssistantEngine:
                     DATA_DIR
                     / "diagnostics"
                     / "pending_evidence_research.json"
-                )
+                ),
+                result_handler=self._handle_evidence_research_result,
             )
             self.evidence_research_command_coordinator = (
                 coordinator
@@ -10232,6 +10328,9 @@ class AssistantEngine:
         if not text:
             return "Komut duyamadım."
         normalized = self.command_key(text)
+        patch_session_command = self._patch_session_command_request(text)
+        if patch_session_command is not None:
+            return patch_session_command
         reserved_self_repair = self._reserved_self_repair_request(text)
         if reserved_self_repair is not None:
             return reserved_self_repair

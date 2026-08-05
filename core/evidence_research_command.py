@@ -26,6 +26,10 @@ ResearchExecutor = Callable[
     [EvidenceResearchApprovalSession],
     EvidenceResearchExecutionResult,
 ]
+ResearchResultHandler = Callable[
+    [EvidenceResearchExecutionResult],
+    str | None,
+]
 
 
 class EvidenceResearchCommandCoordinator:
@@ -34,9 +38,11 @@ class EvidenceResearchCommandCoordinator:
         *,
         store: EvidenceResearchApprovalStore,
         executor: ResearchExecutor = execute_approved_research,
+        result_handler: ResearchResultHandler | None = None,
     ) -> None:
         self.store = store
         self.executor = executor
+        self.result_handler = result_handler
 
     def _load_session(
         self,
@@ -146,7 +152,24 @@ class EvidenceResearchCommandCoordinator:
             )
             self.store.save(stored)
 
-            return result.report()
+            rendered = result.report()
+            if (
+                terminal_status == COMPLETED
+                and self.result_handler is not None
+            ):
+                try:
+                    follow_up = self.result_handler(result)
+                except Exception as exc:
+                    follow_up = (
+                        "ARASTIRMA SONRASI MUHENDISLIK AKISI\n"
+                        "Durum: FAILED\n"
+                        f"Hata: {type(exc).__name__}: {exc}\n"
+                        "Kaynak kodu degistirilmedi."
+                    )
+                if str(follow_up or "").strip():
+                    rendered += "\n\n" + str(follow_up).strip()
+
+            return rendered
 
         normalized = str(text or "").casefold().strip()
 
