@@ -42,6 +42,7 @@ from artmach_assistant.core.evidence_maintenance import build_evidence_maintenan
 from artmach_assistant.core.evidence_retest import RetestPlan, build_retest_plan
 from artmach_assistant.core.evidence_retest_command import RetestCommandCoordinator
 from artmach_assistant.core.evidence_retest_session import RetestApprovalStore
+from artmach_assistant.core.evidence_retest_completion import RetestCompletionStore
 from artmach_assistant.core.evidence_research_handoff import EvidenceResearchHandoff
 from artmach_assistant.core.evidence_research_session import EvidenceResearchApprovalStore
 from artmach_assistant.core.system_control import SystemControlService
@@ -443,6 +444,11 @@ class AssistantEngine:
             source_root=self.own_project_root(),
             plan_provider=self._build_evidence_retest_plan,
             result_handler=self._handle_retest_research_handoff,
+            completion_store=RetestCompletionStore(
+                DATA_DIR
+                / "diagnostics"
+                / "completed_retests.json"
+            ),
         )
         self.project_memory = ProjectDevelopmentMemory(DATA_DIR / "project_memory")
         self.project_development_planner = ProjectDevelopmentPlanner(

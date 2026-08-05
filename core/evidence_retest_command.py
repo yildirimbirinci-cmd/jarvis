@@ -13,6 +13,10 @@ from artmach_assistant.core.evidence_retest_executor import (
     RetestExecutionResult,
     execute_primary_retest,
 )
+from artmach_assistant.core.evidence_retest_completion import (
+    RetestCompletionStore,
+    approval_id_for_item,
+)
 from artmach_assistant.core.evidence_retest_session import (
     APPROVED,
     CANCELLED,
@@ -128,6 +132,7 @@ class RetestCommandCoordinator:
             [RetestItem, RetestExecutionResult],
             str | None,
         ] | None = None,
+        completion_store: RetestCompletionStore | None = None,
     ) -> None:
         self.store = store
         self.source_root = Path(
@@ -136,6 +141,7 @@ class RetestCommandCoordinator:
         self.plan_provider = plan_provider
         self.executor = executor
         self.result_handler = result_handler
+        self.completion_store = completion_store
 
     def _load_session(
         self,
@@ -159,15 +165,30 @@ class RetestCommandCoordinator:
                 ),
             )
 
-    @staticmethod
+    def _completed_ids(self) -> frozenset[str]:
+        if self.completion_store is None:
+            return frozenset()
+
+        try:
+            return self.completion_store.completed_ids()
+        except Exception:
+            return frozenset()
+
     def _first_automated(
+        self,
         plan: RetestPlan,
     ) -> RetestItem | None:
+        completed_ids = self._completed_ids()
+
         return next(
             (
                 item
                 for item in plan.items
-                if item.status == AUTOMATED
+                if (
+                    item.status == AUTOMATED
+                    and approval_id_for_item(item)
+                    not in completed_ids
+                )
             ),
             None,
         )
@@ -227,7 +248,27 @@ class RetestCommandCoordinator:
             )
             self.store.save(completed)
 
+            if self.completion_store is not None:
+                try:
+                    self.completion_store.record(
+                        approved,
+                        result,
+                    )
+                except Exception as exc:
+                    completion_warning = (
+                        "Yeniden test sonucu completion history "
+                        "kaydina yazilamadi: "
+                        f"{type(exc).__name__}: {exc}"
+                    )
+                else:
+                    completion_warning = ""
+            else:
+                completion_warning = ""
+
             rendered = _render_execution_result(result)
+
+            if completion_warning:
+                rendered += "\n\n" + completion_warning
 
             if self.result_handler is not None:
                 try:
