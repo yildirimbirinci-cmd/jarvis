@@ -5100,6 +5100,9 @@ class AssistantEngine:
                 )
                 return
             completed = store.complete(task, **result)
+            completed = self._advance_completed_research_to_repair(
+                completed
+            )
             self._emit_self_improvement_notification(completed)
             self._remember_action_context(
                 "self_improvement_research",
@@ -5114,6 +5117,79 @@ class AssistantEngine:
                 "Kendini geliştirme araştırması tamamlanamadı",
                 failed.user_report(),
             )
+
+
+    def _advance_completed_research_to_repair(self, task):
+        """Continue completed research through planning and bounded repair."""
+        store = getattr(self, "self_improvement_research", None)
+        if store is None:
+            return task
+        try:
+            planned = store.prepare_plan(task)
+        except Exception as exc:
+            return store.record_automation_result(
+                task,
+                state="failed",
+                summary=(
+                    "Araştırma tamamlandı ancak güvenli plan hazırlanamadı: "
+                    f"{type(exc).__name__}: {exc}"
+                ),
+            )
+
+        runtime_ids = tuple(
+            str(item).strip().upper()
+            for item in planned.evidence_ids
+            if str(item).strip().upper().startswith("RUN-")
+        )
+        if not runtime_ids:
+            return store.record_automation_result(
+                planned,
+                state="inconclusive",
+                summary=(
+                    "Plan hazırlandı fakat onarıma bağlanabilecek kesin bir "
+                    "çalışma zamanı bulgusu bulunamadı; hiçbir dosya değiştirilmedi."
+                ),
+            )
+
+        finding_id = runtime_ids[0]
+        store.record_automation_result(
+            planned,
+            state="running",
+            summary=f"{finding_id} için güvenli onarım zinciri başlatıldı.",
+        )
+        output = self.run_autonomous_runtime_repair(finding_id)
+        repair_session = self._self_repair_store().load()
+        state = str(getattr(repair_session, "state", "") or "")
+        if (
+            repair_session is not None
+            and repair_session.finding_id == finding_id
+            and state == "completed"
+        ):
+            final_state = "completed"
+            summary = (
+                f"{finding_id} için plan, patch, doğrulama, uygulama ve "
+                "yeniden kontrol zinciri başarıyla tamamlandı."
+            )
+        elif state in {"proposal_failed", "cancelled", "stale"}:
+            final_state = "failed"
+            summary = (
+                f"{finding_id} için güvenli çözüm tamamlanamadı; "
+                "bozuk veya doğrulanmamış değişiklik uygulanmadı. "
+                + str(output).strip()[-1200:]
+            )
+        else:
+            final_state = "blocked"
+            summary = (
+                f"{finding_id} için plan hazırlandı ancak güvenli uygulama "
+                "koşulları tamamlanmadı; hiçbir doğrulanmamış değişiklik uygulanmadı. "
+                + str(output).strip()[-1200:]
+            )
+        latest = store.load(task.task_id) or planned
+        return store.record_automation_result(
+            latest,
+            state=final_state,
+            summary=summary,
+        )
 
     def _run_self_improvement_external_research(self, task_id: str) -> None:
         store = getattr(self, "self_improvement_research", None)

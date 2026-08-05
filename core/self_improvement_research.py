@@ -360,6 +360,8 @@ class SelfImprovementResearchTask:
     experiment_request_state: str = ""
     experiment_request_reason: str = ""
     experiment_result_reference: str = ""
+    automation_state: str = "not_started"
+    automation_summary: str = ""
     error: str = ""
 
     def to_dict(self) -> dict[str, object]:
@@ -435,6 +437,8 @@ class SelfImprovementResearchTask:
             experiment_request_state=str(payload.get("experiment_request_state", "")),
             experiment_request_reason=str(payload.get("experiment_request_reason", "")),
             experiment_result_reference=str(payload.get("experiment_result_reference", "")),
+            automation_state=str(payload.get("automation_state", "not_started")),
+            automation_summary=str(payload.get("automation_summary", "")),
             error=str(payload.get("error", "")),
         )
 
@@ -469,16 +473,30 @@ class SelfImprovementResearchTask:
                 f"Sonraki güvenli adım: {next_step} "
                 "Bir kök neden uydurmadım ve kodumu değiştirmedim."
             )
+        automation = self.automation_summary.strip()
+        if automation:
+            continuation = (
+                "\n\nBakım zinciri sonucu: "
+                + automation
+            )
+        elif self.automation_state == "running":
+            continuation = (
+                "\n\nAraştırma sonucu otomatik bakım zincirine aktarıldı; "
+                "planlama ve güvenli doğrulama devam ediyor."
+            )
+        else:
+            continuation = (
+                "\n\nAraştırma tamamlandı ancak otomatik bakım sonucu henüz kaydedilmedi."
+            )
         return (
             "Araştırmayı tamamladım.\n\n"
             f"Ne buldum: {self.summary}\n"
             f"Bunun anlamı: {self.cause}\n"
             f"Araştırmanın işaret ettiği yaklaşım: {self.solution}\n"
             f"Olası fayda: {self.benefit}\n"
-            f"Belirsizlik veya risk: {self.risk}\n\n"
-            "Bu yalnızca araştırma sonucudur; çözüm seçmedim, plan veya patch üretmedim ve "
-            "henüz hiçbir dosyayı değiştirmedim. Plan istersen Self Improvement Planner ayrı olarak çalışır. "
-            "Teknik kayıtları görmek için 'teknik ayrıntıları göster' de."
+            f"Belirsizlik veya risk: {self.risk}"
+            + continuation
+            + "\n\nTeknik kayıtları görmek için 'teknik ayrıntıları göster' de."
         )
 
     def plan_report(self) -> str:
@@ -1116,6 +1134,35 @@ class SelfImprovementResearchStore:
             test_plan=tests,
             plan_created_at=_now(),
             journal_entries=task.journal_entries + (f"{_now()} — Araştırma sonucu için iyileştirme planı hazırlandı.",),
+        )
+        self.save(updated)
+        return updated
+
+
+    def record_automation_result(
+        self,
+        task: SelfImprovementResearchTask,
+        *,
+        state: str,
+        summary: str,
+    ) -> SelfImprovementResearchTask:
+        allowed = {
+            "running",
+            "completed",
+            "blocked",
+            "failed",
+            "inconclusive",
+        }
+        normalized_state = str(state or "").strip().casefold()
+        if normalized_state not in allowed:
+            raise ValueError("invalid automation state")
+        updated = replace(
+            task,
+            automation_state=normalized_state,
+            automation_summary=" ".join(str(summary or "").split())[:4000],
+            journal_entries=task.journal_entries + (
+                f"{_now()} — Otomatik bakım zinciri: {normalized_state}.",
+            ),
         )
         self.save(updated)
         return updated
