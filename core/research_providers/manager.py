@@ -1,0 +1,108 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+import requests
+
+from artmach_assistant.core.research_providers.base import (
+    ProviderSearchResult,
+    SearchProvider,
+)
+from artmach_assistant.core.research_providers.duckduckgo_html import (
+    DuckDuckGoHtmlProvider,
+)
+from artmach_assistant.core.research_providers.duckduckgo_lite import (
+    DuckDuckGoLiteProvider,
+)
+from artmach_assistant.core.research_providers.bing_html import (
+    BingHtmlProvider,
+)
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderFailure:
+    provider: str
+    error: str
+
+
+class SearchProviderManager:
+    def __init__(
+        self,
+        *,
+        providers: tuple[SearchProvider, ...],
+    ) -> None:
+        self.providers = providers
+
+    @classmethod
+    def default(
+        cls,
+        **provider_kwargs,
+    ) -> "SearchProviderManager":
+        return cls(
+            providers=(
+                DuckDuckGoHtmlProvider(
+                    **provider_kwargs
+                ),
+                DuckDuckGoLiteProvider(
+                    **provider_kwargs
+                ),
+                BingHtmlProvider(
+                    **provider_kwargs
+                ),
+            )
+        )
+
+    def search(
+        self,
+        query: str,
+        max_results: int,
+    ) -> tuple[
+        list[ProviderSearchResult],
+        tuple[ProviderFailure, ...],
+    ]:
+        merged: list[ProviderSearchResult] = []
+        seen: set[str] = set()
+        failures: list[ProviderFailure] = []
+
+        for provider in self.providers:
+            try:
+                rows = provider.search(
+                    query,
+                    max_results,
+                )
+            except (
+                requests.RequestException,
+                RuntimeError,
+                ValueError,
+                TypeError,
+                OSError,
+            ) as exc:
+                failures.append(
+                    ProviderFailure(
+                        provider=provider.name,
+                        error=(
+                            f"{type(exc).__name__}: {exc}"
+                        ),
+                    )
+                )
+                continue
+
+            provider_results: list[ProviderSearchResult] = []
+
+            for row in rows:
+                key = row.url.casefold().rstrip("/")
+
+                if not key or key in seen:
+                    continue
+
+                seen.add(key)
+                provider_results.append(row)
+
+                if len(provider_results) >= max_results:
+                    break
+
+            if provider_results:
+                merged.extend(provider_results)
+                return merged, tuple(failures)
+
+        return merged, tuple(failures)

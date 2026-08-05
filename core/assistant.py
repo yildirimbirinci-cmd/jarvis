@@ -46,6 +46,7 @@ from artmach_assistant.core.evidence_retest_command import RetestCommandCoordina
 from artmach_assistant.core.evidence_retest_session import RetestApprovalStore
 from artmach_assistant.core.evidence_retest_completion import RetestCompletionStore
 from artmach_assistant.core.evidence_research_handoff import EvidenceResearchHandoff
+from artmach_assistant.core.evidence_research_coordinator import EvidenceResearchCoordinator
 from artmach_assistant.core.evidence_research_session import EvidenceResearchApprovalStore
 from artmach_assistant.core.evidence_research_command import EvidenceResearchCommandCoordinator
 from artmach_assistant.core.system_control import SystemControlService
@@ -3559,13 +3560,69 @@ class AssistantEngine:
                 getattr(finding, "title", "")
                 or "Runtime finding"
             ),
-            path=str(
-                getattr(finding, "source_path", "")
-                or ""
+            path=next(
+                (
+                    str(value).strip()
+                    for value in (
+                        *tuple(
+                            getattr(
+                                finding,
+                                "affected_paths",
+                                (),
+                            )
+                            or ()
+                        ),
+                        *tuple(
+                            getattr(
+                                item,
+                                "source_path",
+                                "",
+                            )
+                            for item in (
+                                getattr(
+                                    finding,
+                                    "evidence",
+                                    (),
+                                )
+                                or ()
+                            )
+                        ),
+                    )
+                    if str(value or "").strip()
+                ),
+                "",
             ),
-            symbol=str(
-                getattr(finding, "symbol", "")
-                or ""
+            symbol=next(
+                (
+                    str(value).strip()
+                    for value in (
+                        *tuple(
+                            getattr(
+                                finding,
+                                "affected_symbols",
+                                (),
+                            )
+                            or ()
+                        ),
+                        *tuple(
+                            getattr(
+                                item,
+                                "symbol",
+                                "",
+                            )
+                            for item in (
+                                getattr(
+                                    finding,
+                                    "evidence",
+                                    (),
+                                )
+                                or ()
+                            )
+                        ),
+                    )
+                    if str(value or "").strip()
+                ),
+                "",
             ),
             evidence=str(
                 getattr(finding, "explanation", "")
@@ -3575,13 +3632,35 @@ class AssistantEngine:
             lifecycle="ACTIVE",
         )
 
-        plan = build_evidence_research_plan(evidence)
+        coordinator = getattr(
+            self,
+            "evidence_research_coordinator",
+            None,
+        )
+
+        if not isinstance(
+            coordinator,
+            EvidenceResearchCoordinator,
+        ):
+            coordinator = EvidenceResearchCoordinator(
+                store=EvidenceResearchApprovalStore(
+                    DATA_DIR
+                    / "diagnostics"
+                    / "pending_evidence_research.json"
+                )
+            )
+            self.evidence_research_coordinator = coordinator
+
+        outcome = coordinator.coordinate(
+            evidence,
+            local_review_complete=True,
+            local_evidence_sufficient=False,
+        )
 
         return (
-            plan.report()
+            outcome.report
             + "\n\n"
-            + "Bu plan salt okunurdur. "
-            + "Internet arastirmasi baslatilmadi ve "
+            + "Internet arastirmasi henuz baslatilmadi ve "
             + "hicbir kaynak dosya degistirilmedi."
         )
 

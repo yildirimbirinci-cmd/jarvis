@@ -8,6 +8,9 @@ from artmach_assistant.core.evidence_research_session import (
     APPROVED,
     EvidenceResearchApprovalSession,
 )
+from artmach_assistant.core.evidence_ranking import (
+    score_evidence_source,
+)
 from artmach_assistant.core.research_manager import (
     ResearchManager,
     ResearchResult,
@@ -43,6 +46,10 @@ class RankedResearchSource:
     score: int
     official: bool
     query: str
+    authority_score: int = 0
+    relevance_score: int = 0
+    technical_density_score: int = 0
+    content_quality_score: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -98,6 +105,12 @@ class EvidenceResearchExecutionResult:
                     f"URL: {source.url}\n"
                     f"Resmi kaynak: "
                     f"{'evet' if source.official else 'hayir'}\n"
+                    f"Otorite: {source.authority_score}\n"
+                    f"Alaka: {source.relevance_score}\n"
+                    f"Teknik yogunluk: "
+                    f"{source.technical_density_score}\n"
+                    f"Icerik kalitesi: "
+                    f"{source.content_quality_score}\n"
                     f"Sorgu: {source.query}\n"
                     f"Ozet: {source.snippet[:500]}"
                 )
@@ -178,34 +191,6 @@ def _is_official_source(
     )
 
 
-def _source_score(
-    source: ResearchSource,
-    *,
-    official: bool,
-) -> int:
-    score = 0
-
-    if official:
-        score += 50
-
-    if source.content.strip():
-        score += 20
-
-    if len(source.content.strip()) >= 1000:
-        score += 10
-
-    if source.snippet.strip():
-        score += 8
-
-    if source.title.strip():
-        score += 4
-
-    if source.url.startswith("https://"):
-        score += 3
-
-    return min(score, 100)
-
-
 def _rank_sources(
     results: Iterable[ResearchResult],
     *,
@@ -224,19 +209,36 @@ def _rank_sources(
                 source,
                 preferred_sources,
             )
+            title = str(source.title or "").strip()
+            url = str(source.url or "").strip()
+            snippet = str(source.snippet or "").strip()
+            content = str(source.content or "")[
+                :_MAX_CONTENT_CHARS
+            ].strip()
+            query = str(result.query or "").strip()
+            evidence_score = score_evidence_source(
+                query=query,
+                title=title,
+                url=url,
+                snippet=snippet,
+                content=content,
+            )
+
+            if not evidence_score.accepted:
+                continue
+
             ranked = RankedResearchSource(
-                title=str(source.title or "").strip(),
-                url=str(source.url or "").strip(),
-                snippet=str(source.snippet or "").strip(),
-                content=str(source.content or "")[
-                    :_MAX_CONTENT_CHARS
-                ].strip(),
-                score=_source_score(
-                    source,
-                    official=official,
-                ),
+                title=title,
+                url=url,
+                snippet=snippet,
+                content=content,
+                score=evidence_score.total,
                 official=official,
-                query=str(result.query or "").strip(),
+                query=query,
+                authority_score=evidence_score.authority,
+                relevance_score=evidence_score.relevance,
+                technical_density_score=evidence_score.technical_density,
+                content_quality_score=evidence_score.content_quality,
             )
 
             existing = unique.get(canonical)
@@ -247,16 +249,29 @@ def _rank_sources(
             ):
                 unique[canonical] = ranked
 
-    return tuple(
-        sorted(
-            unique.values(),
-            key=lambda row: (
-                -row.score,
-                not row.official,
-                row.url.casefold(),
-            ),
-        )[:_MAX_SOURCES]
+    ordered = sorted(
+        unique.values(),
+        key=lambda row: (
+            -row.score,
+            -row.relevance_score,
+            -row.authority_score,
+            row.url.casefold(),
+        ),
     )
+    selected: list[RankedResearchSource] = []
+    host_counts: dict[str, int] = {}
+
+    for row in ordered:
+        host = str(urlparse(row.url).hostname or "").casefold()
+        count = host_counts.get(host, 0)
+        if count >= 2:
+            continue
+        host_counts[host] = count + 1
+        selected.append(row)
+        if len(selected) >= _MAX_SOURCES:
+            break
+
+    return tuple(selected)
 
 
 def execute_approved_research(
@@ -372,7 +387,8 @@ def execute_approved_research(
         queries=queries,
         sources=sources,
         reason=(
-            f"{len(sources)} tekil kanit kaynagi toplandi. "
-            "Kaynaklar guven ve icerik sinyallerine gore siralandi."
+            f"{len(sources)} tekil ve ilgili kanit kaynagi "
+            "kabul edildi. Kaynaklar otorite, alaka, teknik "
+            "yogunluk ve icerik kalitesine gore siralandi."
         ),
     )

@@ -9,6 +9,7 @@ from urllib.parse import parse_qs, unquote, urljoin, urlparse
 
 import requests
 from bs4 import BeautifulSoup
+from artmach_assistant.core.research_providers import SearchProviderManager
 
 
 _MAX_SEARCH_RESULTS = 20
@@ -68,41 +69,53 @@ class ResearchManager:
             raise ValueError("max_results sıfırdan büyük olmalıdır.")
         max_results = min(max_results, _MAX_SEARCH_RESULTS)
 
-        response = requests.get(
-            "https://html.duckduckgo.com/html/",
-            params={"q": query},
-            headers={"User-Agent": self.USER_AGENT},
-            timeout=20,
+        provider_manager = SearchProviderManager.default(
+            http_get=requests.get,
+            user_agent=self.USER_AGENT,
+            public_url_validator=self._is_public_http_url,
+            clean_url=self._clean_url,
+            canonical_url=self._canonical_url,
+            bounded_response_text=self._bounded_response_text,
+            max_html_bytes=_MAX_SEARCH_HTML_BYTES,
         )
-        response.raise_for_status()
-        raw_html = self._bounded_response_text(response, _MAX_SEARCH_HTML_BYTES)
-        soup = BeautifulSoup(raw_html, "html.parser")
-        sources: list[ResearchSource] = []
-        seen: set[str] = set()
-        for result in soup.select(".result"):
-            link = result.select_one(".result__a")
-            if not link:
-                continue
-            url = self._clean_url(link.get("href", ""))
-            canonical = self._canonical_url(url)
-            if not canonical or canonical in seen or not self._is_public_http_url(url):
-                continue
-            seen.add(canonical)
-            snippet_node = result.select_one(".result__snippet")
-            snippet = snippet_node.get_text(" ", strip=True) if snippet_node else ""
-            sources.append(
-                ResearchSource(
-                    link.get_text(" ", strip=True)[:500],
-                    url[:4000],
-                    snippet[:2000],
-                )
+        provider_rows, failures = provider_manager.search(
+            query,
+            max_results,
+        )
+        sources = [
+            ResearchSource(
+                row.title,
+                row.url,
+                row.snippet,
             )
-            if len(sources) >= max_results:
-                break
+            for row in provider_rows
+        ]
+
         if not sources:
-            raise RuntimeError("Arama motorundan güvenli bir sonuç alınamadı. İnternet bağlantısını kontrol et.")
-        hydrated = [self._fetch(source) for source in sources]
-        return ResearchResult(query=query, sources=hydrated)
+            detail = "; ".join(
+                (
+                    f"{failure.provider}: "
+                    f"{failure.error}"
+                )
+                for failure in failures
+            )
+            if not detail:
+                detail = (
+                    "all providers returned empty results"
+                )
+            raise RuntimeError(
+                "No safe search result was returned. "
+                + detail
+            )
+
+        hydrated = [
+            self._fetch(source)
+            for source in sources
+        ]
+        return ResearchResult(
+            query=query,
+            sources=hydrated,
+        )
 
     def search_many(
         self,
