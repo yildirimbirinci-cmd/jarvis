@@ -49,6 +49,8 @@ from artmach_assistant.core.evidence_research_handoff import EvidenceResearchHan
 from artmach_assistant.core.evidence_research_coordinator import EvidenceResearchCoordinator
 from artmach_assistant.core.evidence_research_session import EvidenceResearchApprovalStore
 from artmach_assistant.core.evidence_research_command import EvidenceResearchCommandCoordinator
+from artmach_assistant.core.evidence_patch_proposal import EvidencePatchProposal
+from artmach_assistant.core.evidence_patch_handoff import build_evidence_patch_handoff
 from artmach_assistant.core.system_control import SystemControlService
 from artmach_assistant.core.voice_service import VoiceService
 from artmach_assistant.core.tts_output_routing import TtsOutputRouter
@@ -1738,6 +1740,32 @@ class AssistantEngine:
                 and handles_break
             )
         return False
+
+    def prepare_evidence_patch_proposal(
+        self,
+        proposal: EvidencePatchProposal,
+    ) -> str:
+        """Route evidence proposal into the guarded edit proposal pipeline.
+
+        This method never applies source changes. It only performs handoff
+        preflight and asks the existing own-code proposal generator to create
+        an EditProposal inside the approved path/symbol scope.
+        """
+        handoff = build_evidence_patch_handoff(
+            proposal,
+            project_root=self.own_project_root(),
+        )
+        if not handoff.ready:
+            return handoff.report()
+
+        prepared = self.prepare_own_code_proposal(
+            handoff.instruction,
+            production_repair=True,
+            approved_paths=handoff.approved_paths,
+            approved_symbols=handoff.approved_symbols,
+            plan_id=handoff.proposal_id,
+        )
+        return handoff.report() + "\n\n" + prepared
 
     def prepare_own_code_proposal(
         self,
