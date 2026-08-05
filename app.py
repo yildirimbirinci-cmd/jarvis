@@ -30,6 +30,10 @@ from artmach_assistant.core.assistant import (
 from artmach_assistant.core.constitution import ConstitutionError, ConstitutionRegistry
 from artmach_assistant.core.crash_reporter import install_crash_reporting
 from artmach_assistant.core.intent_router import IntentDecision, IntentRouter
+from artmach_assistant.core.live_operation_dialogue import (
+    is_live_operation_cancel_query,
+    is_live_operation_status_query,
+)
 from artmach_assistant.core.notification_store import NotificationStore
 from artmach_assistant.core.trust_inbox import TrustApprovalInbox
 from artmach_assistant.core.runtime_session import RuntimeSession
@@ -1444,10 +1448,12 @@ class MainWindow(QMainWindow):
     def submit_text(self, text: str) -> None:
         if self.busy():
             normalized = self.engine.command_key(text)
-            if normalized in {
-                "dur", "sus", "iptal", "cevabi durdur", "konusmayi durdur",
-                "islemi durdur", "gorevi iptal et",
-            }:
+            if is_live_operation_status_query(normalized):
+                self.chat.appendPlainText(f"SEN: {text}\n")
+                answer = self.engine.handle_local_command(text)
+                self.chat.appendPlainText(f"JARVIS: {answer}\n")
+                return
+            if is_live_operation_cancel_query(normalized):
                 self.chat.appendPlainText(f"SEN: {text}\n")
                 self.engine.voice.stop_speaking()
                 self.cancel_active_task()
@@ -1486,10 +1492,12 @@ class MainWindow(QMainWindow):
     def submit_local_command(self, text: str) -> None:
         if self.busy():
             normalized = self.engine.command_key(text)
-            if normalized in {
-                "dur", "sus", "iptal", "cevabi durdur", "konusmayi durdur",
-                "islemi durdur", "gorevi iptal et",
-            }:
+            if is_live_operation_status_query(normalized):
+                self.chat.appendPlainText(f"SES KOMUTU: {text}\n")
+                answer = self.engine.handle_local_command(text)
+                self.on_answer(answer)
+                return
+            if is_live_operation_cancel_query(normalized):
                 self.chat.appendPlainText(f"SES KOMUTU: {text}\n")
                 self.engine.voice.stop_speaking()
                 self.cancel_active_task()
@@ -2079,6 +2087,16 @@ class MainWindow(QMainWindow):
                 QTimer.singleShot(500, self.resume_wake_after_response)
                 return
         if self.worker and self.worker.isRunning():
+            if (
+                is_live_operation_status_query(normalized_command)
+                or is_live_operation_cancel_query(normalized_command)
+            ):
+                self.engine.start_dialogue()
+                self.voice_command_pending = True
+                self.voice_log(f"CANLI DURUM KOMUTU: {command}")
+                self.voice_status.setText("Devam eden islemin durumunu kontrol ediyorum.")
+                self.submit_local_command(command)
+                return
             self.voice_log("Sesli komut alınamadı: Jarvis başka bir görev yürütüyor.")
             self.voice_status.setText("Jarvis meşgul; yeniden wake word bekleniyor.")
             QTimer.singleShot(1000, self.resume_wake_after_response)

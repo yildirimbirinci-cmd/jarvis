@@ -29,11 +29,17 @@ class OperationSnapshot:
     def report(self) -> str:
         if not self.active:
             return "Şu anda çalışan uzun bir işlem yok."
-        suffix = f" %{self.percent}" if self.total > 0 else ""
-        progress = f" ({self.current}/{self.total})" if self.total > 0 else ""
-        detail = f" Son adım: {self.detail}." if self.detail else ""
-        state = "İptal ediliyor" if self.cancelled else "Devam ediyor"
-        return f"{self.name}: {self.phase}{progress}{suffix}. {state}.{detail}"
+        progress = (
+            f" {self.current}/{self.total} adım tamamlandı"
+            if self.total > 0
+            else ""
+        )
+        if self.cancelled:
+            state = "İptal isteğini aldım; güvenli bir yerde duruyorum."
+        else:
+            state = "İşlem devam ediyor."
+        detail = f" Şu ana kadar: {self.detail}." if self.detail else ""
+        return f"Şu an {self.phase.lower()}.{progress} {state}{detail}"
 
 
 class OperationController:

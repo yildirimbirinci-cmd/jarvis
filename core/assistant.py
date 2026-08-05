@@ -4274,6 +4274,13 @@ class AssistantEngine:
             item.last_seen,
         )
 
+    def _operation_controller_instance(self) -> OperationController:
+        controller = getattr(self, "operation_controller", None)
+        if not isinstance(controller, OperationController):
+            controller = OperationController()
+            self.operation_controller = controller
+        return controller
+
     def run_one_shot_autonomous_maintenance(
         self,
         *,
@@ -4284,102 +4291,158 @@ class AssistantEngine:
         limit = max(1, min(int(max_findings), 12))
         attempted: set[str] = set()
         records: list[MaintenanceRepairRecord] = []
-
-        # Refresh runtime and static maintenance evidence before selecting work.
-        self.maintenance_review(
-            own_code=True,
-            refresh_architecture=True,
+        operation = self._operation_controller_instance()
+        operation.start(
+            "Bakim oturumu",
+            phase="Kendimi kontrol ediyorum",
+            total=limit,
         )
 
-        for _index in range(limit):
-            try:
-                report = self.runtime_health_assessment(
-                    own_code=True,
-                    lookback_hours=168,
-                )
-            except Exception as exc:
-                records.append(
-                    MaintenanceRepairRecord(
-                        finding_id="MAINTENANCE-SCAN",
-                        title="Bakim taramasi",
-                        status="FAILED",
-                        detail=str(exc)[:600],
-                    )
-                )
-                break
-
-            candidates = [
-                item
-                for item in report.findings
-                if item.finding_id not in attempted
-            ]
-            if not candidates:
-                break
-            candidates.sort(
-                key=self._runtime_maintenance_priority,
-                reverse=True,
+        try:
+            operation.checkpoint()
+            self.maintenance_review(
+                own_code=True,
+                refresh_architecture=True,
             )
-            finding = candidates[0]
-            attempted.add(finding.finding_id)
+            operation.update(
+                phase="Buldugum sorunlari siraliyorum",
+                detail="Ilk tarama tamamlandi",
+            )
 
-            decision = assess_autonomous_runtime_repair(finding)
-            if not decision.allowed:
+            for index in range(limit):
+                operation.checkpoint()
+                try:
+                    report = self.runtime_health_assessment(
+                        own_code=True,
+                        lookback_hours=168,
+                    )
+                except Exception as exc:
+                    records.append(
+                        MaintenanceRepairRecord(
+                            finding_id="MAINTENANCE-SCAN",
+                            title="Bakim taramasi",
+                            status="FAILED",
+                            detail=str(exc)[:600],
+                        )
+                    )
+                    break
+
+                candidates = [
+                    item
+                    for item in report.findings
+                    if item.finding_id not in attempted
+                ]
+                if not candidates:
+                    break
+                candidates.sort(
+                    key=self._runtime_maintenance_priority,
+                    reverse=True,
+                )
+                finding = candidates[0]
+                attempted.add(finding.finding_id)
+                operation.update(
+                    phase="Bir sorunu inceliyorum",
+                    current=index,
+                    detail=f"{finding.finding_id}: {finding.title}",
+                )
+                operation.checkpoint()
+
+                decision = assess_autonomous_runtime_repair(finding)
+                if not decision.allowed:
+                    records.append(
+                        MaintenanceRepairRecord(
+                            finding_id=finding.finding_id,
+                            title=finding.title,
+                            status="BLOCKED",
+                            detail=decision.reason[:700],
+                        )
+                    )
+                    operation.update(
+                        current=index + 1,
+                        detail=(
+                            f"{len(records)} sorun incelendi; "
+                            "sonuncusu guvenli olmadigi icin birakildi"
+                        ),
+                    )
+                    continue
+
+                operation.update(
+                    phase="Guvenli bir duzeltme deniyorum",
+                    detail=f"{finding.finding_id}: {finding.title}",
+                )
+                output = self.run_autonomous_runtime_repair(
+                    finding.finding_id
+                )
+                operation.checkpoint()
+                session = self._self_repair_store().load()
+                state = (
+                    session.state
+                    if session is not None
+                    and session.finding_id == finding.finding_id
+                    else ""
+                )
+                if state == "completed":
+                    status = "COMPLETED"
+                elif state in {
+                    "proposal_failed",
+                    "cancelled",
+                    "stale",
+                }:
+                    status = "FAILED"
+                else:
+                    status = "BLOCKED"
                 records.append(
                     MaintenanceRepairRecord(
                         finding_id=finding.finding_id,
                         title=finding.title,
-                        status="BLOCKED",
-                        detail=decision.reason[:700],
+                        status=status,
+                        detail=str(output).strip()[-700:],
                     )
                 )
-                continue
+                fixed = sum(row.status == "COMPLETED" for row in records)
+                blocked = sum(row.status == "BLOCKED" for row in records)
+                failed = sum(row.status == "FAILED" for row in records)
+                operation.update(
+                    phase="Sonucu kontrol ediyorum",
+                    current=index + 1,
+                    detail=(
+                        f"{fixed} duzeltildi, {blocked} birakildi, "
+                        f"{failed} basarisiz oldu"
+                    ),
+                )
 
-            output = self.run_autonomous_runtime_repair(
-                finding.finding_id
+            operation.checkpoint()
+            try:
+                final_report = self.runtime_health_assessment(
+                    own_code=True,
+                    lookback_hours=168,
+                )
+                remaining = [
+                    item
+                    for item in final_report.findings
+                    if item.finding_id not in attempted
+                ]
+            except Exception:
+                remaining = []
+            result = result_from_records(
+                tuple(records),
+                limit_reached=bool(remaining and len(records) >= limit),
             )
-            session = self._self_repair_store().load()
-            state = (
-                session.state
-                if session is not None
-                and session.finding_id == finding.finding_id
-                else ""
-            )
-            if state == "completed":
-                status = "COMPLETED"
-            elif state in {
-                "proposal_failed",
-                "cancelled",
-                "stale",
-            }:
-                status = "FAILED"
-            else:
-                status = "BLOCKED"
-            records.append(
-                MaintenanceRepairRecord(
-                    finding_id=finding.finding_id,
-                    title=finding.title,
-                    status=status,
-                    detail=str(output).strip()[-700:],
+            operation.finish(
+                detail=(
+                    f"{result.completed_count} duzeltildi, "
+                    f"{result.blocked_count} birakildi, "
+                    f"{result.failed_count} basarisiz oldu"
                 )
             )
-
-        try:
-            final_report = self.runtime_health_assessment(
-                own_code=True,
-                lookback_hours=168,
-            )
-            remaining = [
-                item
-                for item in final_report.findings
-                if item.finding_id not in attempted
-            ]
-        except Exception:
-            remaining = []
-        result = result_from_records(
-            tuple(records),
-            limit_reached=bool(remaining and len(records) >= limit),
-        )
-        return result.report()
+            return result.report()
+        except OperationCancelled:
+            operation.finish(detail="Kullanici istegiyle durduruldu")
+            partial = result_from_records(tuple(records))
+            return partial.report() + "\n\nBakim kullanici istegiyle durduruldu."
+        except Exception as exc:
+            operation.finish(detail=f"Bakim tamamlanamadi: {exc}")
+            raise
 
     def _reserved_self_repair_request(self, text: str) -> str | None:
         """Route self-repair commands before tools, old plans and any LLM."""
@@ -9061,10 +9124,10 @@ class AssistantEngine:
         return result.report()
 
     def operation_status_report(self) -> str:
-        return self.operation_controller.snapshot().report()
+        return self._operation_controller_instance().snapshot().report()
 
     def cancel_active_operation(self) -> str:
-        if self.operation_controller.cancel():
+        if self._operation_controller_instance().cancel():
             return "Çalışan işlemi iptal etme isteğini aldım. Güvenli durma noktasında işlem sonlandırılacak."
         return "Şu anda iptal edilebilecek çalışan bir işlem yok."
 
@@ -9495,6 +9558,12 @@ class AssistantEngine:
         ), lambda _text: self.current_workspace_report(), 0.72))
         register(Intent("operation_status", (
             "ne durumda", "islem ne durumda", "işlem ne durumda",
+            "hangi asamadasin", "hangi aşamadasın",
+            "su an ne yapiyorsun", "şu an ne yapıyorsun",
+            "simdiye kadar ne buldun", "şimdiye kadar ne buldun",
+            "ne buldun", "neleri duzelttin", "neleri düzelttin",
+            "hangi hatayi inceliyorsun", "hangi hatayı inceliyorsun",
+            "ne kadar isin kaldi", "ne kadar işin kaldı",
             "ilerleme durumu", "ilerlemeyi goster", "ilerlemeyi göster",
             "what is the progress", "operation status",
         ), lambda _text: self.operation_status_report(), 0.76))
