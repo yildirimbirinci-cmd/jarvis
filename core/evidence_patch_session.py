@@ -17,6 +17,7 @@ SESSION_EDIT_PROPOSAL_READY = "EDIT_PROPOSAL_READY"
 SESSION_VALIDATION_PENDING = "VALIDATION_PENDING"
 SESSION_APPROVAL_PENDING = "APPROVAL_PENDING"
 SESSION_APPROVED = "APPROVED"
+SESSION_APPLYING = "APPLYING"
 SESSION_APPLIED = "APPLIED"
 SESSION_REJECTED = "REJECTED"
 SESSION_FAILED = "FAILED"
@@ -28,7 +29,8 @@ _ALLOWED = {
     SESSION_EDIT_PROPOSAL_READY: {SESSION_VALIDATION_PENDING, SESSION_FAILED, SESSION_REJECTED},
     SESSION_VALIDATION_PENDING: {SESSION_APPROVAL_PENDING, SESSION_FAILED, SESSION_REJECTED},
     SESSION_APPROVAL_PENDING: {SESSION_APPROVED, SESSION_REJECTED, SESSION_FAILED},
-    SESSION_APPROVED: {SESSION_APPLIED, SESSION_FAILED},
+    SESSION_APPROVED: {SESSION_APPLYING, SESSION_FAILED},
+    SESSION_APPLYING: {SESSION_APPLIED, SESSION_FAILED},
     SESSION_APPLIED: set(),
     SESSION_REJECTED: set(),
     SESSION_FAILED: set(),
@@ -61,6 +63,9 @@ class EvidencePatchSession:
     validation_summary: str = ""
     worktree_summary: str = ""
     test_summary: str = ""
+    apply_summary: str = ""
+    rollback_summary: str = ""
+    version_summary: str = ""
     error: str = ""
 
     @classmethod
@@ -91,6 +96,9 @@ class EvidencePatchSession:
         validation_summary: str | None = None,
         worktree_summary: str | None = None,
         test_summary: str | None = None,
+        apply_summary: str | None = None,
+        rollback_summary: str | None = None,
+        version_summary: str | None = None,
         error: str | None = None,
     ) -> "EvidencePatchSession":
         allowed = _ALLOWED.get(self.status, set())
@@ -110,8 +118,17 @@ class EvidencePatchSession:
             test_summary=(
                 self.test_summary if test_summary is None else str(test_summary)
             ),
+            apply_summary=(
+                self.apply_summary if apply_summary is None else str(apply_summary)
+            ),
+            rollback_summary=(
+                self.rollback_summary if rollback_summary is None else str(rollback_summary)
+            ),
+            version_summary=(
+                self.version_summary if version_summary is None else str(version_summary)
+            ),
             error=self.error if error is None else str(error),
-            apply_allowed=(status == SESSION_APPROVED),
+            apply_allowed=(status in {SESSION_APPROVED, SESSION_APPLYING}),
         )
 
     def report(self) -> str:
@@ -129,6 +146,9 @@ class EvidencePatchSession:
                 f"Dogrulama ozeti: {self.validation_summary or '(yok)'}",
                 f"Worktree ozeti: {self.worktree_summary or '(yok)'}",
                 f"Test ozeti: {self.test_summary or '(yok)'}",
+                f"Uygulama ozeti: {self.apply_summary or '(yok)'}",
+                f"Rollback ozeti: {self.rollback_summary or '(yok)'}",
+                f"Surum ozeti: {self.version_summary or '(yok)'}",
                 f"Hata: {self.error or '(yok)'}",
             )
         )
@@ -155,6 +175,9 @@ class EvidencePatchSession:
             validation_summary=str(payload.get("validation_summary", "")),
             worktree_summary=str(payload.get("worktree_summary", "")),
             test_summary=str(payload.get("test_summary", "")),
+            apply_summary=str(payload.get("apply_summary", "")),
+            rollback_summary=str(payload.get("rollback_summary", "")),
+            version_summary=str(payload.get("version_summary", "")),
             error=str(payload.get("error", "")),
         )
         if not session.session_id.startswith("PS-") or not session.proposal_id:

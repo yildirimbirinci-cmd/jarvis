@@ -55,6 +55,7 @@ from artmach_assistant.core.evidence_patch_session import (
     SESSION_APPROVAL_PENDING,
     SESSION_APPROVED,
     SESSION_APPLIED,
+    SESSION_APPLYING,
     SESSION_EDIT_PROPOSAL_READY,
     SESSION_FAILED,
     SESSION_HANDOFF_READY,
@@ -1916,7 +1917,7 @@ class AssistantEngine:
         return session.report()
 
     def apply_evidence_patch_session(self, session_id: str) -> str:
-        """Apply only an explicitly approved and validated patch session."""
+        """Apply one explicitly approved patch session and persist the outcome."""
         store = self._evidence_patch_session_store()
         session = store.load()
         if session is None:
@@ -1926,31 +1927,85 @@ class AssistantEngine:
         if session.status != SESSION_APPROVED or not session.apply_allowed:
             return session.report() + "\n\nAcik uygulama onayi yok; hicbir kod degistirilmedi."
 
-        result = self.apply_pending_own_code_proposal()
-        lowered = str(result or "").casefold()
-        failed_markers = (
-            "uygulanmadi",
-            "basarisiz",
-            "başarısız",
-            "reddedildi",
-            "geri alindi",
-            "geri alındı",
+        session = session.transition(
+            SESSION_APPLYING,
+            apply_summary="Onayli taslak guvenli uygulama zincirine alindi.",
         )
-        if any(marker in lowered for marker in failed_markers):
-            session = session.transition(
-                SESSION_FAILED,
-                error=str(result or "")[-2000:],
+        store.save(session)
+
+        result = self.apply_pending_own_code_proposal()
+        rendered = str(result or "").strip()
+        lowered = rendered.casefold()
+        pending_after = getattr(
+            getattr(self, "editor", None),
+            "pending",
+            None,
+        )
+        success = (
+            pending_after is None
+            and (
+                "onayladigin kod degisikligi uygulandi" in lowered
+                or "onayladığın kod değişikliği uygulandı" in lowered
             )
-        else:
+        )
+        rollback_detected = any(
+            marker in lowered
+            for marker in (
+                "geri alindi",
+                "geri alındı",
+                "rollback",
+            )
+        )
+
+        checkpoint_match = re.search(
+            r"Geri donus noktasi:\s*([^\s]+)|"
+            r"Geri dönüş noktası:\s*([^\s]+)",
+            rendered,
+        )
+        checkpoint = ""
+        if checkpoint_match is not None:
+            checkpoint = next(
+                (group for group in checkpoint_match.groups() if group),
+                "",
+            )
+        version_match = re.search(
+            r"Surum kaydi:\s*(.+)|Surum kaydı:\s*(.+)|"
+            r"Sürüm kaydı:\s*(.+)",
+            rendered,
+        )
+        version_summary = ""
+        if version_match is not None:
+            version_summary = next(
+                (group for group in version_match.groups() if group),
+                "",
+            )[:1000]
+
+        if success:
             session = session.transition(
                 SESSION_APPLIED,
                 validation_summary=(
                     session.validation_summary
-                    + " Uygulama ve mevcut dogrulama zinciri tamamlandi."
+                    + " Uygulama, derleme, runtime ve regresyon zinciri tamamlandi."
                 ).strip(),
+                apply_summary=(
+                    rendered[-2000:]
+                    + (f" Checkpoint: {checkpoint}" if checkpoint else "")
+                ).strip(),
+                version_summary=version_summary,
+            )
+        else:
+            session = session.transition(
+                SESSION_FAILED,
+                apply_summary=rendered[-2000:],
+                rollback_summary=(
+                    "Uygulama zinciri degisikligi geri aldi."
+                    if rollback_detected
+                    else "Uygulama tamamlanmadi; kaynak durumu korunmali."
+                ),
+                error=(rendered[-2000:] or "Uygulama sonucu dogrulanamadi."),
             )
         store.save(session)
-        return session.report() + "\n\n" + str(result or "")
+        return session.report() + "\n\n" + rendered
 
     def prepare_own_code_proposal(
         self,
