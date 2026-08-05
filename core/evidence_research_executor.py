@@ -15,6 +15,10 @@ from artmach_assistant.core.evidence_conclusion import (
     EvidenceConclusion,
     build_evidence_conclusion,
 )
+from artmach_assistant.core.evidence_engineering_plan import (
+    EvidenceEngineeringPlan,
+    build_evidence_engineering_plan,
+)
 from artmach_assistant.core.research_manager import (
     ResearchManager,
     ResearchResult,
@@ -84,6 +88,7 @@ class EvidenceResearchExecutionResult:
     sources: tuple[RankedResearchSource, ...] = ()
     decisions: tuple[EvidenceDecision, ...] = ()
     conclusion: EvidenceConclusion | None = None
+    engineering_plan: EvidenceEngineeringPlan | None = None
     errors: tuple[str, ...] = ()
     reason: str = ""
 
@@ -203,6 +208,9 @@ class EvidenceResearchExecutionResult:
                 f"{self.conclusion.recommendation}\n"
                 "Patch hazir: hayir"
             )
+
+        if self.engineering_plan is not None:
+            rows.append(self.engineering_plan.report())
 
         if self.errors:
             rows.append(
@@ -496,6 +504,12 @@ def execute_approved_research(
             sources,
             decisions,
         )
+        engineering_plan = build_evidence_engineering_plan(
+            conclusion,
+            title=session.title,
+            path=session.path,
+            symbol=session.symbol,
+        )
         return EvidenceResearchExecutionResult(
             status=RESEARCH_FAILED,
             approval_id=session.approval_id,
@@ -505,6 +519,7 @@ def execute_approved_research(
             queries=queries,
             decisions=tuple(decisions),
             conclusion=conclusion,
+            engineering_plan=engineering_plan,
             reason=(
                 "Arastirma tamamlandi ancak "
                 "kullanilabilir kanit kaynagi bulunamadi."
@@ -529,6 +544,12 @@ def execute_approved_research(
         sources,
         decisions,
     )
+    engineering_plan = build_evidence_engineering_plan(
+        conclusion,
+        title=session.title,
+        path=session.path,
+        symbol=session.symbol,
+    )
 
     return EvidenceResearchExecutionResult(
         status=status,
@@ -540,6 +561,7 @@ def execute_approved_research(
         sources=sources,
         decisions=tuple(decisions),
         conclusion=conclusion,
+        engineering_plan=engineering_plan,
         reason=(
             f"{len(sources)} tekil ve ilgili kanit kaynagi "
             "kabul edildi. Kaynaklar otorite, alaka, teknik "

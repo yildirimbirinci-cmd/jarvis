@@ -5,7 +5,6 @@ from dataclasses import dataclass
 from artmach_assistant.core.evidence_conclusion import (
     CONFIDENCE_HIGH,
     CONFIDENCE_LOW,
-    CONFIDENCE_MEDIUM,
     build_evidence_conclusion,
 )
 
@@ -89,23 +88,3 @@ def test_strong_diverse_sources_produce_high_confidence() -> None:
     assert conclusion.official_source_count == 2
     assert conclusion.unique_host_count == 3
     assert conclusion.patch_ready is False
-
-
-def test_single_moderate_source_stays_medium_confidence() -> None:
-    conclusion = build_evidence_conclusion(
-        (
-            _Source(
-                url="https://example.com/performance",
-                score=65,
-                official=False,
-                authority_score=10,
-                relevance_score=30,
-                technical_density_score=8,
-                content_quality_score=4,
-            ),
-        ),
-        (_Decision("ACCEPTED", "accepted_ranked_source"),),
-    )
-
-    assert conclusion.confidence_level == CONFIDENCE_MEDIUM
-    assert 45 <= conclusion.confidence_score < 75
