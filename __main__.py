@@ -200,6 +200,43 @@ def _run_acceptance_test(
     return result
 
 
+def _run_release_startup_test(
+    package_dir: Path,
+    project_root: Path,
+    *,
+    quiet: bool,
+) -> int:
+    compiled = compileall.compile_dir(str(package_dir), quiet=1)
+    if not compiled:
+        print("[HATA] release_compile: Python kaynak derlemesi basarisiz.", file=sys.stderr)
+        return 2
+    tests_dir = package_dir / "tests"
+    candidates = [
+        "test_evidence_self_development_orchestration.py",
+        "test_one_shot_autonomous_maintenance_integration.py",
+        "test_live_operation_dialogue.py",
+        "test_autonomous_runtime_repair_integration.py",
+    ]
+    selected = [str(tests_dir / name) for name in candidates if (tests_dir / name).is_file()]
+    if selected:
+        command = [sys.executable, "-m", "pytest", *selected]
+        if quiet:
+            command.append("-q")
+        completed = subprocess.run(
+            command,
+            cwd=str(project_root),
+            env=_test_environment(package_dir, project_root),
+            check=False,
+        )
+        if completed.returncode != 0:
+            return int(completed.returncode)
+    return _run_gui_smoke_test(
+        package_dir,
+        project_root,
+        timeout_seconds=30.0,
+    )
+
+
 def _parse_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
     parser = argparse.ArgumentParser(
         prog="python -m artmach_assistant",
@@ -219,6 +256,11 @@ def _parse_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
         "--acceptance-test",
         action="store_true",
         help="Masaustu bagimliliklarini, kaynak derlemesini ve tum testleri dogrular.",
+    )
+    parser.add_argument(
+        "--release-startup-test",
+        action="store_true",
+        help="Yeni surumu derleme, kritik senaryolar ve GUI smoke testiyle dogrular.",
     )
     parser.add_argument(
         "--diagnostics-json",
@@ -304,6 +346,7 @@ def main(argv: list[str] | None = None) -> int:
         for value in (
             args.self_test,
             args.acceptance_test,
+            args.release_startup_test,
             args.gui_smoke_test,
             args.support_bundle,
             bool(args.self_develop),
@@ -323,6 +366,16 @@ def main(argv: list[str] | None = None) -> int:
         from artmach_assistant.app import main as run_application
 
         return run_application(smoke_test=True, auto_close_ms=1200)
+
+    if args.release_startup_test:
+        if remaining or args.diagnostics_json or args.background:
+            print("Release startup test ek arguman kabul etmez.", file=sys.stderr)
+            return 2
+        return _run_release_startup_test(
+            package_dir,
+            project_root,
+            quiet=args.quiet_tests,
+        )
 
     if args.acceptance_test:
         from artmach_assistant.config import DATA_DIR

@@ -705,6 +705,9 @@ class MainWindow(QMainWindow):
         )
         self._shutdown_after_tts = False
         self.engine = AssistantEngine(self.config)
+        self.engine.restart_application_callback = (
+            lambda: QTimer.singleShot(150, self.shutdown_application)
+        )
         self.worker: Worker | None = None
         self.task_orchestrator = TaskOrchestrator()
         self.intent_router = IntentRouter()

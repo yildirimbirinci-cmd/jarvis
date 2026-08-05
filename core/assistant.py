@@ -53,6 +53,7 @@ from artmach_assistant.core.evidence_patch_proposal import EvidencePatchProposal
 from artmach_assistant.core.evidence_patch_handoff import build_evidence_patch_handoff
 from artmach_assistant.core.evidence_patch_outcome import record_patch_outcome
 from artmach_assistant.core.evidence_patch_closeout import run_patch_closeout
+from artmach_assistant.core.safe_release import SafeReleaseManager
 from artmach_assistant.core.autonomous_repair_policy import (
     assess_autonomous_runtime_repair,
 )
@@ -1992,6 +1993,40 @@ class AssistantEngine:
                 error=f"{type(exc).__name__}: {exc}",
             )
 
+    def _safe_release_manager(self) -> SafeReleaseManager:
+        return SafeReleaseManager(
+            self.own_project_root(),
+            state_file=(
+                DATA_DIR / "releases" / "safe_release_state.json"
+            ),
+        )
+
+    def _request_safe_restart(self) -> None:
+        callback = getattr(self, "restart_application_callback", None)
+        if callable(callback):
+            callback()
+
+    def _finalize_safe_release(
+        self,
+        session: EvidencePatchSession,
+        changed_paths: tuple[str, ...],
+    ) -> str:
+        if not session.closed_at or session.error:
+            return "Safe release was not started because patch closeout is incomplete."
+        try:
+            state = self._safe_release_manager().prepare(
+                session_id=session.session_id,
+                changed_paths=changed_paths,
+                request_shutdown=self._request_safe_restart,
+            )
+        except Exception as exc:
+            return f"Safe release could not be prepared: {type(exc).__name__}: {exc}"
+        return (
+            f"Safe release prepared: {state.release_id}. "
+            f"Commit: {state.release_commit[:12]}. Tag: {state.tag_name}. "
+            "Jarvis will restart, run startup acceptance, and roll back automatically if needed."
+        )
+
     def apply_evidence_patch_session(self, session_id: str) -> str:
         """Apply one explicitly approved patch session and persist the outcome."""
         store = self._evidence_patch_session_store()
@@ -2002,6 +2037,17 @@ class AssistantEngine:
             return "Patch oturum kimligi eslesmiyor; hicbir kod degistirilmedi."
         if session.status != SESSION_APPROVED or not session.apply_allowed:
             return session.report() + "\n\nAcik uygulama onayi yok; hicbir kod degistirilmedi."
+
+        pending_before = getattr(
+            getattr(self, "editor", None),
+            "pending",
+            None,
+        )
+        changed_paths = tuple(
+            str(getattr(change, "path", "")).strip()
+            for change in getattr(pending_before, "files", ())
+            if str(getattr(change, "path", "")).strip()
+        ) or (session.target_path,)
 
         session = session.transition(
             SESSION_APPLYING,
@@ -2099,6 +2145,17 @@ class AssistantEngine:
                     note=(session.closeout_summary or session.retest_summary),
                 )
             store.save(session)
+            release_summary = self._finalize_safe_release(
+                session,
+                changed_paths,
+            )
+            return (
+                session.report()
+                + "\n\n"
+                + rendered
+                + "\n\n"
+                + release_summary
+            )
         return session.report() + "\n\n" + rendered
 
     def prepare_own_code_proposal(
