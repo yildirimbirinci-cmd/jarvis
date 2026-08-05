@@ -56,6 +56,10 @@ from artmach_assistant.core.evidence_patch_closeout import run_patch_closeout
 from artmach_assistant.core.autonomous_repair_policy import (
     assess_autonomous_runtime_repair,
 )
+from artmach_assistant.core.autonomous_maintenance_session import (
+    MaintenanceRepairRecord,
+    result_from_records,
+)
 from artmach_assistant.core.evidence_patch_session import (
     SESSION_APPROVAL_PENDING,
     SESSION_APPROVED,
@@ -4220,10 +4224,169 @@ class AssistantEngine:
             pass
         return result
 
+    @staticmethod
+    def _asks_for_one_shot_maintenance(text: str) -> bool:
+        normalized = normalize_text(str(text or ""))
+        exact = {
+            "kendinde gordugun hata ve eksikleri gider",
+            "kendindeki hata ve eksikleri gider",
+            "kendi hata ve eksiklerini gider",
+            "kendinde buldugun hata ve eksikleri gider",
+            "kendindeki sorunlari bul ve duzelt",
+        }
+        return normalized.strip(" .,!?:;") in exact
+
+    def _runtime_maintenance_priority(
+        self,
+        item: RuntimeFinding,
+    ) -> tuple[object, ...]:
+        normalized_paths = tuple(
+            str(path).replace("\\", "/").casefold()
+            for path in item.affected_paths
+        )
+        production_target = bool(
+            item.affected_symbols
+            and any(
+                not path.startswith("tests/")
+                and "/tests/" not in path
+                for path in normalized_paths
+            )
+        )
+        category_priority = {
+            "repeated_runtime_failure": 5,
+            "runtime_failure": 4,
+            "repeated_slow_operation": 3,
+            "repeated_runtime_warning": 2,
+            "repeated_cancellation": 1,
+        }
+        severity_priority = {
+            "critical": 4,
+            "high": 3,
+            "medium": 2,
+            "low": 1,
+        }
+        return (
+            int(production_target),
+            category_priority.get(item.category, 0),
+            severity_priority.get(item.severity, 0),
+            float(item.confidence),
+            int(item.occurrence_count),
+            item.last_seen,
+        )
+
+    def run_one_shot_autonomous_maintenance(
+        self,
+        *,
+        max_findings: int = 8,
+    ) -> str:
+        """Repair current safe findings once, then stop."""
+
+        limit = max(1, min(int(max_findings), 12))
+        attempted: set[str] = set()
+        records: list[MaintenanceRepairRecord] = []
+
+        # Refresh runtime and static maintenance evidence before selecting work.
+        self.maintenance_review(
+            own_code=True,
+            refresh_architecture=True,
+        )
+
+        for _index in range(limit):
+            try:
+                report = self.runtime_health_assessment(
+                    own_code=True,
+                    lookback_hours=168,
+                )
+            except Exception as exc:
+                records.append(
+                    MaintenanceRepairRecord(
+                        finding_id="MAINTENANCE-SCAN",
+                        title="Bakim taramasi",
+                        status="FAILED",
+                        detail=str(exc)[:600],
+                    )
+                )
+                break
+
+            candidates = [
+                item
+                for item in report.findings
+                if item.finding_id not in attempted
+            ]
+            if not candidates:
+                break
+            candidates.sort(
+                key=self._runtime_maintenance_priority,
+                reverse=True,
+            )
+            finding = candidates[0]
+            attempted.add(finding.finding_id)
+
+            decision = assess_autonomous_runtime_repair(finding)
+            if not decision.allowed:
+                records.append(
+                    MaintenanceRepairRecord(
+                        finding_id=finding.finding_id,
+                        title=finding.title,
+                        status="BLOCKED",
+                        detail=decision.reason[:700],
+                    )
+                )
+                continue
+
+            output = self.run_autonomous_runtime_repair(
+                finding.finding_id
+            )
+            session = self._self_repair_store().load()
+            state = (
+                session.state
+                if session is not None
+                and session.finding_id == finding.finding_id
+                else ""
+            )
+            if state == "completed":
+                status = "COMPLETED"
+            elif state in {
+                "proposal_failed",
+                "cancelled",
+                "stale",
+            }:
+                status = "FAILED"
+            else:
+                status = "BLOCKED"
+            records.append(
+                MaintenanceRepairRecord(
+                    finding_id=finding.finding_id,
+                    title=finding.title,
+                    status=status,
+                    detail=str(output).strip()[-700:],
+                )
+            )
+
+        try:
+            final_report = self.runtime_health_assessment(
+                own_code=True,
+                lookback_hours=168,
+            )
+            remaining = [
+                item
+                for item in final_report.findings
+                if item.finding_id not in attempted
+            ]
+        except Exception:
+            remaining = []
+        result = result_from_records(
+            tuple(records),
+            limit_reached=bool(remaining and len(records) >= limit),
+        )
+        return result.report()
+
     def _reserved_self_repair_request(self, text: str) -> str | None:
         """Route self-repair commands before tools, old plans and any LLM."""
 
         normalized = self.command_key(text)
+        if self._asks_for_one_shot_maintenance(text):
+            return self.run_one_shot_autonomous_maintenance()
         run_id = extract_self_repair_run_id(text)
         plan_id = extract_self_repair_plan_id(text)
         words = normalized.split()
@@ -4707,10 +4870,18 @@ class AssistantEngine:
                 "olay kaydına source_path ve symbol bilgisi eklenmeli."
             )
         evidence_text = self._runtime_finding_evidence(finding)
+        canonical_symbols = tuple(
+            str(item).strip()
+            for item in finding.affected_symbols
+            if str(item).strip()
+        )
         instruction = (
             f"{finding.finding_id} çalışma zamanı bulgusunu düzelt: {finding.title}. "
             f"{finding.explanation} Önerilen yön: {finding.recommendation}. "
-            "Değişiklik yalnızca olay kanıtındaki dosya ve sembollerle sınırlı kalmalı."
+            "Değişiklik yalnızca olay kanıtındaki dosya ve sembollerle sınırlı kalmalı. "
+            "Runtime action adı yalnızca telemetri etiketidir ve kaynak metod adı olarak "
+            "kullanılamaz. Kod hedefi yalnızca source_path ve canonical symbol alanlarından "
+            f"çözülmelidir. Canonical symbols: {', '.join(canonical_symbols)}."
         )
         try:
             own_root = self._development_root(own_code=True)
