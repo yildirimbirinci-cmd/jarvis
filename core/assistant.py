@@ -51,6 +51,13 @@ from artmach_assistant.core.evidence_research_session import EvidenceResearchApp
 from artmach_assistant.core.evidence_research_command import EvidenceResearchCommandCoordinator
 from artmach_assistant.core.evidence_patch_proposal import EvidencePatchProposal
 from artmach_assistant.core.evidence_patch_handoff import build_evidence_patch_handoff
+from artmach_assistant.core.evidence_patch_session import (
+    SESSION_EDIT_PROPOSAL_READY,
+    SESSION_FAILED,
+    SESSION_HANDOFF_READY,
+    EvidencePatchSession,
+    EvidencePatchSessionStore,
+)
 from artmach_assistant.core.system_control import SystemControlService
 from artmach_assistant.core.voice_service import VoiceService
 from artmach_assistant.core.tts_output_routing import TtsOutputRouter
@@ -1751,13 +1758,26 @@ class AssistantEngine:
         preflight and asks the existing own-code proposal generator to create
         an EditProposal inside the approved path/symbol scope.
         """
+        session_path = Path(self.own_project_root()) / ".jarvis" / "evidence_patch_session.json"
+        store = EvidencePatchSessionStore(session_path)
+        session = EvidencePatchSession.create(
+            proposal_id=proposal.proposal_id,
+            target_path=proposal.target_path,
+            target_symbol=proposal.target_symbol,
+        )
+        store.save(session)
+
         handoff = build_evidence_patch_handoff(
             proposal,
             project_root=self.own_project_root(),
         )
         if not handoff.ready:
-            return handoff.report()
+            session = session.transition(SESSION_FAILED, error=handoff.reason)
+            store.save(session)
+            return session.report() + "\n\n" + handoff.report()
 
+        session = session.transition(SESSION_HANDOFF_READY)
+        store.save(session)
         prepared = self.prepare_own_code_proposal(
             handoff.instruction,
             production_repair=True,
@@ -1765,7 +1785,12 @@ class AssistantEngine:
             approved_symbols=handoff.approved_symbols,
             plan_id=handoff.proposal_id,
         )
-        return handoff.report() + "\n\n" + prepared
+        session = session.transition(
+            SESSION_EDIT_PROPOSAL_READY,
+            edit_summary=str(prepared or "")[:2000],
+        )
+        store.save(session)
+        return session.report() + "\n\n" + handoff.report() + "\n\n" + prepared
 
     def prepare_own_code_proposal(
         self,
