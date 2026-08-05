@@ -905,7 +905,33 @@ def _instrument_task_wrap(cls: type) -> None:
 
     @wraps(original)
     def observed_wrap(instance, task_id, token, action):
-        execute = original(instance, task_id, token, action)
+        action_duration_ms = 0.0
+        action_started = False
+        action_completed = False
+
+        @wraps(action)
+        def observed_action():
+            nonlocal action_duration_ms
+            nonlocal action_started
+            nonlocal action_completed
+
+            action_started = True
+            action_started_at = time.perf_counter()
+
+            try:
+                return action()
+            finally:
+                action_duration_ms = (
+                    time.perf_counter() - action_started_at
+                ) * 1000.0
+                action_completed = True
+
+        execute = original(
+            instance,
+            task_id,
+            token,
+            observed_action,
+        )
 
         @wraps(execute)
         def observed_execute():
@@ -927,13 +953,29 @@ def _instrument_task_wrap(cls: type) -> None:
                 try:
                     result = execute()
                 except BaseException as exc:
+                    total_duration_ms = (
+                        time.perf_counter() - started
+                    ) * 1000.0
+                    metadata["action_started"] = action_started
+                    metadata["action_completed"] = action_completed
+                    metadata["action_duration_ms"] = round(
+                        action_duration_ms,
+                        3,
+                    )
+                    metadata["wrapper_overhead_ms"] = round(
+                        max(
+                            0.0,
+                            total_duration_ms - action_duration_ms,
+                        ),
+                        3,
+                    )
                     outcome = _exception_outcome(exc)
                     if outcome.status is not None:
                         _emit(
                             component="TaskOrchestrator",
                             action="execute_task",
                             status=outcome.status,
-                            duration_ms=(time.perf_counter() - started) * 1000.0,
+                            duration_ms=total_duration_ms,
                             workspace=workspace,
                             scope="task",
                             source_path="core/task_orchestrator.py",
@@ -945,11 +987,27 @@ def _instrument_task_wrap(cls: type) -> None:
                             correlation_id=correlation_id,
                         )
                     raise
+                total_duration_ms = (
+                    time.perf_counter() - started
+                ) * 1000.0
+                metadata["action_started"] = action_started
+                metadata["action_completed"] = action_completed
+                metadata["action_duration_ms"] = round(
+                    action_duration_ms,
+                    3,
+                )
+                metadata["wrapper_overhead_ms"] = round(
+                    max(
+                        0.0,
+                        total_duration_ms - action_duration_ms,
+                    ),
+                    3,
+                )
                 _emit(
                     component="TaskOrchestrator",
                     action="execute_task",
                     status="completed",
-                    duration_ms=(time.perf_counter() - started) * 1000.0,
+                    duration_ms=total_duration_ms,
                     workspace=workspace,
                     scope="task",
                     source_path="core/task_orchestrator.py",

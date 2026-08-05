@@ -3545,6 +3545,8 @@ class AssistantEngine:
     def _runtime_finding_research_plan(
         self,
         finding: RuntimeFinding,
+        *,
+        promote_external: bool = False,
     ) -> str:
         evidence = EvidenceMaintenanceFinding(
             classification=(
@@ -3653,14 +3655,14 @@ class AssistantEngine:
 
         outcome = coordinator.coordinate(
             evidence,
-            local_review_complete=True,
+            local_review_complete=promote_external,
             local_evidence_sufficient=False,
         )
 
         return (
             outcome.report
             + "\n\n"
-            + "Internet arastirmasi henuz baslatilmadi ve "
+            + "Internet arastirmasi baslatilmadi ve "
             + "hicbir kaynak dosya degistirilmedi."
         )
 
@@ -3936,8 +3938,19 @@ class AssistantEngine:
                 )
 
             if research_intent:
+                promote_external = any(
+                    marker in normalized
+                    for marker in (
+                        "yerel kanit yetersiz",
+                        "yerel inceleme yetersiz",
+                        "dis arastirma onayi olustur",
+                        "rs onayi olustur",
+                        "dis arastirmaya gec",
+                    )
+                )
                 return self._runtime_finding_research_plan(
-                    finding
+                    finding,
+                    promote_external=promote_external,
                 )
 
             return self._runtime_finding_evidence(
@@ -5043,8 +5056,19 @@ class AssistantEngine:
                 )
 
             if research_intent:
+                promote_external = any(
+                    marker in normalized
+                    for marker in (
+                        "yerel kanit yetersiz",
+                        "yerel inceleme yetersiz",
+                        "dis arastirma onayi olustur",
+                        "rs onayi olustur",
+                        "dis arastirmaya gec",
+                    )
+                )
                 return self._runtime_finding_research_plan(
-                    finding
+                    finding,
+                    promote_external=promote_external,
                 )
 
             return self._runtime_finding_evidence(
