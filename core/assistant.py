@@ -46,6 +46,7 @@ from artmach_assistant.core.evidence_retest_session import RetestApprovalStore
 from artmach_assistant.core.evidence_retest_completion import RetestCompletionStore
 from artmach_assistant.core.evidence_research_handoff import EvidenceResearchHandoff
 from artmach_assistant.core.evidence_research_session import EvidenceResearchApprovalStore
+from artmach_assistant.core.evidence_research_command import EvidenceResearchCommandCoordinator
 from artmach_assistant.core.system_control import SystemControlService
 from artmach_assistant.core.voice_service import VoiceService
 from artmach_assistant.core.tts_output_routing import TtsOutputRouter
@@ -434,6 +435,15 @@ class AssistantEngine:
                 DATA_DIR
                 / "diagnostics"
                 / "pending_evidence_research.json"
+            )
+        )
+        self.evidence_research_command_coordinator = (
+            EvidenceResearchCommandCoordinator(
+                store=EvidenceResearchApprovalStore(
+                    DATA_DIR
+                    / "diagnostics"
+                    / "pending_evidence_research.json"
+                )
             )
         )
         self.retest_command_coordinator = RetestCommandCoordinator(
@@ -5684,6 +5694,31 @@ class AssistantEngine:
 
         return outcome.report
 
+    def _research_command_request(
+        self,
+        text: str,
+    ) -> str | None:
+        """Handle exact RS approval and research cancellation."""
+        coordinator = getattr(
+            self,
+            "evidence_research_command_coordinator",
+            None,
+        )
+
+        if coordinator is None:
+            coordinator = EvidenceResearchCommandCoordinator(
+                store=EvidenceResearchApprovalStore(
+                    DATA_DIR
+                    / "diagnostics"
+                    / "pending_evidence_research.json"
+                )
+            )
+            self.evidence_research_command_coordinator = (
+                coordinator
+            )
+
+        return coordinator.handle(text)
+
     def _retest_command_request(
         self,
         text: str,
@@ -9587,6 +9622,9 @@ class AssistantEngine:
         retest_command = self._retest_command_request(text)
         if retest_command is not None:
             return retest_command
+        research_command = self._research_command_request(text)
+        if research_command is not None:
+            return research_command
         own_code_read_only = self._own_code_read_only_request(text)
         if own_code_read_only is not None:
             return own_code_read_only
