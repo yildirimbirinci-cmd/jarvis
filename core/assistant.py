@@ -38,8 +38,9 @@ from artmach_assistant.core.build_analyzer import BuildLogAnalyzer
 from artmach_assistant.core.agent_runner import AgentRunResult
 from artmach_assistant.core.snapshot_manager import SnapshotManager
 from artmach_assistant.core.code_review import CodeReviewService
-from artmach_assistant.core.evidence_maintenance import EvidenceMaintenanceReport, build_evidence_maintenance_report
+from artmach_assistant.core.evidence_maintenance import EvidenceMaintenanceFinding, EvidenceMaintenanceReport, build_evidence_maintenance_report
 from artmach_assistant.core.evidence_closeout import apply_retest_closeout
+from artmach_assistant.core.evidence_research import build_evidence_research_plan
 from artmach_assistant.core.evidence_retest import RetestPlan, build_retest_plan
 from artmach_assistant.core.evidence_retest_command import RetestCommandCoordinator
 from artmach_assistant.core.evidence_retest_session import RetestApprovalStore
@@ -3487,6 +3488,103 @@ class AssistantEngine:
         rows.extend(f"- {item}" for item in finding.acceptance_criteria)
         return "\n".join(rows)
 
+    @staticmethod
+    def _runtime_research_classification(
+        finding: RuntimeFinding,
+    ) -> str:
+        category = str(
+            getattr(finding, "category", "") or ""
+        ).casefold()
+
+        if any(
+            marker in category
+            for marker in (
+                "error",
+                "failure",
+                "security",
+                "crash",
+            )
+        ):
+            return "A"
+
+        return "B"
+
+    @staticmethod
+    def _runtime_research_score(
+        finding: RuntimeFinding,
+    ) -> int:
+        severity = str(
+            getattr(finding, "severity", "") or ""
+        ).casefold()
+
+        base = {
+            "critical": 100,
+            "high": 90,
+            "medium": 80,
+            "low": 65,
+        }.get(severity, 70)
+
+        occurrences = max(
+            0,
+            int(
+                getattr(
+                    finding,
+                    "occurrence_count",
+                    0,
+                )
+                or 0
+            ),
+        )
+
+        return min(
+            100,
+            base + min(10, occurrences // 5),
+        )
+
+    def _runtime_finding_research_plan(
+        self,
+        finding: RuntimeFinding,
+    ) -> str:
+        evidence = EvidenceMaintenanceFinding(
+            classification=(
+                self._runtime_research_classification(
+                    finding
+                )
+            ),
+            score=self._runtime_research_score(
+                finding
+            ),
+            source="runtime",
+            title=str(
+                getattr(finding, "title", "")
+                or "Runtime finding"
+            ),
+            path=str(
+                getattr(finding, "source_path", "")
+                or ""
+            ),
+            symbol=str(
+                getattr(finding, "symbol", "")
+                or ""
+            ),
+            evidence=str(
+                getattr(finding, "explanation", "")
+                or ""
+            ),
+            repair_candidate=False,
+            lifecycle="ACTIVE",
+        )
+
+        plan = build_evidence_research_plan(evidence)
+
+        return (
+            plan.report()
+            + "\n\n"
+            + "Bu plan salt okunurdur. "
+            + "Internet arastirmasi baslatilmadi ve "
+            + "hicbir kaynak dosya degistirilmedi."
+        )
+
     def _self_repair_store(self) -> SelfRepairSessionStore:
         store = getattr(self, "self_repair_sessions", None)
         if not isinstance(store, SelfRepairSessionStore):
@@ -3698,6 +3796,21 @@ class AssistantEngine:
             word.startswith(("teshis", "incele", "bul", "neden"))
             for word in words
         )
+        research_intent = any(
+            word.startswith(("arastir", "research"))
+            for word in words
+        ) or any(
+            marker in normalized
+            for marker in (
+                "kok neden",
+                "yerel cagri zinciri",
+                "olcum siniri",
+                "olcum sinirlarini",
+                "sure olcumu",
+                "dis arastirma gerekip",
+                "kanita dayali cozum plani",
+            )
+        )
         own_code_subject = any(
             marker in normalized
             for marker in (
@@ -3728,15 +3841,29 @@ class AssistantEngine:
         )
 
         if run_id:
-            if fix_intent:
-                return self.prepare_runtime_improvement_implementation(run_id)
             finding = self._find_runtime_finding(run_id)
-            return (
-                self._runtime_finding_evidence(finding)
-                if finding is not None
-                else f"{run_id} artık etkin bir çalışma zamanı bulgusu değil."
-            )
 
+            if finding is None:
+                return (
+                    f"{run_id} artik etkin bir "
+                    "calisma zamani bulgusu degil."
+                )
+
+            if fix_intent:
+                return (
+                    self.prepare_runtime_improvement_implementation(
+                        run_id
+                    )
+                )
+
+            if research_intent:
+                return self._runtime_finding_research_plan(
+                    finding
+                )
+
+            return self._runtime_finding_evidence(
+                finding
+            )
         if self._asks_for_latest_runtime_finding(text):
             finding = self._latest_runtime_finding()
             if finding is None:
@@ -4791,6 +4918,21 @@ class AssistantEngine:
             word.startswith(("duzelt", "onar", "gelistir", "iyilestir", "taslak", "uygula"))
             for word in normalized.split()
         )
+        research_intent = any(
+            word.startswith(("arastir", "research"))
+            for word in normalized.split()
+        ) or any(
+            marker in normalized
+            for marker in (
+                "kok neden",
+                "yerel cagri zinciri",
+                "olcum siniri",
+                "olcum sinirlarini",
+                "sure olcumu",
+                "dis arastirma gerekip",
+                "kanita dayali cozum plani",
+            )
+        )
         acknowledge_intent = any(
             marker in normalized
             for marker in ("uyariyi kabul et", "uyariyi kapat", "uyariyi gordum", "bulguyu kabul et")
@@ -4803,15 +4945,32 @@ class AssistantEngine:
 
         if finding_id:
             if implementation_intent:
-                return self.prepare_runtime_improvement_implementation(finding_id)
-            finding = self._find_runtime_finding(finding_id)
+                return (
+                    self.prepare_runtime_improvement_implementation(
+                        finding_id
+                    )
+                )
+
+            finding = self._find_runtime_finding(
+                finding_id
+            )
+
             if finding is None:
                 return (
-                    f"{finding_id} artık etkin bir çalışma zamanı bulgusu değil. "
-                    "Yeni bakım taraması yapmadan kod taslağı üretmeyeceğim."
+                    f"{finding_id} artik etkin bir "
+                    "calisma zamani bulgusu degil. "
+                    "Yeni bakim taramasi yapmadan "
+                    "kod taslagi uretmeyecegim."
                 )
-            return self._runtime_finding_evidence(finding)
 
+            if research_intent:
+                return self._runtime_finding_research_plan(
+                    finding
+                )
+
+            return self._runtime_finding_evidence(
+                finding
+            )
         if self._asks_for_latest_runtime_finding(text):
             finding = self._latest_runtime_finding()
             if finding is None:
