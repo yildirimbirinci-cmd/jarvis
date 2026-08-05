@@ -26,8 +26,18 @@ _CANCEL_EXACT = {
 }
 
 
+def normalize_live_operation_text(text: str) -> str:
+    """Normalize short live-operation commands without touching engine state."""
+    value = str(text or "").casefold()
+    table = str.maketrans({
+        "ç": "c", "ğ": "g", "ı": "i", "ö": "o",
+        "ş": "s", "ü": "u",
+    })
+    return " ".join(value.translate(table).split()).strip(" .,!?:;")
+
+
 def is_live_operation_status_query(normalized: str) -> bool:
-    value = " ".join(str(normalized or "").split()).strip(" .,!?:;")
+    value = normalize_live_operation_text(normalized)
     if value in _STATUS_EXACT:
         return True
     return (
@@ -38,7 +48,7 @@ def is_live_operation_status_query(normalized: str) -> bool:
 
 
 def is_live_operation_cancel_query(normalized: str) -> bool:
-    value = " ".join(str(normalized or "").split()).strip(" .,!?:;")
+    value = normalize_live_operation_text(normalized)
     return value in _CANCEL_EXACT
 
 
