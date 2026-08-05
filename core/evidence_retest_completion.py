@@ -184,6 +184,71 @@ class RetestCompletionStore:
     def clear(self) -> None:
         self.path.unlink(missing_ok=True)
 
+    def valid_completed_ids(
+        self,
+        *,
+        source_root: str | Path,
+    ) -> frozenset[str]:
+        """Return completion ids whose source has not changed."""
+        root = Path(source_root).resolve(strict=False)
+        valid: set[str] = set()
+
+        for record in self.load():
+            try:
+                completed_at = datetime.fromisoformat(
+                    record.completed_at.replace(
+                        "Z",
+                        "+00:00",
+                    )
+                )
+            except (TypeError, ValueError):
+                continue
+
+            if completed_at.tzinfo is None:
+                completed_at = completed_at.replace(
+                    tzinfo=timezone.utc
+                )
+            else:
+                completed_at = completed_at.astimezone(
+                    timezone.utc
+                )
+
+            relative = Path(
+                str(record.path or "").replace(
+                    "\\",
+                    "/",
+                )
+            )
+
+            if (
+                not str(relative)
+                or relative.is_absolute()
+                or ".." in relative.parts
+            ):
+                continue
+
+            target = (
+                root / relative
+            ).resolve(strict=False)
+
+            try:
+                target.relative_to(root)
+            except ValueError:
+                continue
+
+            try:
+                changed_at = datetime.fromtimestamp(
+                    target.stat().st_mtime,
+                    tz=timezone.utc,
+                )
+            except OSError:
+                continue
+
+            if changed_at <= completed_at:
+                valid.add(record.approval_id)
+
+        return frozenset(valid)
+
 
 def approval_id_for_item(item: RetestItem) -> str:
     return RetestApprovalSession.create(

@@ -170,6 +170,17 @@ class RetestCommandCoordinator:
             return frozenset()
 
         try:
+            valid_completed_ids = getattr(
+                self.completion_store,
+                "valid_completed_ids",
+                None,
+            )
+
+            if callable(valid_completed_ids):
+                return valid_completed_ids(
+                    source_root=self.source_root,
+                )
+
             return self.completion_store.completed_ids()
         except Exception:
             return frozenset()

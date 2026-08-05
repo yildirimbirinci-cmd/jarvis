@@ -71,6 +71,13 @@ def _coordinator(tmp_path, plan):
 def test_completed_first_item_is_skipped(
     tmp_path,
 ) -> None:
+    source = tmp_path / "core" / "example.py"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_text(
+        "VALUE = 1\n",
+        encoding="utf-8",
+    )
+
     first = _item(
         "Example.first",
         "tests/test_first.py",
@@ -106,6 +113,13 @@ def test_completed_first_item_is_skipped(
 def test_all_completed_items_return_empty_queue(
     tmp_path,
 ) -> None:
+    source = tmp_path / "core" / "example.py"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_text(
+        "VALUE = 1\n",
+        encoding="utf-8",
+    )
+
     item = _item(
         "Example.only",
         "tests/test_only.py",
@@ -168,3 +182,115 @@ def test_completion_history_failure_does_not_block_result(
     assert rendered is not None
     assert "Durum: PASSED" in rendered
     assert "completion history" in rendered
+
+def test_source_changed_after_completion_is_requeued(
+    tmp_path,
+) -> None:
+    import os
+    from datetime import datetime, timezone
+
+    first = _item(
+        "Example.first",
+        "tests/test_first.py",
+    )
+    plan = RetestPlan((first,))
+    coordinator = _coordinator(tmp_path, plan)
+
+    source = tmp_path / "core" / "example.py"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_text(
+        "VALUE = 1\n",
+        encoding="utf-8",
+    )
+
+    coordinator.handle("retest planini baslat")
+    session = coordinator.store.load()
+
+    assert session is not None
+
+    coordinator.handle(
+        f"{session.approval_id} onayla"
+    )
+
+    records = coordinator.completion_store.load()
+
+    assert len(records) == 1
+
+    completion_time = datetime.fromisoformat(
+        records[0].completed_at.replace(
+            "Z",
+            "+00:00",
+        )
+    )
+
+    changed_at = completion_time.timestamp() + 5.0
+    os.utime(
+        source,
+        (changed_at, changed_at),
+    )
+
+    rendered = coordinator.handle(
+        "retest planini baslat"
+    )
+
+    assert rendered is not None
+    assert "Example.first" in rendered
+
+    next_session = coordinator.store.load()
+
+    assert next_session is not None
+    assert next_session.symbol == "Example.first"
+
+
+def test_unchanged_source_remains_completed(
+    tmp_path,
+) -> None:
+    import os
+    from datetime import datetime
+
+    first = _item(
+        "Example.first",
+        "tests/test_first.py",
+    )
+    plan = RetestPlan((first,))
+    coordinator = _coordinator(tmp_path, plan)
+
+    source = tmp_path / "core" / "example.py"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_text(
+        "VALUE = 1\n",
+        encoding="utf-8",
+    )
+
+    coordinator.handle("retest planini baslat")
+    session = coordinator.store.load()
+
+    assert session is not None
+
+    coordinator.handle(
+        f"{session.approval_id} onayla"
+    )
+
+    records = coordinator.completion_store.load()
+
+    assert len(records) == 1
+
+    completion_time = datetime.fromisoformat(
+        records[0].completed_at.replace(
+            "Z",
+            "+00:00",
+        )
+    )
+
+    old_time = completion_time.timestamp() - 5.0
+    os.utime(
+        source,
+        (old_time, old_time),
+    )
+
+    rendered = coordinator.handle(
+        "retest planini baslat"
+    )
+
+    assert rendered is not None
+    assert "uygun" in rendered
