@@ -31,9 +31,14 @@ from artmach_assistant.core.constitution import ConstitutionError, ConstitutionR
 from artmach_assistant.core.crash_reporter import install_crash_reporting
 from artmach_assistant.core.intent_router import IntentDecision, IntentRouter
 from artmach_assistant.core.live_operation_dialogue import (
+    build_live_status_answer,
     is_live_operation_cancel_query,
     is_live_operation_status_query,
     should_resume_live_operation_listening,
+)
+from artmach_assistant.core.acceptance_trace import (
+    new_message_id,
+    trace_event,
 )
 from artmach_assistant.core.notification_store import NotificationStore
 from artmach_assistant.core.trust_inbox import TrustApprovalInbox
@@ -1450,12 +1455,50 @@ class MainWindow(QMainWindow):
             self.submit_text(text)
 
     def submit_text(self, text: str) -> None:
+        message_id = new_message_id()
+        active = self.task_orchestrator.active
+        worker_running = bool(self.worker and self.worker.isRunning())
+        trace_event(
+            "TEXT_SUBMITTED",
+            message_id=message_id,
+            live_query=is_live_operation_status_query(self.engine.command_key(text)),
+            worker_running=worker_running,
+            task_id=getattr(active, "task_id", ""),
+        )
         if self.busy():
             normalized = self.engine.command_key(text)
+            trace_event(
+                "GUI_BUSY",
+                message_id=message_id,
+                busy=True,
+                normalized=normalized if is_live_operation_status_query(normalized) else "",
+                worker_running=worker_running,
+                task_id=getattr(active, "task_id", ""),
+            )
             if is_live_operation_status_query(normalized):
+                started = time.monotonic()
+                trace_event(
+                    "LIVE_QUERY_CLASSIFIED",
+                    message_id=message_id,
+                    kind="status",
+                    route="direct_snapshot",
+                )
                 self.chat.appendPlainText(f"SEN: {text}\n")
-                answer = self.engine.handle_local_command(text)
+                answer = build_live_status_answer(self.engine, active)
+                trace_event(
+                    "STATUS_READ",
+                    message_id=message_id,
+                    task_id=getattr(active, "task_id", ""),
+                    latency_ms=round((time.monotonic() - started) * 1000.0, 3),
+                    answer_chars=len(answer),
+                )
                 self.chat.appendPlainText(f"JARVIS: {answer}\n")
+                trace_event(
+                    "RESPONSE_RENDERED",
+                    message_id=message_id,
+                    route="direct_snapshot",
+                    latency_ms=round((time.monotonic() - started) * 1000.0, 3),
+                )
                 return
             if is_live_operation_cancel_query(normalized):
                 self.chat.appendPlainText(f"SEN: {text}\n")
@@ -1497,8 +1540,25 @@ class MainWindow(QMainWindow):
         if self.busy():
             normalized = self.engine.command_key(text)
             if is_live_operation_status_query(normalized):
+                message_id = new_message_id()
+                active = self.task_orchestrator.active
+                started = time.monotonic()
+                trace_event(
+                    "VOICE_LIVE_QUERY_CLASSIFIED",
+                    message_id=message_id,
+                    kind="status",
+                    route="direct_snapshot",
+                    task_id=getattr(active, "task_id", ""),
+                )
                 self.chat.appendPlainText(f"SES KOMUTU: {text}\n")
-                answer = self.engine.handle_local_command(text)
+                answer = build_live_status_answer(self.engine, active)
+                trace_event(
+                    "STATUS_READ",
+                    message_id=message_id,
+                    task_id=getattr(active, "task_id", ""),
+                    latency_ms=round((time.monotonic() - started) * 1000.0, 3),
+                    answer_chars=len(answer),
+                )
                 self.on_answer(answer)
                 return
             if is_live_operation_cancel_query(normalized):
@@ -2473,6 +2533,12 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(str(exc))
             return
         self._active_task_id = record.task_id
+        trace_event(
+            "WORKER_STARTED",
+            task_id=record.task_id,
+            task_name=record.name,
+            source=source,
+        )
         runtime = getattr(self.engine, "conversation_runtime", None)
         if runtime is not None:
             runtime.begin_task(record.name)
@@ -2502,6 +2568,11 @@ class MainWindow(QMainWindow):
             self._active_intent = None
             if runtime is not None:
                 runtime.finish_task_if_running()
+            trace_event(
+                "WORKER_COMPLETED",
+                task_id=record.task_id,
+                task_name=record.name,
+            )
             callback(result)
 
         def fail(error: str) -> None:
@@ -2515,6 +2586,13 @@ class MainWindow(QMainWindow):
                     runtime.cancel(str(error))
                 else:
                     runtime.fail(str(error))
+            trace_event(
+                "WORKER_FAILED",
+                task_id=record.task_id,
+                task_name=record.name,
+                cancelled=cancelled,
+                error=str(error)[:1000],
+            )
             if cancelled:
                 self.statusBar().showMessage(f"İptal edildi: {record.name}")
                 self.voice_status.setText(f"{record.name} iptal edildi.")

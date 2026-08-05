@@ -4,6 +4,8 @@ import threading
 from dataclasses import dataclass
 from datetime import datetime
 
+from artmach_assistant.core.acceptance_trace import trace_event
+
 
 class OperationCancelled(RuntimeError):
     """Raised when the user cancels the active operation."""
@@ -29,17 +31,11 @@ class OperationSnapshot:
     def report(self) -> str:
         if not self.active:
             return "Şu anda çalışan uzun bir işlem yok."
-        progress = (
-            f" {self.current}/{self.total} adım tamamlandı"
-            if self.total > 0
-            else ""
-        )
-        if self.cancelled:
-            state = "İptal isteğini aldım; güvenli bir yerde duruyorum."
-        else:
-            state = "İşlem devam ediyor."
-        detail = f" Şu ana kadar: {self.detail}." if self.detail else ""
-        return f"Şu an {self.phase.lower()}.{progress} {state}{detail}"
+        suffix = f" %{self.percent}" if self.total > 0 else ""
+        progress = f" ({self.current}/{self.total})" if self.total > 0 else ""
+        detail = f" Son adım: {self.detail}." if self.detail else ""
+        state = "İptal ediliyor" if self.cancelled else "Devam ediyor"
+        return f"{self.name}: {self.phase}{progress}{suffix}. {state}.{detail}"
 
 
 class OperationController:
@@ -66,6 +62,12 @@ class OperationController:
             self._started_at = datetime.now().astimezone().isoformat()
             self._active = True
             self._cancelled = False
+            trace_event(
+                "OPERATION_STARTED",
+                operation_name=self._name,
+                phase=self._phase,
+                total=self._total,
+            )
 
     def update(
         self,
@@ -86,12 +88,25 @@ class OperationController:
                 self._total = max(0, int(total))
             if detail is not None:
                 self._detail = str(detail).strip()
+            trace_event(
+                "OPERATION_UPDATED",
+                operation_name=self._name,
+                phase=self._phase,
+                current=self._current,
+                total=self._total,
+                detail=self._detail[:500],
+            )
 
     def cancel(self) -> bool:
         with self._lock:
             if not self._active:
                 return False
             self._cancelled = True
+            trace_event(
+                "OPERATION_CANCEL_REQUESTED",
+                operation_name=self._name,
+                phase=self._phase,
+            )
             return True
 
     def checkpoint(self) -> None:
@@ -104,6 +119,15 @@ class OperationController:
             if detail:
                 self._detail = str(detail).strip()
             self._active = False
+            trace_event(
+                "OPERATION_FINISHED",
+                operation_name=self._name,
+                phase=self._phase,
+                current=self._current,
+                total=self._total,
+                detail=self._detail[:500],
+                cancelled=self._cancelled,
+            )
 
     def snapshot(self) -> OperationSnapshot:
         with self._lock:
