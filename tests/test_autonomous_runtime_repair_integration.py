@@ -15,6 +15,11 @@ class Finding:
     occurrence_count: int = 8
     affected_paths: tuple[str, ...] = ("core/task_orchestrator.py",)
     affected_symbols: tuple[str, ...] = ("TaskOrchestrator.wrap.execute",)
+    evidence: tuple[object, ...] = (
+        SimpleNamespace(action_duration_ms=10.0, wrapper_overhead_ms=100.0, action_completed=True),
+        SimpleNamespace(action_duration_ms=11.0, wrapper_overhead_ms=105.0, action_completed=True),
+        SimpleNamespace(action_duration_ms=9.0, wrapper_overhead_ms=98.0, action_completed=True),
+    )
 
 
 def test_autonomous_repair_runs_plan_proposal_and_apply() -> None:

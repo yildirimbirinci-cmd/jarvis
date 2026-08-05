@@ -79,30 +79,62 @@ def _matching_nodes(tree: ast.Module, symbols: tuple[str, ...]) -> list[tuple[st
 
     for symbol in requested:
         parts = [part for part in symbol.split(".") if part]
-        class_name = parts[-2] if len(parts) >= 2 else ""
-        member_name = parts[-1] if parts else ""
-        for node in ast.walk(tree):
-            matched = False
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                if node.name == member_name:
-                    if class_name:
-                        # Verify that the requested class actually owns this method.
-                        for parent in ast.walk(tree):
-                            if isinstance(parent, ast.ClassDef) and parent.name == class_name:
-                                if node in parent.body:
-                                    matched = True
-                                    break
-                    else:
-                        matched = True
-            elif isinstance(node, ast.ClassDef) and node.name == member_name:
-                matched = True
-            if not matched:
-                continue
-            key = (int(getattr(node, "lineno", 0)), int(getattr(node, "end_lineno", 0)))
+        matched_nodes: list[ast.AST] = []
+
+        # Runtime symbols may identify a nested callable, for example
+        # TaskOrchestrator.wrap.execute. The source-owned patch target is the
+        # enclosing class method (wrap), while execute remains telemetry detail.
+        if len(parts) >= 3:
+            class_name = parts[-3]
+            owner_name = parts[-2]
+            nested_name = parts[-1]
+            for owner in tree.body:
+                if not isinstance(owner, ast.ClassDef) or owner.name != class_name:
+                    continue
+                for member in owner.body:
+                    if not isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                        continue
+                    if member.name != owner_name:
+                        continue
+                    nested_exists = any(
+                        isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                        and node is not member
+                        and node.name == nested_name
+                        for node in ast.walk(member)
+                    )
+                    if nested_exists:
+                        matched_nodes.append(member)
+
+        if not matched_nodes:
+            class_name = parts[-2] if len(parts) >= 2 else ""
+            member_name = parts[-1] if parts else ""
+            for node in ast.walk(tree):
+                matched = False
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    if node.name == member_name:
+                        if class_name:
+                            for parent in ast.walk(tree):
+                                if isinstance(parent, ast.ClassDef) and parent.name == class_name:
+                                    if node in parent.body:
+                                        matched = True
+                                        break
+                        else:
+                            matched = True
+                elif isinstance(node, ast.ClassDef) and node.name == member_name:
+                    matched = True
+                if matched:
+                    matched_nodes.append(node)
+
+        for node in matched_nodes:
+            key = (
+                int(getattr(node, "lineno", 0)),
+                int(getattr(node, "end_lineno", 0)),
+            )
             if key in seen:
                 continue
             seen.add(key)
             results.append((symbol, node))
+
     results.sort(key=lambda item: int(getattr(item[1], "lineno", 0)))
     return results
 

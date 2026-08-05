@@ -135,6 +135,10 @@ class RuntimeEvidence:
     duration_ms: float = 0.0
     source_path: str = ""
     symbol: str = ""
+    action_duration_ms: float = 0.0
+    wrapper_overhead_ms: float = 0.0
+    action_started: bool = False
+    action_completed: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -540,6 +544,20 @@ class RuntimeHealthAnalyzer:
                     duration_ms=event.duration_ms,
                     source_path=event.source_path,
                     symbol=event.symbol,
+                    action_duration_ms=_finite_number(
+                        (event.metadata or {}).get("action_duration_ms", 0.0),
+                        default=0.0,
+                    ),
+                    wrapper_overhead_ms=_finite_number(
+                        (event.metadata or {}).get("wrapper_overhead_ms", 0.0),
+                        default=0.0,
+                    ),
+                    action_started=bool(
+                        (event.metadata or {}).get("action_started", False)
+                    ),
+                    action_completed=bool(
+                        (event.metadata or {}).get("action_completed", False)
+                    ),
                 )
             )
         return tuple(rows)

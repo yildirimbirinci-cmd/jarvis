@@ -7,6 +7,8 @@ from typing import Iterable
 AUTO_ALLOWED = "AUTO_ALLOWED"
 BLOCKED_HIGH_RISK = "BLOCKED_HIGH_RISK"
 BLOCKED_INSUFFICIENT_EVIDENCE = "BLOCKED_INSUFFICIENT_EVIDENCE"
+BLOCKED_NEEDS_FRESH_EVIDENCE = "BLOCKED_NEEDS_FRESH_EVIDENCE"
+BLOCKED_WRONG_TARGET = "BLOCKED_WRONG_TARGET"
 
 _SENSITIVE_PARTS = {
     "auth",
@@ -95,6 +97,22 @@ def _sensitive_path(path: str) -> bool:
     return bool((parts | stem_parts) & _SENSITIVE_PARTS)
 
 
+
+def _stage_timing_summary(finding: object) -> tuple[int, float, float]:
+    rows = []
+    for item in tuple(getattr(finding, "evidence", ()) or ()):
+        action_ms = float(getattr(item, "action_duration_ms", 0.0) or 0.0)
+        wrapper_ms = float(getattr(item, "wrapper_overhead_ms", 0.0) or 0.0)
+        completed = bool(getattr(item, "action_completed", False))
+        if completed and (action_ms > 0.0 or wrapper_ms > 0.0):
+            rows.append((action_ms, wrapper_ms))
+    if not rows:
+        return 0, 0.0, 0.0
+    action_values = sorted(row[0] for row in rows)
+    wrapper_values = sorted(row[1] for row in rows)
+    middle = len(rows) // 2
+    return len(rows), action_values[middle], wrapper_values[middle]
+
 def assess_autonomous_runtime_repair(finding: object) -> AutonomousRepairDecision:
     paths = _normalise_paths(getattr(finding, "affected_paths", ()))
     symbols = _normalise_symbols(getattr(finding, "affected_symbols", ()))
@@ -139,6 +157,28 @@ def assess_autonomous_runtime_repair(finding: object) -> AutonomousRepairDecisio
             production_paths,
             symbols,
         )
+
+    if category == "repeated_slow_operation" and any(
+        symbol.endswith(".wrap.execute")
+        for symbol in symbols
+    ):
+        sample_count, action_median, wrapper_median = _stage_timing_summary(finding)
+        if sample_count < 3:
+            return AutonomousRepairDecision(
+                BLOCKED_NEEDS_FRESH_EVIDENCE,
+                "UNKNOWN",
+                "At least three fresh stage-timing samples are required before changing the wrapper.",
+                production_paths,
+                symbols,
+            )
+        if action_median > max(50.0, wrapper_median * 3.0):
+            return AutonomousRepairDecision(
+                BLOCKED_WRONG_TARGET,
+                "UNKNOWN",
+                "Fresh timing evidence shows the wrapped action dominates latency; the wrapper is not the proven bottleneck.",
+                production_paths,
+                symbols,
+            )
 
     high_risk = (
         severity == "critical"
