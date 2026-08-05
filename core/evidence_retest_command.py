@@ -124,6 +124,10 @@ class RetestCommandCoordinator:
         executor: Callable[..., RetestExecutionResult] = (
             execute_primary_retest
         ),
+        result_handler: Callable[
+            [RetestItem, RetestExecutionResult],
+            str | None,
+        ] | None = None,
     ) -> None:
         self.store = store
         self.source_root = Path(
@@ -131,6 +135,7 @@ class RetestCommandCoordinator:
         ).resolve(strict=False)
         self.plan_provider = plan_provider
         self.executor = executor
+        self.result_handler = result_handler
 
     def _load_session(
         self,
@@ -222,7 +227,25 @@ class RetestCommandCoordinator:
             )
             self.store.save(completed)
 
-            return _render_execution_result(result)
+            rendered = _render_execution_result(result)
+
+            if self.result_handler is not None:
+                try:
+                    handoff_report = self.result_handler(
+                        item,
+                        result,
+                    )
+                except Exception as exc:
+                    handoff_report = (
+                        "Arastirma karari hazirlanamadi: "
+                        f"{type(exc).__name__}: {exc}. "
+                        "Internet arastirmasi baslatilmadi."
+                    )
+
+                if handoff_report:
+                    rendered += "\n\n" + handoff_report
+
+            return rendered
 
         normalized = _normalized(text)
 

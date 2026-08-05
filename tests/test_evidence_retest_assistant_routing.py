@@ -68,10 +68,12 @@ def test_lazy_coordinator_uses_persistent_store(
             store,
             source_root,
             plan_provider,
+            result_handler=None,
         ) -> None:
             captured["store"] = store
             captured["source_root"] = source_root
             captured["plan_provider"] = plan_provider
+            captured["result_handler"] = result_handler
 
         def handle(self, text):
             captured["text"] = text

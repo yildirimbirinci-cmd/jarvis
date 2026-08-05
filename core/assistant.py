@@ -42,6 +42,8 @@ from artmach_assistant.core.evidence_maintenance import build_evidence_maintenan
 from artmach_assistant.core.evidence_retest import RetestPlan, build_retest_plan
 from artmach_assistant.core.evidence_retest_command import RetestCommandCoordinator
 from artmach_assistant.core.evidence_retest_session import RetestApprovalStore
+from artmach_assistant.core.evidence_research_handoff import EvidenceResearchHandoff
+from artmach_assistant.core.evidence_research_session import EvidenceResearchApprovalStore
 from artmach_assistant.core.system_control import SystemControlService
 from artmach_assistant.core.voice_service import VoiceService
 from artmach_assistant.core.tts_output_routing import TtsOutputRouter
@@ -425,6 +427,13 @@ class AssistantEngine:
         self.self_repair_sessions = SelfRepairSessionStore(
             SELF_REPAIR_SESSION_FILE
         )
+        self.evidence_research_handoff = EvidenceResearchHandoff(
+            store=EvidenceResearchApprovalStore(
+                DATA_DIR
+                / "diagnostics"
+                / "pending_evidence_research.json"
+            )
+        )
         self.retest_command_coordinator = RetestCommandCoordinator(
             store=RetestApprovalStore(
                 DATA_DIR
@@ -433,6 +442,7 @@ class AssistantEngine:
             ),
             source_root=self.own_project_root(),
             plan_provider=self._build_evidence_retest_plan,
+            result_handler=self._handle_retest_research_handoff,
         )
         self.project_memory = ProjectDevelopmentMemory(DATA_DIR / "project_memory")
         self.project_development_planner = ProjectDevelopmentPlanner(
@@ -5605,6 +5615,38 @@ class AssistantEngine:
             source_root=own_root,
         )
 
+    def _handle_retest_research_handoff(
+        self,
+        item,
+        result,
+    ) -> str | None:
+        """Create research approval only after a failed retest."""
+        handoff = getattr(
+            self,
+            "evidence_research_handoff",
+            None,
+        )
+
+        if handoff is None:
+            handoff = EvidenceResearchHandoff(
+                store=EvidenceResearchApprovalStore(
+                    DATA_DIR
+                    / "diagnostics"
+                    / "pending_evidence_research.json"
+                )
+            )
+            self.evidence_research_handoff = handoff
+
+        outcome = handoff.handle_retest_result(
+            item,
+            result,
+        )
+
+        if outcome.approval_session is None:
+            return None
+
+        return outcome.report
+
     def _retest_command_request(
         self,
         text: str,
@@ -5625,6 +5667,7 @@ class AssistantEngine:
                 ),
                 source_root=self.own_project_root(),
                 plan_provider=self._build_evidence_retest_plan,
+                result_handler=self._handle_retest_research_handoff,
             )
             self.retest_command_coordinator = coordinator
 
