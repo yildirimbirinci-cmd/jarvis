@@ -66,6 +66,9 @@ class EvidencePatchSession:
     apply_summary: str = ""
     rollback_summary: str = ""
     version_summary: str = ""
+    retest_summary: str = ""
+    closeout_summary: str = ""
+    closed_at: str = ""
     error: str = ""
 
     @classmethod
@@ -131,6 +134,27 @@ class EvidencePatchSession:
             apply_allowed=(status in {SESSION_APPROVED, SESSION_APPLYING}),
         )
 
+
+    def with_closeout(
+        self,
+        *,
+        retest_summary: str,
+        closeout_summary: str,
+        completed: bool = False,
+        error: str = "",
+    ) -> "EvidencePatchSession":
+        if self.status != SESSION_APPLIED:
+            raise ValueError("Only APPLIED patch sessions can record closeout.")
+        return replace(
+            self,
+            updated_at=_utc_now(),
+            retest_summary=str(retest_summary or ""),
+            closeout_summary=str(closeout_summary or ""),
+            closed_at=(_utc_now() if completed else self.closed_at),
+            error=str(error or ""),
+            apply_allowed=False,
+        )
+
     def report(self) -> str:
         return "\n".join(
             (
@@ -149,6 +173,9 @@ class EvidencePatchSession:
                 f"Uygulama ozeti: {self.apply_summary or '(yok)'}",
                 f"Rollback ozeti: {self.rollback_summary or '(yok)'}",
                 f"Surum ozeti: {self.version_summary or '(yok)'}",
+                f"Retest ozeti: {self.retest_summary or '(yok)'}",
+                f"Kapatma ozeti: {self.closeout_summary or '(yok)'}",
+                f"Kapanis zamani: {self.closed_at or '(yok)'}",
                 f"Hata: {self.error or '(yok)'}",
             )
         )
@@ -178,6 +205,9 @@ class EvidencePatchSession:
             apply_summary=str(payload.get("apply_summary", "")),
             rollback_summary=str(payload.get("rollback_summary", "")),
             version_summary=str(payload.get("version_summary", "")),
+            retest_summary=str(payload.get("retest_summary", "")),
+            closeout_summary=str(payload.get("closeout_summary", "")),
+            closed_at=str(payload.get("closed_at", "")),
             error=str(payload.get("error", "")),
         )
         if not session.session_id.startswith("PS-") or not session.proposal_id:

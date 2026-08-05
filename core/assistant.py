@@ -51,6 +51,7 @@ from artmach_assistant.core.evidence_research_session import EvidenceResearchApp
 from artmach_assistant.core.evidence_research_command import EvidenceResearchCommandCoordinator
 from artmach_assistant.core.evidence_patch_proposal import EvidencePatchProposal
 from artmach_assistant.core.evidence_patch_handoff import build_evidence_patch_handoff
+from artmach_assistant.core.evidence_patch_closeout import run_patch_closeout
 from artmach_assistant.core.evidence_patch_session import (
     SESSION_APPROVAL_PENDING,
     SESSION_APPROVED,
@@ -1916,6 +1917,42 @@ class AssistantEngine:
             reject()
         return session.report()
 
+    def _closeout_applied_evidence_patch_session(
+        self,
+        session: EvidencePatchSession,
+    ) -> EvidencePatchSession:
+        """Run bounded post-apply retest and persist closeout evidence."""
+        try:
+            plan = self._build_evidence_retest_plan()
+            outcome = run_patch_closeout(
+                session,
+                plan,
+                source_root=self.own_project_root(),
+                completion_store=RetestCompletionStore(
+                    DATA_DIR
+                    / "diagnostics"
+                    / "completed_retests.json"
+                ),
+            )
+            retest_summary = (
+                outcome.retest_result.reason
+                if outcome.retest_result is not None
+                else outcome.reason
+            )
+            return session.with_closeout(
+                retest_summary=retest_summary,
+                closeout_summary=outcome.report(),
+                completed=outcome.completed,
+                error=("" if outcome.completed else outcome.reason),
+            )
+        except Exception as exc:
+            return session.with_closeout(
+                retest_summary="Post-apply yeniden test tamamlanamadi.",
+                closeout_summary="Patch uygulandi ancak otomatik kapatma tamamlanamadi.",
+                completed=False,
+                error=f"{type(exc).__name__}: {exc}",
+            )
+
     def apply_evidence_patch_session(self, session_id: str) -> str:
         """Apply one explicitly approved patch session and persist the outcome."""
         store = self._evidence_patch_session_store()
@@ -2005,6 +2042,11 @@ class AssistantEngine:
                 error=(rendered[-2000:] or "Uygulama sonucu dogrulanamadi."),
             )
         store.save(session)
+        if session.status == SESSION_APPLIED:
+            session = self._closeout_applied_evidence_patch_session(
+                session
+            )
+            store.save(session)
         return session.report() + "\n\n" + rendered
 
     def prepare_own_code_proposal(
