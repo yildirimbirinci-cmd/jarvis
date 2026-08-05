@@ -53,6 +53,9 @@ from artmach_assistant.core.evidence_patch_proposal import EvidencePatchProposal
 from artmach_assistant.core.evidence_patch_handoff import build_evidence_patch_handoff
 from artmach_assistant.core.evidence_patch_outcome import record_patch_outcome
 from artmach_assistant.core.evidence_patch_closeout import run_patch_closeout
+from artmach_assistant.core.autonomous_repair_policy import (
+    assess_autonomous_runtime_repair,
+)
 from artmach_assistant.core.evidence_patch_session import (
     SESSION_APPROVAL_PENDING,
     SESSION_APPROVED,
@@ -4286,11 +4289,7 @@ class AssistantEngine:
                 )
 
             if fix_intent:
-                return (
-                    self.prepare_runtime_improvement_implementation(
-                        run_id
-                    )
-                )
+                return self.run_autonomous_runtime_repair(run_id)
 
             if research_intent:
                 promote_external = any(
@@ -4315,7 +4314,7 @@ class AssistantEngine:
             finding = self._latest_runtime_finding()
             if finding is None:
                 return "Düzeltilecek etkin bir çalışma zamanı bulgusu yok."
-            return self.prepare_runtime_improvement_implementation(finding.finding_id)
+            return self.run_autonomous_runtime_repair(finding.finding_id)
 
         store = self._self_repair_store()
         session = store.load()
@@ -4631,6 +4630,41 @@ class AssistantEngine:
                 if not expected_voice_cancel and not expected_intent_fallback:
                     return finding
         return None
+
+    def run_autonomous_runtime_repair(self, finding_id: str) -> str:
+        """Run a bounded policy-controlled repair without approval prompts.
+
+        The existing repair planner, proposal validator, worktree checks,
+        regression comparison and rollback path remain authoritative. High-risk
+        or weakly evidenced findings stop before proposal generation.
+        """
+        finding = self._find_runtime_finding(finding_id)
+        if finding is None:
+            return f"{str(finding_id).strip().upper()} is not an active runtime finding."
+
+        decision = assess_autonomous_runtime_repair(finding)
+        if not decision.allowed:
+            return decision.report() + "\n\nNo source file was changed."
+
+        outputs = [decision.report()]
+        planned = self.prepare_runtime_improvement_implementation(finding.finding_id)
+        outputs.append(planned)
+        session = self._self_repair_store().load()
+        if session is None or not session.active or session.state != "planned":
+            return "\n\n".join(outputs)
+
+        prepared = self._prepare_active_self_repair_proposal(session)
+        outputs.append(prepared)
+        session = self._self_repair_store().load()
+        if session is None or not session.active or session.state != "proposal_ready":
+            return "\n\n".join(outputs)
+
+        applied = self._apply_active_self_repair_proposal(session)
+        outputs.append(applied)
+        final_session = self._self_repair_store().load()
+        if final_session is not None:
+            outputs.append(self._self_repair_status(final_session))
+        return "\n\n".join(outputs)
 
     def prepare_runtime_improvement_implementation(self, finding_id: str) -> str:
         finding = self._find_runtime_finding(finding_id)
