@@ -1735,6 +1735,56 @@ def build_missing_anchor_guidance(
                 operation.get("op", "")
             ).strip().casefold()
 
+            if operation_name == "replace_method_block":
+                requested_anchor = _normalize_if_test_selector(
+                    operation.get("block_test", "")
+                )
+                if not requested_anchor:
+                    continue
+
+                try:
+                    scoped_tree = ast.parse(textwrap.dedent(scoped_source))
+                except SyntaxError:
+                    continue
+
+                if_tests = [
+                    ast.unparse(node.test)
+                    for node in ast.walk(scoped_tree)
+                    if isinstance(node, ast.If)
+                ]
+                wanted = _expression_fingerprint(requested_anchor)
+                matching_tests = [
+                    test
+                    for test in if_tests
+                    if _expression_fingerprint(test) == wanted
+                ]
+                if matching_tests:
+                    continue
+
+                rows.extend((
+                    "",
+                    (
+                        f"MISSING STRUCTURAL BLOCK: {raw_path} "
+                        f"operation {operation_index}"
+                    ),
+                    (
+                        f"Approved editable scope is {class_name}.{method_name}. "
+                        f"The requested if condition does not exist in that method: "
+                        f"{requested_anchor}"
+                    ),
+                    (
+                        "Do not repeat replace_method_block with the same condition. "
+                        "Use only an exact statement that exists in the source, or "
+                        "return no edit when the evidence does not justify one."
+                    ),
+                    (
+                        "Existing if conditions in the approved method: "
+                        + ("; ".join(if_tests) if if_tests else "(none)")
+                    ),
+                    f"\nAPPROVED METHOD SOURCE:\n{scoped_source}",
+                ))
+                continue
+
             field = (
                 "anchor"
                 if operation_name in {"insert_before", "insert_after"}

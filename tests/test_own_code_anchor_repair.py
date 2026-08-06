@@ -4,6 +4,7 @@ from artmach_assistant.core.edit_manager import EditManager
 from artmach_assistant.core.own_code_anchor_repair import (
     _normalize_if_test_selector,
     build_ambiguous_anchor_guidance,
+    build_missing_anchor_guidance,
     build_structural_method_block_guidance,
     merge_duplicate_operation_rows,
     qualify_inserted_private_helper_calls,
@@ -1226,3 +1227,83 @@ def test_malformed_structural_plain_call_downgrades_with_equivalent_helper(
     assert len(replacements) == 2
     assert all(source.count(row["old"]) == 1 for row in replacements)
     assert all("self._check_cancellation(token)" in row["new"] for row in replacements)
+
+
+def test_missing_anchor_guidance_reports_absent_structural_condition(
+    tmp_path: Path,
+) -> None:
+    source = (
+        "class TaskOrchestrator:\n"
+        "    def wrap(self, task_id, token, action):\n"
+        "        def execute():\n"
+        "            token.raise_if_cancelled()\n"
+        "            result = action()\n"
+        "            token.raise_if_cancelled()\n"
+        "            return result\n"
+        "        return execute\n"
+    )
+    (tmp_path / "core").mkdir()
+    (tmp_path / "core" / "task_orchestrator.py").write_text(
+        source,
+        encoding="utf-8",
+    )
+    payload = {
+        "files": [{
+            "path": "core/task_orchestrator.py",
+            "operations": [{
+                "op": "replace_method_block",
+                "class_name": "TaskOrchestrator",
+                "method_name": "wrap",
+                "block_test": "token.is_cancelled()",
+                "replacement": "return None",
+            }],
+        }],
+    }
+
+    guidance = build_missing_anchor_guidance(
+        payload,
+        project_root=tmp_path,
+        instruction=(
+            "TaskOrchestrator.execute_task bulgusu. "
+            "Konum TaskOrchestrator.wrap.execute"
+        ),
+    )
+
+    assert "MISSING STRUCTURAL BLOCK" in guidance
+    assert "token.is_cancelled()" in guidance
+    assert "Existing if conditions in the approved method: (none)" in guidance
+    assert "token.raise_if_cancelled()" in guidance
+    assert "Do not repeat replace_method_block" in guidance
+
+
+def test_missing_anchor_guidance_ignores_existing_structural_condition(
+    tmp_path: Path,
+) -> None:
+    source = (
+        "class Worker:\n"
+        "    def run(self, token):\n"
+        "        if token.cancelled:\n"
+        "            return None\n"
+    )
+    (tmp_path / "core").mkdir()
+    (tmp_path / "core" / "worker.py").write_text(source, encoding="utf-8")
+    payload = {
+        "files": [{
+            "path": "core/worker.py",
+            "operations": [{
+                "op": "replace_method_block",
+                "class_name": "Worker",
+                "method_name": "run",
+                "block_test": "token.cancelled",
+                "replacement": "return self._cancelled()",
+            }],
+        }],
+    }
+
+    guidance = build_missing_anchor_guidance(
+        payload,
+        project_root=tmp_path,
+        instruction="Konum Worker.run",
+    )
+
+    assert guidance == ""
