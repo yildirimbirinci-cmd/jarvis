@@ -4103,6 +4103,14 @@ class AssistantEngine:
             local_evidence_sufficient=False,
         )
 
+        self.last_action_context = {
+            "kind": "runtime_research_plan",
+            "finding_id": str(
+                getattr(finding, "finding_id", "") or ""
+            ),
+            "promote_external": bool(promote_external),
+        }
+
         return (
             outcome.report
             + "\n\n"
@@ -5801,6 +5809,53 @@ class AssistantEngine:
         return (
             f"{task.task_id}: Haklısın. Bunun nedenini henüz bilmiyorum; araştırma görevini başlattım. "
             "Sonuç hazır olduğunda sana bildireceğim. Şimdilik kodumu değiştirmeyeceğim."
+        )
+
+    def _runtime_research_follow_up_request(
+        self,
+        text: str,
+    ) -> str | None:
+        """Promote the active runtime research plan to RS approval.
+
+        Natural follow-up phrases do not repeat the RUN identifier.  Keep
+        them attached to the last runtime research plan instead of allowing
+        the generic collaborative problem solver to consume them.
+        """
+        normalized = self.command_key(text)
+        promote_external = any(
+            marker in normalized
+            for marker in (
+                "yerel kanit yetersiz",
+                "yerel inceleme yetersiz",
+                "kanit kok nedeni aciklamak icin yetersiz",
+                "dis arastirma onayi hazirla",
+                "dis arastirma onayi olustur",
+                "rs onayi hazirla",
+                "rs onayi olustur",
+                "dis arastirmaya gec",
+            )
+        )
+        if not promote_external:
+            return None
+
+        context = getattr(self, "last_action_context", None) or {}
+        if str(context.get("kind", "")) != "runtime_research_plan":
+            return None
+
+        finding_id = str(context.get("finding_id", "") or "").strip()
+        if not finding_id:
+            return None
+
+        finding = self._find_runtime_finding(finding_id)
+        if finding is None:
+            return (
+                f"{finding_id} artik etkin bir calisma zamani bulgusu degil. "
+                "Dis arastirma onayi olusturulmadi."
+            )
+
+        return self._runtime_finding_research_plan(
+            finding,
+            promote_external=True,
         )
 
     def _maintenance_request(self, text: str) -> str | None:
@@ -10890,6 +10945,12 @@ class AssistantEngine:
         self_improvement_research = self._self_improvement_research_request(text)
         if self_improvement_research is not None:
             return self_improvement_research
+
+        runtime_research_follow_up = (
+            self._runtime_research_follow_up_request(text)
+        )
+        if runtime_research_follow_up is not None:
+            return runtime_research_follow_up
 
         action_follow_up = self._handle_action_follow_up(text)
         if action_follow_up is not None:
