@@ -85,6 +85,65 @@ def _symbol_source(
     return ""
 
 
+def _unique_class_method_source_for_anchor(
+    source: str,
+    *,
+    class_name: str,
+    anchor: str,
+    replacement: str = "",
+) -> str:
+    """Return one direct class method that safely owns an ambiguous anchor.
+
+    Prefer a sole method containing the anchor.  If several methods contain
+    it, use identifiers referenced by the replacement only as a scope proof:
+    the selected method must have a unique highest overlap with its declared
+    parameters.  This resolves ``task_id, token, action`` to ``wrap`` without
+    guessing from a human-facing operation label such as ``execute_task``.
+    """
+    if not anchor:
+        return ""
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return ""
+
+    replacement_names = set(re.findall(r"\b[A-Za-z_][A-Za-z0-9_]*\b", replacement))
+    lines = source.splitlines(keepends=True)
+    candidates: list[tuple[str, int]] = []
+    for node in tree.body:
+        if not isinstance(node, ast.ClassDef) or node.name != class_name:
+            continue
+        for child in node.body:
+            if not isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            start = max(0, int(child.lineno) - 1)
+            end = int(getattr(child, "end_lineno", child.lineno))
+            method_source = "".join(lines[start:end])
+            if method_source.count(anchor) != 1:
+                continue
+            argument_names = {row.arg for row in child.args.args}
+            argument_names.update(row.arg for row in child.args.kwonlyargs)
+            if child.args.vararg is not None:
+                argument_names.add(child.args.vararg.arg)
+            if child.args.kwarg is not None:
+                argument_names.add(child.args.kwarg.arg)
+            argument_names.discard("self")
+            score = len(argument_names & replacement_names)
+            candidates.append((method_source, score))
+        break
+
+    if len(candidates) == 1:
+        return candidates[0][0]
+    if not candidates:
+        return ""
+
+    best_score = max(score for _source, score in candidates)
+    if best_score <= 0:
+        return ""
+    best = [method_source for method_source, score in candidates if score == best_score]
+    return best[0] if len(best) == 1 else ""
+
+
 def normalize_structural_class_method_insertions(
     payload: dict[str, Any],
     *,
@@ -758,8 +817,6 @@ def repair_ambiguous_replace_anchors(
             class_name=class_name,
             method_name=method_name,
         )
-        if not scoped_source:
-            continue
 
         operations = file_row.get("operations")
         if not isinstance(operations, list):
@@ -777,9 +834,20 @@ def repair_ambiguous_replace_anchors(
                 if not isinstance(old, str) or not isinstance(new, str):
                     continue
 
+                operation_scope = scoped_source
+                if not operation_scope:
+                    operation_scope = _unique_class_method_source_for_anchor(
+                        source,
+                        class_name=class_name,
+                        anchor=old,
+                        replacement=new,
+                    )
+                if not operation_scope:
+                    continue
+
                 expanded = _expand_unique_replace(
                     source,
-                    scoped_source,
+                    operation_scope,
                     old,
                     new,
                 )
@@ -797,9 +865,19 @@ def repair_ambiguous_replace_anchors(
                 # as a replace that preserves that context and removes only the
                 # model-requested fragment.  This is safe only when the fragment
                 # occurs exactly once inside the explicitly requested symbol.
+                operation_scope = scoped_source
+                if not operation_scope:
+                    operation_scope = _unique_class_method_source_for_anchor(
+                        source,
+                        class_name=class_name,
+                        anchor=old,
+                    )
+                if not operation_scope:
+                    continue
+
                 expanded = _expand_unique_replace(
                     source,
-                    scoped_source,
+                    operation_scope,
                     old,
                     "",
                 )

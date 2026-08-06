@@ -1106,3 +1106,49 @@ def test_structural_method_target_normalizes_nested_model_name(tmp_path: Path) -
     operation = repaired["files"][0]["operations"][0]
     assert operation["op"] == "replace"
     assert operation["_structural_block"].startswith("TaskOrchestrator.wrap:")
+
+
+def test_ambiguous_anchor_falls_back_to_unique_method_inside_approved_class(
+    tmp_path: Path,
+) -> None:
+    source = (
+        "class TaskOrchestrator:\n"
+        "    def other(self, action):\n"
+        "        result = action()\n"
+        "        return result\n"
+        "\n"
+        "    def wrap(self, task_id, token, action):\n"
+        "        def execute():\n"
+        "            token.raise_if_cancelled()\n"
+        "            result = action()\n"
+        "            token.raise_if_cancelled()\n"
+        "            return result\n"
+        "        return execute\n"
+    )
+    target = tmp_path / "core" / "task_orchestrator.py"
+    target.parent.mkdir(parents=True)
+    target.write_text(source, encoding="utf-8")
+    payload = {
+        "files": [{
+            "path": "core/task_orchestrator.py",
+            "operations": [{
+                "op": "replace",
+                "old": "result = action()",
+                "new": "return self._execute_task(task_id, token, action)",
+            }],
+        }],
+    }
+
+    repaired = repair_ambiguous_replace_anchors(
+        payload,
+        project_root=tmp_path,
+        instruction=(
+            "RUN bulgusu icin onayli sembol "
+            "TaskOrchestrator.execute_task"
+        ),
+    )
+
+    operation = repaired["files"][0]["operations"][0]
+    assert operation["old"] != "result = action()"
+    assert source.count(operation["old"]) == 1
+    assert "self._execute_task(task_id, token, action)" in operation["new"]
