@@ -190,10 +190,20 @@ def normalize_structural_class_method_insertions(
             class_name = str(operation.get("class_name", "")).strip()
             content = operation.get("content")
             if requested and class_name != requested[0]:
-                raise WorkspaceError(
-                    f"Yapısal metot hedef sınıfı onaylı sembolle eşleşmiyor: "
-                    f"{raw_path} işlem {operation_index}; beklenen={requested[0]}"
-                )
+                # Small code models sometimes concatenate the approved class and
+                # method scope into ``class_name`` for insert_class_method, for
+                # example ``TaskOrchestrator.wrap``. This operation only accepts
+                # an owning class. Normalize the exact approved Class.method
+                # spelling deterministically; reject every other scope change.
+                approved_method_scope = f"{requested[0]}.{requested[1]}"
+                if class_name == approved_method_scope:
+                    class_name = requested[0]
+                    operation["class_name"] = class_name
+                else:
+                    raise WorkspaceError(
+                        f"Yapısal metot hedef sınıfı onaylı sembolle eşleşmiyor: "
+                        f"{raw_path} işlem {operation_index}; beklenen={requested[0]}"
+                    )
             owners = [
                 node for node in tree.body
                 if isinstance(node, ast.ClassDef) and node.name == class_name

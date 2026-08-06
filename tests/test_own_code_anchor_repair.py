@@ -1349,3 +1349,49 @@ def test_missing_anchor_guidance_corrects_nested_insert_class_method_target(tmp_
     assert "class_name='TaskOrchestrator'" in guidance
     assert "method_name='wrap'" in guidance
     assert "Do not repeat class_name='TaskOrchestrator.wrap'" in guidance
+
+
+def test_insert_class_method_normalizes_approved_method_scope_as_class_name(tmp_path: Path) -> None:
+    source = tmp_path / "core" / "task_orchestrator.py"
+    source.parent.mkdir(parents=True)
+    source.write_text(
+        "class TaskOrchestrator:\n"
+        "    def wrap(self, action):\n"
+        "        def execute():\n"
+        "            return action()\n"
+        "        return execute\n",
+        encoding="utf-8",
+    )
+    payload = {
+        "summary": "add helper",
+        "files": [
+            {
+                "path": "core/task_orchestrator.py",
+                "reason": "measure wrapper overhead",
+                "operations": [
+                    {
+                        "op": "insert_class_method",
+                        "class_name": "TaskOrchestrator.wrap",
+                        "content": (
+                            "def _check_wrapper_overhead(self, action_duration_ms: float) -> bool:\n"
+                            "    return action_duration_ms > 0"
+                        ),
+                    }
+                ],
+            }
+        ],
+    }
+
+    normalized = normalize_structural_class_method_insertions(
+        payload,
+        project_root=tmp_path,
+        instruction=(
+            "core/task_orchestrator.py içindeki "
+            "TaskOrchestrator.wrap.execute sembolünü düzenle"
+        ),
+    )
+
+    operation = normalized["files"][0]["operations"][0]
+    assert operation["op"] in {"insert_before", "insert_after"}
+    assert "class_name" not in operation
+    assert "def _check_wrapper_overhead" in operation["content"]
