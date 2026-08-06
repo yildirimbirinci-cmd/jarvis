@@ -2346,22 +2346,33 @@ class AssistantEngine:
                 "Yalnızca çalışma zamanı kanıtında belirtilen darboğazı düzelt."
             )
         if approved_symbol_rows:
+            extraction_requested = (
+                "davranisi degistirmeden" in self.command_key(raw_instruction)
+                and any(
+                    word in self.command_key(raw_instruction)
+                    for word in ("refaktor", "cikar", "ayir", "extract")
+                )
+            )
             prompt += (
                 "\n\nSEMBOL-KAPSAMLI PATCH KURALI:\n"
-                "Her old/anchor metni yukaridaki HEDEF SEMBOL ve GUVENLI "
-                "SINIF-YARDIMCI METOT SINIRLARI baglamindan birebir alinmali. "
-                "Sadece `def run(self) -> None:` gibi baska siniflarda da bulunan "
-                "genel bir imzayi anchor olarak kullanma. Yeni bir sinif metodu "
-                "fonksiyon imzasinin hemen ardina insert_after ile ekleme; bu onu "
-                "run govdesinin icine koyar. Sinif kardesi yardimci metod icin "
-                "verilen sonraki sinif/modul uyesini insert_before anchor'i yap."
-                " Tercih edilen ve zorunlu yapısal biçim: "
-                "{\"op\":\"insert_class_method\","
-                "\"class_name\":\"WakeWordWorker\","
-                "\"content\":\"def _yardimci(self):\\n    ...\\n\"}. "
-                "content tek, eksiksiz ve gövdeli bir metot olmalı; sınıf girintisini "
-                "kendin ekleme."
+                "Her old/anchor metni yukaridaki HEDEF SEMBOL baglamindan "
+                "birebir alinmali. Yalnizca izinli sembolun mevcut govdesini "
+                "degistir; ayni sinifta dahi yeni kardes metot, yeni fonksiyon "
+                "veya yeni sinif olusturma. insert_class_method, yeni dosya "
+                "content'i ve izinli sembol disindaki insert_before/insert_after "
+                "operasyonlari yasaktir. Mevcut sembol icinde once kucuk ve tam "
+                "eslesen replace kullan; gercek bir if dugumu hedefleniyorsa "
+                "replace_method_block kullan. Guvenli yerinde degisiklik "
+                "uretilemiyorsa kapsam disina cikmak yerine bos files listesiyle "
+                "guvenli taslak uretilemedigini summary alaninda bildir."
             )
+            if extraction_requested:
+                prompt += (
+                    "\nBu istek acik bir davranis-koruyan cikarma istegidir. "
+                    "Yalniz bu durumda insert_class_method kullanilabilir; yeni "
+                    "private yardimci ayni taslakta izinli sembol tarafindan "
+                    "dogrudan cagrilmali ve mevcut davranis korunmalidir."
+                )
         normalized_request = self.command_key(raw_instruction)
         if (
             "davranisi degistirmeden" in normalized_request

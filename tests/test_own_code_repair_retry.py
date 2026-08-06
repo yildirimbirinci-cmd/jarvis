@@ -528,3 +528,39 @@ def test_structural_target_retry_explains_direct_method_and_exact_replace() -> N
     assert "`wrap.execute_task` gibi noktalı" in prompt
     assert "küçük ve tam eşleşen `replace`" in prompt
     assert "`_execute_task` gibi yeni çağrılar icat etme" in prompt
+
+
+def test_symbol_scope_retry_forbids_new_helper_without_explicit_extraction() -> None:
+    prompt = build_validation_repair_prompt(
+        "TaskOrchestrator.wrap.execute darboğazını düzelt",
+        (
+            "core/task_orchestrator.py [symbol_scope] onay disi sembol degisti: "
+            "TaskOrchestrator._check_wrapper_overhead"
+        ),
+        {
+            "summary": "new helper",
+            "files": [
+                {
+                    "path": "core/task_orchestrator.py",
+                    "reason": "repair",
+                    "operations": [
+                        {
+                            "op": "insert_class_method",
+                            "class_name": "TaskOrchestrator",
+                            "content": "def _check_wrapper_overhead(self):\n    return True",
+                        }
+                    ],
+                }
+            ],
+        },
+        stage="sembol kapsami",
+        targets=RepairTargets(
+            paths=("core/task_orchestrator.py",),
+            symbols=("TaskOrchestrator.wrap",),
+            issue_codes=("symbol_scope",),
+        ),
+    )
+
+    assert "insert_class_method, yeni sinif, yeni fonksiyon" in prompt
+    assert "Yalniz HEDEF SEMBOLLER" in prompt
+    assert "yardimciyi dogrudan self.<yardimci>" not in prompt

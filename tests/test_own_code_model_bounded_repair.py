@@ -722,3 +722,42 @@ def test_generic_duplicate_retry_does_not_receive_wakeword_specific_guidance(
     assert "WakeWordWorker.run" not in prompts[2]
     assert "break/continue" not in prompts[2]
     assert "self.msleep" not in prompts[2]
+
+
+def test_approved_symbol_prompt_forbids_new_helper_without_extraction(
+    tmp_path, monkeypatch
+) -> None:
+    engine = _engine(tmp_path)
+    source = tmp_path / "core" / "task_orchestrator.py"
+    source.write_text(
+        "class TaskOrchestrator:\n"
+        "    def wrap(self):\n"
+        "        def execute():\n"
+        "            return 1\n"
+        "        return execute\n",
+        encoding="utf-8",
+    )
+    prompts: list[str] = []
+
+    def fake_urlopen(request, **_kwargs):
+        payload = json.loads(request.data.decode("utf-8"))
+        prompts.append(payload["messages"][1]["content"])
+        return _Response(json.dumps({"summary": "no safe edit", "files": []}))
+
+    monkeypatch.setattr(
+        "artmach_assistant.core.assistant.urllib.request.urlopen", fake_urlopen
+    )
+
+    engine.prepare_own_code_proposal(
+        "TaskOrchestrator.wrap.execute darboğazını en küçük yerinde değişiklikle düzelt.",
+        approved_paths=("core/task_orchestrator.py",),
+        approved_symbols=("TaskOrchestrator.wrap",),
+        plan_id="PP-SYMBOL-SCOPE",
+    )
+
+    assert prompts
+    prompt = prompts[0]
+    assert "insert_class_method, yeni dosya" in prompt
+    assert "yeni kardes metot" in prompt
+    assert "Yalnizca izinli sembolun mevcut govdesini degistir" in prompt
+    assert "Bu istek acik bir davranis-koruyan cikarma istegidir" not in prompt

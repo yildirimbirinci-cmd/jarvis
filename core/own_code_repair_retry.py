@@ -245,16 +245,36 @@ def build_validation_repair_prompt(
     }
     symbol_scope_guidance = ""
     if "sembol" in str(stage or "").casefold():
-        symbol_scope_guidance = (
-            "\nSEMBOL KAPSAMI ONARIM KURALI:\n"
-            "Dogrulayici onay disi yeni bir private yardimci metot "
-            "bildirdiyse iki guvenli secenekten birini uygula: "
-            "yardimciyi tamamen kaldirip onayli sembolu yerinde duzelt "
-            "veya ayni siniftaki onayli sembolu de ayni taslakta "
-            "degistirerek yardimciyi dogrudan self.<yardimci>(...) "
-            "biciminde cagir. Cagirilmayan veya bagimsiz yardimci "
-            "metot yeniden reddedilir.\n"
+        normalized_instruction = str(instruction or "").casefold()
+        extraction_requested = (
+            "davranisi degistirmeden" in normalized_instruction
+            and any(
+                word in normalized_instruction
+                for word in ("refaktor", "cikar", "çıkar", "ayir", "ayır", "extract")
+            )
         )
+        if extraction_requested:
+            symbol_scope_guidance = (
+                "\nSEMBOL KAPSAMI ONARIM KURALI:\n"
+                "Bu istek acik bir davranis-koruyan cikarma istegidir. "
+                "Yeni private yardimci yalniz ayni taslakta onayli sembol "
+                "tarafindan dogrudan cagriliyor ve davranis korunuyorsa "
+                "kullanilabilir. Cagirilmayan veya bagimsiz yardimci metot "
+                "yeniden reddedilir.\n"
+            )
+        else:
+            symbol_scope_guidance = (
+                "\nSEMBOL KAPSAMI ONARIM KURALI:\n"
+                "Onay disi yeni private yardimciyi tamamen kaldir; yeni metot ekleme. "
+                "Mevcut olmayan bir self.<yardimci>(...) cagrisi uretme. "
+                "Cagirilmayan veya bagimsiz yardimci metot yeniden reddedilir. "
+                "insert_class_method, yeni sinif, yeni fonksiyon veya kardes "
+                "metot uretme. Yalniz HEDEF SEMBOLLER satirinda listelenen "
+                "mevcut sembolun govdesini yerinde replace ya da gercek bir "
+                "if dugumu icin replace_method_block ile duzelt. Guvenli "
+                "yerinde onarim mumkun degilse kapsam disina cikma ve bos "
+                "files listesiyle bunu summary alaninda bildir.\n"
+            )
 
     structural_guidance = ""
     report_folded = str(report or "").casefold()
