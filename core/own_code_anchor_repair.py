@@ -1735,6 +1735,34 @@ def build_missing_anchor_guidance(
                 operation.get("op", "")
             ).strip().casefold()
 
+            if operation_name == "insert_class_method":
+                proposed_class = str(operation.get("class_name", "")).strip()
+                if proposed_class and proposed_class != class_name:
+                    rows.extend((
+                        "",
+                        (
+                            f"INVALID STRUCTURAL CLASS TARGET: {raw_path} "
+                            f"operation {operation_index}"
+                        ),
+                        (
+                            f"Approved class_name is {class_name}. "
+                            f"The proposed class_name {proposed_class!r} is invalid."
+                        ),
+                        (
+                            f"The approved runtime symbol {class_name}.{method_name} "
+                            f"must be split as class_name={class_name!r} and "
+                            f"method_name={method_name!r}. Nested runtime segments "
+                            "must not be appended to class_name."
+                        ),
+                        (
+                            "For insert_class_method, use only the owning class name. "
+                            f"Set class_name to {class_name!r}. Do not repeat "
+                            f"class_name={proposed_class!r}."
+                        ),
+                        f"\nAPPROVED METHOD SOURCE:\n{scoped_source}",
+                    ))
+                continue
+
             if operation_name == "replace_method_block":
                 requested_anchor = _normalize_if_test_selector(
                     operation.get("block_test", "")

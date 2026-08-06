@@ -1307,3 +1307,45 @@ def test_missing_anchor_guidance_ignores_existing_structural_condition(
     )
 
     assert guidance == ""
+
+
+def test_missing_anchor_guidance_corrects_nested_insert_class_method_target(tmp_path: Path) -> None:
+    source = tmp_path / "core" / "task_orchestrator.py"
+    source.parent.mkdir(parents=True)
+    source.write_text(
+        "class TaskOrchestrator:\n"
+        "    def wrap(self, action):\n"
+        "        def execute():\n"
+        "            return action()\n"
+        "        return execute\n",
+        encoding="utf-8",
+    )
+    payload = {
+        "files": [
+            {
+                "path": "core/task_orchestrator.py",
+                "operations": [
+                    {
+                        "op": "insert_class_method",
+                        "class_name": "TaskOrchestrator.wrap",
+                        "content": "def _check_wrapper_overhead(self):\n    return False",
+                    }
+                ],
+            }
+        ]
+    }
+
+    guidance = build_missing_anchor_guidance(
+        payload,
+        project_root=tmp_path,
+        instruction=(
+            "core/task_orchestrator.py içindeki "
+            "TaskOrchestrator.wrap.execute sembolünü düzenle"
+        ),
+    )
+
+    assert "INVALID STRUCTURAL CLASS TARGET" in guidance
+    assert "Approved class_name is TaskOrchestrator" in guidance
+    assert "class_name='TaskOrchestrator'" in guidance
+    assert "method_name='wrap'" in guidance
+    assert "Do not repeat class_name='TaskOrchestrator.wrap'" in guidance
