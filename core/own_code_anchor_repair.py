@@ -409,6 +409,41 @@ def normalize_structural_method_block_replacements(
                     operation["method_name"] = method_name
             block_test = _normalize_if_test_selector(operation.get("block_test", ""))
             replacement = operation.get("replacement")
+
+            # Small code models sometimes use replace_method_block for a plain
+            # standalone call and also target a human-facing runtime label such
+            # as execute_task instead of the approved direct method wrap.  Only
+            # downgrade that malformed structural operation to an exact replace
+            # when the same payload proves an equivalent helper extraction:
+            # the replacement is one direct self.<helper>(...) call and the
+            # inserted helper contains exactly the original statement.  Normal
+            # ambiguous-anchor repair will then scope and expand the replace.
+            helper_name = (
+                _direct_self_helper_name(str(replacement or ""))
+                if isinstance(replacement, str)
+                else ""
+            )
+            helper_statement = (
+                _inserted_helper_single_statement(operations, helper_name)
+                if helper_name
+                else ""
+            )
+            plain_statement = str(block_test or "").strip().rstrip(";")
+            if (
+                requested
+                and class_name == requested[0]
+                and method_name != requested[1]
+                and helper_statement
+                and helper_statement == plain_statement
+            ):
+                operation.clear()
+                operation.update({
+                    "op": "replace",
+                    "old": plain_statement,
+                    "new": str(replacement).strip(),
+                })
+                continue
+
             if requested and (class_name, method_name) != requested:
                 raise WorkspaceError(
                     "Yapısal blok hedefi onaylı sembolle eşleşmiyor: "
@@ -835,10 +870,14 @@ def _expand_equivalent_helper_replacements(
     if not helper_statement or helper_statement != old_statement:
         return []
 
-    positions = [
-        position for position in _occurrence_positions(scoped_source, old)
-        if position == 0 or scoped_source[position - 1] in "\r\n"
-    ]
+    positions = []
+    for position in _occurrence_positions(scoped_source, old):
+        line_start = max(
+            scoped_source.rfind("\n", 0, position),
+            scoped_source.rfind("\r", 0, position),
+        ) + 1
+        if not scoped_source[line_start:position].strip():
+            positions.append(position)
     if len(positions) < 2:
         return []
 

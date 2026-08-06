@@ -1160,3 +1160,69 @@ def test_equivalent_helper_extraction_expands_all_ambiguous_calls(
     assert len(replace_operations) == 2
     assert all(source.count(row["old"]) == 1 for row in replace_operations)
     assert all("self._check_cancel(token)" in row["new"] for row in replace_operations)
+
+
+def test_malformed_structural_plain_call_downgrades_with_equivalent_helper(
+    tmp_path: Path,
+) -> None:
+    source = (
+        "class TaskOrchestrator:\n"
+        "    def wrap(self, task_id, token, action):\n"
+        "        def execute():\n"
+        "            token.raise_if_cancelled()\n"
+        "            result = action()\n"
+        "            token.raise_if_cancelled()\n"
+        "            return result\n"
+        "        return execute\n"
+    )
+    (tmp_path / "core").mkdir()
+    target = tmp_path / "core" / "task_orchestrator.py"
+    target.write_text(source, encoding="utf-8")
+    payload = {
+        "files": [{
+            "path": "core/task_orchestrator.py",
+            "operations": [
+                {
+                    "op": "insert_after",
+                    "anchor": "        return execute\n",
+                    "content": (
+                        "\n    def _check_cancellation(self, token):\n"
+                        "        token.raise_if_cancelled()\n"
+                    ),
+                    "_structural_method": "_check_cancellation",
+                },
+                {
+                    "op": "replace_method_block",
+                    "class_name": "TaskOrchestrator",
+                    "method_name": "execute_task",
+                    "block_test": "token.raise_if_cancelled()",
+                    "replacement": "self._check_cancellation(token)",
+                },
+            ],
+        }],
+    }
+
+    normalized = normalize_structural_method_block_replacements(
+        payload,
+        project_root=tmp_path,
+        instruction=(
+            "TaskOrchestrator.execute_task bulgusu. "
+            "Konum TaskOrchestrator.wrap.execute"
+        ),
+    )
+    repaired = repair_ambiguous_replace_anchors(
+        normalized,
+        project_root=tmp_path,
+        instruction=(
+            "TaskOrchestrator.execute_task bulgusu. "
+            "Konum TaskOrchestrator.wrap.execute"
+        ),
+    )
+
+    replacements = [
+        row for row in repaired["files"][0]["operations"]
+        if row["op"] == "replace"
+    ]
+    assert len(replacements) == 2
+    assert all(source.count(row["old"]) == 1 for row in replacements)
+    assert all("self._check_cancellation(token)" in row["new"] for row in replacements)
