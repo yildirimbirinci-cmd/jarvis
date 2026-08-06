@@ -4145,13 +4145,19 @@ class AssistantEngine:
             local_evidence_sufficient=False,
         )
 
-        self.last_action_context = {
+        runtime_research_context = {
             "kind": "runtime_research_plan",
             "finding_id": str(
                 getattr(finding, "finding_id", "") or ""
             ),
             "promote_external": bool(promote_external),
         }
+        self.last_action_context = dict(runtime_research_context)
+        # Operational notices and unrelated UI actions may replace
+        # last_action_context after the response is rendered. Keep a dedicated
+        # runtime-research continuation context so a natural follow-up can
+        # still promote the exact RUN finding that produced LOCAL_REVIEW.
+        self.active_runtime_research_context = dict(runtime_research_context)
 
         return (
             outcome.report
@@ -5880,7 +5886,11 @@ class AssistantEngine:
         if not promote_external:
             return None
 
-        context = getattr(self, "last_action_context", None) or {}
+        context = (
+            getattr(self, "active_runtime_research_context", None)
+            or getattr(self, "last_action_context", None)
+            or {}
+        )
         if str(context.get("kind", "")) != "runtime_research_plan":
             return None
 
