@@ -761,3 +761,98 @@ def test_approved_symbol_prompt_forbids_new_helper_without_extraction(
     assert "yeni kardes metot" in prompt
     assert "Yalnizca izinli sembolun mevcut govdesini degistir" in prompt
     assert "Bu istek acik bir davranis-koruyan cikarma istegidir" not in prompt
+
+
+def test_ambiguous_anchor_retry_forces_exact_candidate_and_forbids_unknown_helper(
+    tmp_path,
+) -> None:
+    engine = _engine(tmp_path)
+    source = tmp_path / "core" / "task_orchestrator.py"
+    source.write_text(
+        "class TaskOrchestrator:\n"
+        "    def wrap(self, action, token):\n"
+        "        def execute():\n"
+        "            token.raise_if_cancelled()\n"
+        "            result = action()\n"
+        "            token.raise_if_cancelled()\n"
+        "            return result\n"
+        "        return execute\n",
+        encoding="utf-8",
+    )
+    first = json.dumps({
+        "summary": "ambiguous",
+        "files": [{
+            "path": "core/task_orchestrator.py",
+            "operations": [{
+                "op": "replace",
+                "old": "token.raise_if_cancelled()",
+                "new": "return self._execute_with_cancellation_check(action)",
+            }],
+        }],
+    })
+    second = json.dumps({"summary": "no safe edit", "files": []})
+    responses = iter((first, second))
+    prompts: list[str] = []
+
+    def respond(prompt: str, **_kwargs) -> str:
+        prompts.append(prompt)
+        return next(responses)
+
+    engine._request_code_model_json = respond
+
+    with pytest.raises(WorkspaceError):
+        engine._generate_validated_own_code_proposal(
+            "TaskOrchestrator.wrap.execute darboğazını yerinde düzelt"
+        )
+
+    assert len(prompts) == 2
+    retry = prompts[1]
+    assert "ADAY ZORUNLULUGU" in retry
+    assert "seçtiğin TEK aday bloğunu" in retry
+    assert "`token.raise_if_cancelled()` gibi birden fazla geçen tek satırı" in retry
+    assert "YARDIMCI CAGRI YASAGI" in retry
+    assert "tanımlı olduğu açıkça gösterilmeyen hiçbir `self._...(...)`" in retry
+
+
+def test_structural_retry_forbids_expression_as_block_test(tmp_path) -> None:
+    engine = _engine(tmp_path)
+    source = tmp_path / "core" / "task_orchestrator.py"
+    source.write_text(
+        "class TaskOrchestrator:\n"
+        "    def wrap(self, action, token):\n"
+        "        def execute():\n"
+        "            token.raise_if_cancelled()\n"
+        "            return action()\n"
+        "        return execute\n",
+        encoding="utf-8",
+    )
+    first = json.dumps({
+        "summary": "bad structural operation",
+        "files": [{
+            "path": "core/task_orchestrator.py",
+            "operations": [{
+                "op": "replace_method_block",
+                "class_name": "TaskOrchestrator",
+                "method_name": "wrap",
+                "block_test": "token.raise_if_cancelled()",
+                "replacement": "return action()",
+            }],
+        }],
+    })
+    second = json.dumps({"summary": "no safe edit", "files": []})
+    responses = iter((first, second))
+    prompts: list[str] = []
+    engine._request_code_model_json = (
+        lambda prompt, **_kwargs: prompts.append(prompt) or next(responses)
+    )
+
+    with pytest.raises(WorkspaceError):
+        engine._generate_validated_own_code_proposal(
+            "TaskOrchestrator.wrap.execute darboğazını yerinde düzelt"
+        )
+
+    assert len(prompts) == 2
+    retry = prompts[1]
+    assert "YAPISAL OPERASYON ZORUNLULUGU" in retry
+    assert "yalnız hedef metodun doğrudan gövdesinde gerçekten bulunan bir `if`" in retry
+    assert "Hedef bir ifade satırıysa `replace` kullan" in retry

@@ -1290,6 +1290,9 @@ class AssistantEngine:
         )
         diagnostic_attempts: list[dict[str, object]] = []
 
+        class _OwnCodeSafeAbstention(Exception):
+            pass
+
         def record_raw_attempt(
             *,
             attempt: int,
@@ -1364,6 +1367,40 @@ class AssistantEngine:
                     "birden fazla bulunan metni kullanma. Doğrulayıcı "
                     "raporunda GERÇEK KAYNAK BLOĞU verilmişse onu karakteri "
                     "karakterine aynen kullan."
+                )
+
+                previous_folded = previous_error.casefold()
+                if "ambiguous anchor guidance" in previous_folded:
+                    current_prompt += (
+                        "\n\nADAY ZORUNLULUGU: Doğrulayıcı CANDIDATE/ADAY blokları "
+                        "verdiyse `replace.old` alanına kısa ortak satırı değil, "
+                        "seçtiğin TEK aday bloğunu boşlukları ve girintisiyle birebir "
+                        "kopyala. Adayları birleştirme, kısaltma veya yeniden yazma. "
+                        "Aday bloğu hedef sembol içindeki gerçek kaynak olmalıdır. "
+                        "`token.raise_if_cancelled()` gibi birden fazla geçen tek satırı "
+                        "yeniden old alanı olarak kullanma."
+                    )
+
+                if "self._" in previous_error:
+                    current_prompt += (
+                        "\n\nYARDIMCI CAGRI YASAGI: Çalışan kaynak bağlamında tanımlı "
+                        "olduğu açıkça gösterilmeyen hiçbir `self._...(...)` çağrısı "
+                        "üretme. Yeni helper, yeni kardeş metot veya uydurma çağrı ekleme. "
+                        "Güvenli yerinde değişiklik kurulamıyorsa boş `files` listesi döndür."
+                    )
+
+            previous_folded = previous_error.casefold()
+            if (
+                "yapısal blok koşulu" in previous_folded
+                or "yapisal blok kosulu" in previous_folded
+                or "replace_method_block" in previous_folded
+            ):
+                current_prompt += (
+                    "\n\nYAPISAL OPERASYON ZORUNLULUGU: `replace_method_block` "
+                    "yalnız hedef metodun doğrudan gövdesinde gerçekten bulunan "
+                    "bir `if` düğümü için kullanılabilir. `block_test` alanına çağrı, "
+                    "return veya sıradan ifade yazma. Hedef bir ifade satırıysa "
+                    "`replace` kullan ve old alanına benzersiz tam kaynak bloğunu koy."
                 )
 
             if is_noop_error(previous_error):
@@ -1454,6 +1491,22 @@ class AssistantEngine:
             payload: object = None
             try:
                 payload = self._validate_own_code_payload_shape(raw)
+                if (
+                    isinstance(payload, dict)
+                    and isinstance(payload.get("files"), list)
+                    and not payload.get("files")
+                ):
+                    message = (
+                        "Kod modeli güvenli ve kapsam içi bir değişiklik üretemedi; "
+                        "boş files listesiyle güvenli biçimde vazgeçti."
+                    )
+                    record_raw_attempt(
+                        attempt=attempt,
+                        raw=raw,
+                        outcome="safe_abstention",
+                        error=message,
+                    )
+                    raise _OwnCodeSafeAbstention(message)
                 payload = merge_duplicate_operation_rows(payload)
                 payload = remove_redundant_noop_replaces(payload)
                 payload = qualify_inserted_private_helper_calls(
@@ -1503,6 +1556,8 @@ class AssistantEngine:
                     if not semantic.valid:
                         self.editor.reject()
                         raise WorkspaceError(semantic.report())
+            except _OwnCodeSafeAbstention as exc:
+                raise WorkspaceError(str(exc)) from None
             except WorkspaceError as exc:
                 previous_error = str(exc)
                 operation_detail = rejected_operation_detail(payload, exc)
