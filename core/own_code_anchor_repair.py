@@ -412,13 +412,42 @@ def normalize_structural_method_block_replacements(
                 continue
             class_name = str(operation.get("class_name", "")).strip()
             method_name = str(operation.get("method_name", "")).strip()
-            if requested and class_name == requested[0] and "." in method_name:
-                outer_method = method_name.split(".", 1)[0].strip()
-                if outer_method == requested[1]:
-                    method_name = outer_method
+            nested_runtime_target = False
+            if requested:
+                approved_class, approved_method = requested
+                approved_scope = f"{approved_class}.{approved_method}"
+
+                if class_name == approved_scope and method_name:
+                    # Runtime locations can name an inner callable as
+                    # ``TaskOrchestrator.wrap.execute``. Structural operations
+                    # cannot target nested functions through class_name/method_name.
+                    # Treat this malformed pair as an exact statement edit inside
+                    # the approved outer method; ambiguous-anchor repair will add
+                    # the required source context without guessing.
+                    class_name = approved_class
+                    method_name = approved_method
+                    nested_runtime_target = True
+                    operation["class_name"] = class_name
                     operation["method_name"] = method_name
+                elif class_name == approved_class and "." in method_name:
+                    outer_method = method_name.split(".", 1)[0].strip()
+                    if outer_method == approved_method:
+                        method_name = outer_method
+                        operation["method_name"] = method_name
+
             block_test = _normalize_if_test_selector(operation.get("block_test", ""))
             replacement = operation.get("replacement")
+
+            if nested_runtime_target and isinstance(replacement, str):
+                plain_statement = str(block_test or "").strip().rstrip(";")
+                if plain_statement:
+                    operation.clear()
+                    operation.update({
+                        "op": "replace",
+                        "old": plain_statement,
+                        "new": replacement.strip(),
+                    })
+                    continue
 
             # Small code models sometimes use replace_method_block for a plain
             # standalone call and also target a human-facing runtime label such
@@ -1310,17 +1339,17 @@ def build_ambiguous_anchor_guidance(
             rows.extend(
                 (
                     "",
-                    f"BELIRSIZ ANCHOR REHBERI: {raw_path} i?lem {operation_index}",
+                    f"AMBIGUOUS ANCHOR GUIDANCE: {raw_path} operation {operation_index}",
                     (
-                        f"Ayn? old metni {len(positions)} kez bulundu. "
-                        "A?a??daki adaylardan yaln?zca ama?lanan blo?u birebir "
-                        "old alan? olarak kullan."
+                        f"The same old text occurs {len(positions)} times "
+                        f"({len(positions)} kez bulundu). "
+                        "Use exactly one intended candidate block below as the old field."
                     ),
                 )
             )
 
             for number, expanded in enumerate(candidates, start=1):
-                rows.append(f"\nADAY {number}:\n{expanded}")
+                rows.append(f"\nCANDIDATE {number}:\nADAY {number}:\n{expanded}")
 
     if not rows:
         return ""

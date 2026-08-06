@@ -1395,3 +1395,75 @@ def test_insert_class_method_normalizes_approved_method_scope_as_class_name(tmp_
     assert operation["op"] in {"insert_before", "insert_after"}
     assert "class_name" not in operation
     assert "def _check_wrapper_overhead" in operation["content"]
+
+
+def test_nested_runtime_structural_target_becomes_scoped_exact_replace(tmp_path: Path) -> None:
+    source = (
+        "class TaskOrchestrator:\n"
+        "    def wrap(self, token, action):\n"
+        "        def execute():\n"
+        "            token.raise_if_cancelled()\n"
+        "            result = action()\n"
+        "            token.raise_if_cancelled()\n"
+        "            return result\n"
+        "        return execute\n"
+    )
+    (tmp_path / "core").mkdir()
+    (tmp_path / "core" / "task_orchestrator.py").write_text(source, encoding="utf-8")
+    payload = {
+        "files": [{
+            "path": "core/task_orchestrator.py",
+            "operations": [{
+                "op": "replace_method_block",
+                "class_name": "TaskOrchestrator.wrap",
+                "method_name": "execute",
+                "block_test": "token.raise_if_cancelled()",
+                "replacement": "token.checkpoint()",
+            }],
+        }],
+    }
+
+    normalized = normalize_structural_method_block_replacements(
+        payload,
+        project_root=tmp_path,
+        instruction="Konum TaskOrchestrator.wrap.execute",
+    )
+    operation = normalized["files"][0]["operations"][0]
+
+    assert operation == {
+        "op": "replace",
+        "old": "token.raise_if_cancelled()",
+        "new": "token.checkpoint()",
+    }
+
+
+def test_ambiguous_anchor_guidance_is_ascii_safe(tmp_path: Path) -> None:
+    source = (
+        "class TaskOrchestrator:\n"
+        "    def wrap(self, token):\n"
+        "        token.raise_if_cancelled()\n"
+        "        token.raise_if_cancelled()\n"
+    )
+    (tmp_path / "core").mkdir()
+    (tmp_path / "core" / "task_orchestrator.py").write_text(source, encoding="utf-8")
+    payload = {
+        "files": [{
+            "path": "core/task_orchestrator.py",
+            "operations": [{
+                "op": "replace",
+                "old": "token.raise_if_cancelled()",
+                "new": "token.checkpoint()",
+            }],
+        }],
+    }
+
+    guidance = build_ambiguous_anchor_guidance(
+        payload,
+        project_root=tmp_path,
+        instruction="Konum TaskOrchestrator.wrap.execute",
+    )
+
+    assert "AMBIGUOUS ANCHOR GUIDANCE" in guidance
+    assert "operation 1" in guidance
+    assert "CANDIDATE 1" in guidance
+    guidance.encode("ascii")
