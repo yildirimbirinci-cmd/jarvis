@@ -186,6 +186,16 @@ def score_evidence_source(
     total = min(100, authority + relevance + technical + quality)
     strict_relevance = _requires_strict_relevance(query)
 
+    parsed = urlparse(str(url or ""))
+    host = str(parsed.hostname or "").casefold()
+    path = parsed.path.rstrip("/") or "/"
+    if (
+        strict_relevance
+        and host in {"python.org", "www.python.org"}
+        and path in {"/", "/downloads"}
+    ):
+        total = max(0, total - 15)
+
     if strict_relevance:
         accepted = (
             total >= MIN_ACCEPTED_SCORE

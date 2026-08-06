@@ -2,6 +2,7 @@ from pathlib import Path
 
 from artmach_assistant.core.edit_manager import EditManager
 from artmach_assistant.core.own_code_anchor_repair import (
+    _normalize_if_test_selector,
     build_ambiguous_anchor_guidance,
     build_structural_method_block_guidance,
     merge_duplicate_operation_rows,
@@ -80,6 +81,25 @@ def test_structural_method_block_accepts_complete_if_header_selector(tmp_path: P
     operation = repaired["files"][0]["operations"][0]
     assert operation["op"] == "replace"
     assert operation["_structural_block"].endswith("self._next_mode != 'sleep'")
+
+
+
+
+
+def test_structural_selector_accepts_if_header_without_colon() -> None:
+    assert (
+        _normalize_if_test_selector("if token.is_cancelled()")
+        == "token.is_cancelled()"
+    )
+
+
+def test_structural_selector_accepts_multiline_if_header_without_colon() -> None:
+    assert (
+        _normalize_if_test_selector(
+            "if (\n    token.is_cancelled()\n)"
+        )
+        == "token.is_cancelled()"
+    )
 
 
 def test_structural_method_block_does_not_accept_other_statements(tmp_path: Path) -> None:
@@ -1043,3 +1063,46 @@ def test_helper_call_qualifier_ignores_unrelated_functions() -> None:
         repaired["files"][0]["operations"][1]["new"]
         == "parse(value)"
     )
+
+
+def test_requested_symbol_prefers_nested_runtime_location_outer_method() -> None:
+    from artmach_assistant.core.own_code_anchor_repair import _requested_symbol
+
+    instruction = (
+        "Bulgu TaskOrchestrator.execute_task. "
+        "Konum core/task_orchestrator.py - TaskOrchestrator.wrap.execute"
+    )
+
+    assert _requested_symbol(instruction) == ("TaskOrchestrator", "wrap")
+
+
+def test_structural_method_target_normalizes_nested_model_name(tmp_path: Path) -> None:
+    source = (
+        "class TaskOrchestrator:\n"
+        "    def wrap(self, token):\n"
+        "        if token.cancelled:\n"
+        "            return None\n"
+        "        return 1\n"
+    )
+    (tmp_path / "core").mkdir()
+    (tmp_path / "core" / "task_orchestrator.py").write_text(source, encoding="utf-8")
+    payload = {"files": [{"path": "core/task_orchestrator.py", "operations": [{
+        "op": "replace_method_block",
+        "class_name": "TaskOrchestrator",
+        "method_name": "wrap.execute_task",
+        "block_test": "token.cancelled",
+        "replacement": "self._handle_cancelled()",
+    }]}]}
+
+    repaired = normalize_structural_method_block_replacements(
+        payload,
+        project_root=tmp_path,
+        instruction=(
+            "TaskOrchestrator.execute_task bulgusu. "
+            "Konum TaskOrchestrator.wrap.execute"
+        ),
+    )
+
+    operation = repaired["files"][0]["operations"][0]
+    assert operation["op"] == "replace"
+    assert operation["_structural_block"].startswith("TaskOrchestrator.wrap:")

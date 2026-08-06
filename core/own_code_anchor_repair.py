@@ -10,38 +10,48 @@ from artmach_assistant.core.workspace import WorkspaceError
 
 
 _SYMBOL_PATTERN = re.compile(
-    r"\b([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)\b"
+    r"\b([A-Za-z_][A-Za-z0-9_]*)(?:\.([A-Za-z_][A-Za-z0-9_]*)){1,2}\b"
+)
+_DOTTED_SYMBOL_PATTERN = re.compile(
+    r"\b[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*){1,2}\b"
 )
 
 
 def _requested_symbol(instruction: str) -> tuple[str, str] | None:
-    """Return an explicit Class.method reference, ignoring file names."""
+    """Return the approved direct Class.method target from an instruction.
+
+    Runtime locations may include a nested callable suffix such as
+    ``TaskOrchestrator.wrap.execute``. Structural edit operations can only
+    target direct class methods, so the approved target is the outer
+    ``TaskOrchestrator.wrap`` method. Prefer that explicit three-part source
+    location over earlier human-facing labels such as
+    ``TaskOrchestrator.execute_task``.
+    """
     text = str(instruction or "")
     ignored_suffixes = {
         "py", "pyw", "json", "toml", "yaml", "yml", "md", "txt",
         "ini", "cfg", "bat", "cmd", "ps1", "sh", "html", "css",
     }
+    symbols = [match.group(0) for match in _DOTTED_SYMBOL_PATTERN.finditer(text)]
 
-    matches = list(_SYMBOL_PATTERN.finditer(text))
-
-    # Prefer the conventional Class.method form.
-    for match in matches:
-        owner = match.group(1)
-        member = match.group(2)
-
-        if member.casefold() in ignored_suffixes:
+    for symbol in reversed(symbols):
+        parts = symbol.split(".")
+        if parts[-1].casefold() in ignored_suffixes:
             continue
-        if owner[:1].isupper():
-            return owner, member
+        if len(parts) == 3 and parts[0][:1].isupper():
+            return parts[0], parts[1]
 
-    # Fall back to any non-file dotted symbol.
-    for match in matches:
-        owner = match.group(1)
-        member = match.group(2)
+    for symbol in symbols:
+        parts = symbol.split(".")
+        if parts[-1].casefold() in ignored_suffixes:
+            continue
+        if len(parts) >= 2 and parts[0][:1].isupper():
+            return parts[0], parts[1]
 
-        if member.casefold() not in ignored_suffixes:
-            return owner, member
-
+    for symbol in symbols:
+        parts = symbol.split(".")
+        if len(parts) >= 2 and parts[-1].casefold() not in ignored_suffixes:
+            return parts[0], parts[1]
     return None
 
 
@@ -268,8 +278,11 @@ def _normalize_if_test_selector(value: str) -> str:
     selector = str(value or "").strip()
     if _expression_fingerprint(selector):
         return selector
+    statement_header = selector
+    if selector.casefold().startswith("if ") and not selector.rstrip().endswith(":"):
+        statement_header = selector.rstrip() + ":"
     try:
-        parsed = ast.parse(selector + "\n    pass\n")
+        parsed = ast.parse(statement_header + "\n    pass\n")
     except SyntaxError:
         return selector
     if len(parsed.body) != 1 or not isinstance(parsed.body[0], ast.If):
@@ -330,6 +343,11 @@ def normalize_structural_method_block_replacements(
                 continue
             class_name = str(operation.get("class_name", "")).strip()
             method_name = str(operation.get("method_name", "")).strip()
+            if requested and class_name == requested[0] and "." in method_name:
+                outer_method = method_name.split(".", 1)[0].strip()
+                if outer_method == requested[1]:
+                    method_name = outer_method
+                    operation["method_name"] = method_name
             block_test = _normalize_if_test_selector(operation.get("block_test", ""))
             replacement = operation.get("replacement")
             if requested and (class_name, method_name) != requested:

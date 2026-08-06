@@ -133,3 +133,17 @@ def test_maintenance_route_supports_run_research() -> None:
     assert rendered is not None
     assert "KANITA DAYALI ARASTIRMA PLANI" in rendered
     assert "Durum: LOCAL_REVIEW" in rendered
+
+
+def test_explicit_runtime_patch_draft_request_uses_implementation_route() -> None:
+    engine = _engine()
+    engine.prepare_runtime_improvement_implementation = (
+        lambda finding_id: f"PROPOSAL:{finding_id}"
+    )
+
+    rendered = engine._reserved_self_repair_request(
+        "RUN-06578E9EDE icin davranis-koruyan kod "
+        "degisikligi taslagini yeniden hazirla. Henuz uygulama."
+    )
+
+    assert rendered == "PROPOSAL:RUN-06578E9EDE"

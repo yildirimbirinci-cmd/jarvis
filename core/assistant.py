@@ -3964,12 +3964,34 @@ class AssistantEngine:
             base + min(10, occurrences // 5),
         )
 
+    @staticmethod
+    def _runtime_research_target_fallback(
+        finding: RuntimeFinding,
+    ) -> tuple[str, str]:
+        """Resolve legacy runtime labels that predate source metadata.
+
+        New runtime events should provide affected_paths/affected_symbols or
+        evidence-level source_path/symbol values. This narrow compatibility
+        mapping keeps existing persisted findings useful without guessing a
+        target for unrelated events.
+        """
+        title = str(getattr(finding, "title", "") or "").casefold()
+        if "taskorchestrator.execute_task" in title:
+            return (
+                "core/task_orchestrator.py",
+                "TaskOrchestrator.wrap.execute",
+            )
+        return "", ""
+
     def _runtime_finding_research_plan(
         self,
         finding: RuntimeFinding,
         *,
         promote_external: bool = False,
     ) -> str:
+        fallback_path, fallback_symbol = (
+            self._runtime_research_target_fallback(finding)
+        )
         evidence = EvidenceMaintenanceFinding(
             classification=(
                 self._runtime_research_classification(
@@ -4014,7 +4036,7 @@ class AssistantEngine:
                     )
                     if str(value or "").strip()
                 ),
-                "",
+                fallback_path,
             ),
             symbol=next(
                 (
@@ -4046,7 +4068,7 @@ class AssistantEngine:
                     )
                     if str(value or "").strip()
                 ),
-                "",
+                fallback_symbol,
             ),
             evidence=str(
                 getattr(finding, "explanation", "")
@@ -4536,6 +4558,19 @@ class AssistantEngine:
                 "kanita dayali cozum plani",
             )
         )
+        proposal_intent = any(
+            marker in normalized
+            for marker in (
+                "kod degisikligi taslagi",
+                "davranis koruyan kod degisikligi taslagi",
+                "davranis koruyan taslak",
+                "patch taslagi",
+                "edit proposal",
+                "editproposal",
+                "taslagi yeniden hazirla",
+                "taslak yeniden hazirla",
+            )
+        )
         own_code_subject = any(
             marker in normalized
             for marker in (
@@ -4574,7 +4609,13 @@ class AssistantEngine:
                     "calisma zamani bulgusu degil."
                 )
 
+            if proposal_intent:
+                return self.prepare_runtime_improvement_implementation(run_id)
+
             if fix_intent:
+                severity = str(getattr(finding, "severity", "") or "").casefold()
+                if research_intent or severity in {"high", "critical"}:
+                    return self.prepare_runtime_improvement_implementation(run_id)
                 return self.run_autonomous_runtime_repair(run_id)
 
             if research_intent:
@@ -6821,14 +6862,26 @@ class AssistantEngine:
         )
 
         if coordinator is None:
-            coordinator = EvidenceResearchCommandCoordinator(
-                store=EvidenceResearchApprovalStore(
-                    DATA_DIR
-                    / "diagnostics"
-                    / "pending_evidence_research.json"
-                ),
-                result_handler=self._handle_evidence_research_result,
+            store = EvidenceResearchApprovalStore(
+                DATA_DIR
+                / "diagnostics"
+                / "pending_evidence_research.json"
             )
+            try:
+                coordinator = EvidenceResearchCommandCoordinator(
+                    store=store,
+                    result_handler=self._handle_evidence_research_result,
+                )
+            except TypeError as exc:
+                message = str(exc)
+                if (
+                    "unexpected keyword argument" not in message
+                    or "result_handler" not in message
+                ):
+                    raise
+                coordinator = EvidenceResearchCommandCoordinator(
+                    store=store
+                )
             self.evidence_research_command_coordinator = (
                 coordinator
             )

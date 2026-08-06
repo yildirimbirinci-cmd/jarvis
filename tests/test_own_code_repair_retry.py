@@ -502,3 +502,29 @@ def test_symbol_scope_retry_targets_only_approved_symbols() -> None:
     ]
     assert "VoiceService._check_repeated_run" in prompt
     assert "yardimciyi tamamen kaldir" in prompt
+
+
+def test_structural_target_retry_explains_direct_method_and_exact_replace() -> None:
+    proposal = {
+        "summary": "bad structural target",
+        "files": [{
+            "path": "core/task_orchestrator.py",
+            "reason": "repair",
+            "content": "",
+        }],
+    }
+    prompt = build_validation_repair_prompt(
+        "TaskOrchestrator.wrap.execute icin taslak hazirla",
+        (
+            "Yapısal blok hedefi onaylı sembolle eşleşmiyor: "
+            "core/task_orchestrator.py işlem 2"
+        ),
+        proposal,
+        stage="yapısal blok",
+        targets=RepairTargets(paths=("core/task_orchestrator.py",)),
+    )
+
+    assert "YAPISAL HEDEF ONARIM KURALI" in prompt
+    assert "`wrap.execute_task` gibi noktalı" in prompt
+    assert "küçük ve tam eşleşen `replace`" in prompt
+    assert "`_execute_task` gibi yeni çağrılar icat etme" in prompt

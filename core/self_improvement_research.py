@@ -496,6 +496,7 @@ class SelfImprovementResearchTask:
             f"Olası fayda: {self.benefit}\n"
             f"Belirsizlik veya risk: {self.risk}"
             + continuation
+            + "\n\nBu aşamada çözüm seçmedim, plan veya patch üretmedim ve henüz hiçbir dosyayı değiştirmedim."
             + "\n\nTeknik kayıtları görmek için 'teknik ayrıntıları göster' de."
         )
 

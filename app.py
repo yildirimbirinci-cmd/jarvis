@@ -2995,7 +2995,7 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(0, self._poll_shutdown_workers)
 
     def closeEvent(self, event) -> None:
-        """Close safely even when startup stopped before all GUI workers existed."""
+        """Close safely with a bounded wait for every GUI-owned thread."""
         if not hasattr(self, "tts_worker"):
             self.tts_worker = None
         if not hasattr(self, "worker"):
@@ -3026,11 +3026,11 @@ class MainWindow(QMainWindow):
                     logger(f"Pencere durumu kaydedilemedi: {exc}")
 
         try:
-            self.cancel_active_task("uygulama kapatılıyor")
+            self.cancel_active_task("uygulama kapatiliyor")
         except Exception as exc:
             logger = getattr(self, "voice_log", None)
             if callable(logger):
-                logger(f"Aktif görev kapatılırken hata oluştu: {exc}")
+                logger(f"Aktif gorev kapatilirken hata olustu: {exc}")
 
         engine = getattr(self, "engine", None)
         voice = getattr(engine, "voice", None)
@@ -3040,18 +3040,20 @@ class MainWindow(QMainWindow):
             except Exception as exc:
                 logger = getattr(self, "voice_log", None)
                 if callable(logger):
-                    logger(f"Seslendirme durdurulamadı: {exc}")
+                    logger(f"Seslendirme durdurulamadi: {exc}")
 
         try:
             self._stop_barge_in()
         except Exception as exc:
             logger = getattr(self, "voice_log", None)
             if callable(logger):
-                logger(f"Araya girme dinleyicisi durdurulamadı: {exc}")
+                logger(f"Araya girme dinleyicisi durdurulamadi: {exc}")
 
         trace_event("SHUTDOWN_REQUESTED")
         self._start_async_shutdown()
         event.ignore()
+
+
 # Jarvis turn-aware voice integration; keeps the current app.py intact.
 install_main_window_voice_integration(MainWindow)
 

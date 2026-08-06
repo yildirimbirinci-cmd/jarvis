@@ -28,3 +28,7 @@ def test_plain_research_request_stays_local() -> None:
     assert rendered is not None
     assert "KANITA DAYALI ARASTIRMA PLANI" in rendered
     assert "Durum: LOCAL_REVIEW" in rendered
+    assert (
+        "Konum: core/task_orchestrator.py - "
+        "TaskOrchestrator.wrap.execute"
+    ) in rendered

@@ -256,6 +256,25 @@ def build_validation_repair_prompt(
             "metot yeniden reddedilir.\n"
         )
 
+    structural_guidance = ""
+    report_folded = str(report or "").casefold()
+    if (
+        "yapısal blok hedef" in report_folded
+        or "yapisal blok hedef" in report_folded
+        or "replace_method_block" in report_folded
+    ):
+        structural_guidance = (
+            "\nYAPISAL HEDEF ONARIM KURALI:\n"
+            "method_name yalnız doğrudan sınıf metodunun adı olmalıdır; "
+            "`wrap.execute_task` gibi noktalı veya iç içe ad kullanma. "
+            "Runtime konumu `Class.wrap.execute` ise doğrudan sınıf metodu `wrap`tır. "
+            "replace_method_block yalnız hedef metodun içinde gerçekten bulunan bir `if` "
+            "koşulunu hedefleyebilir; block_test alanına çağrı ifadesi, return veya uydurma "
+            "yardımcı metot yazma. Hedef satır bir `if` bloğu değilse çalışan kaynaktan "
+            "küçük ve tam eşleşen `replace` old/new operasyonu üret. Kaynakta bulunmayan "
+            "`_execute_task` gibi yeni çağrılar icat etme.\n"
+        )
+
     semantic_guidance = ""
     if "semantik" in str(stage or "").casefold():
         semantic_guidance = (
@@ -288,6 +307,7 @@ def build_validation_repair_prompt(
         + f"\nHEDEF SEMBOLLER:\n{target_symbols}\n"
         + f"\nDOĞRULAYICI RAPORU:\n{str(report or '').strip()}\n"
         + symbol_scope_guidance
+        + structural_guidance
         + semantic_guidance
         + "\nYALNIZCA HEDEF DOSYALARIN REDDEDİLEN TASLAĞI:\n"
         + json.dumps(_target_payload(proposal, selected), ensure_ascii=False, sort_keys=True)
