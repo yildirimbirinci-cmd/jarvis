@@ -763,6 +763,101 @@ def _expand_unique_insert_anchor(
     return ""
 
 
+
+def _direct_self_helper_name(value: str) -> str:
+    """Return helper name for one direct ``self.helper(...)`` expression."""
+    try:
+        tree = ast.parse(textwrap.dedent(str(value or "")).strip())
+    except SyntaxError:
+        return ""
+    if len(tree.body) != 1 or not isinstance(tree.body[0], ast.Expr):
+        return ""
+    call = tree.body[0].value
+    if (
+        not isinstance(call, ast.Call)
+        or not isinstance(call.func, ast.Attribute)
+        or not isinstance(call.func.value, ast.Name)
+        or call.func.value.id != "self"
+    ):
+        return ""
+    return call.func.attr
+
+
+def _inserted_helper_single_statement(
+    operations: list[dict[str, Any]],
+    helper_name: str,
+) -> str:
+    """Return the sole helper-body statement inserted by this proposal."""
+    for operation in operations:
+        if str(operation.get("_structural_method", "")).strip() != helper_name:
+            continue
+        content = operation.get("content")
+        if not isinstance(content, str):
+            continue
+        try:
+            tree = ast.parse(textwrap.dedent(content))
+        except SyntaxError:
+            continue
+        methods = [
+            row for row in ast.walk(tree)
+            if isinstance(row, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and row.name == helper_name
+        ]
+        if len(methods) != 1 or len(methods[0].body) != 1:
+            continue
+        statement = methods[0].body[0]
+        if not isinstance(statement, ast.Expr):
+            continue
+        return ast.unparse(statement.value)
+    return ""
+
+
+def _expand_equivalent_helper_replacements(
+    source: str,
+    scoped_source: str,
+    *,
+    old: str,
+    new: str,
+    operations: list[dict[str, Any]],
+) -> list[dict[str, str]]:
+    """Expand repeated standalone calls only for a proven helper extraction.
+
+    This repair is intentionally narrow. The replacement must be one direct
+    ``self.<helper>(...)`` call, that helper must be inserted by the same
+    proposal, and its body must consist of exactly the original call. Only
+    line-aligned occurrences inside the approved method are expanded.
+    """
+    helper_name = _direct_self_helper_name(new)
+    if not helper_name:
+        return []
+    helper_statement = _inserted_helper_single_statement(operations, helper_name)
+    old_statement = textwrap.dedent(old).strip()
+    if not helper_statement or helper_statement != old_statement:
+        return []
+
+    positions = [
+        position for position in _occurrence_positions(scoped_source, old)
+        if position == 0 or scoped_source[position - 1] in "\r\n"
+    ]
+    if len(positions) < 2:
+        return []
+
+    expanded_rows: list[dict[str, str]] = []
+    for position in positions:
+        expanded_old = _unique_context_for_occurrence(
+            source, scoped_source, old, position
+        )
+        if not expanded_old:
+            return []
+        relative = expanded_old.find(old)
+        if relative < 0:
+            return []
+        expanded_new = (
+            expanded_old[:relative] + new + expanded_old[relative + len(old):]
+        )
+        expanded_rows.append({"op": "replace", "old": expanded_old, "new": expanded_new})
+    return expanded_rows
+
 def repair_ambiguous_replace_anchors(
     payload: dict[str, Any],
     *,
@@ -822,8 +917,11 @@ def repair_ambiguous_replace_anchors(
         if not isinstance(operations, list):
             continue
 
-        for operation in operations:
+        operation_index = 0
+        while operation_index < len(operations):
+            operation = operations[operation_index]
             if not isinstance(operation, dict):
+                operation_index += 1
                 continue
             operation_name = str(operation.get("op", "")).strip().casefold()
 
@@ -832,6 +930,7 @@ def repair_ambiguous_replace_anchors(
                 new = operation.get("new")
 
                 if not isinstance(old, str) or not isinstance(new, str):
+                    operation_index += 1
                     continue
 
                 operation_scope = scoped_source
@@ -843,6 +942,7 @@ def repair_ambiguous_replace_anchors(
                         replacement=new,
                     )
                 if not operation_scope:
+                    operation_index += 1
                     continue
 
                 expanded = _expand_unique_replace(
@@ -853,11 +953,26 @@ def repair_ambiguous_replace_anchors(
                 )
                 if expanded is not None:
                     operation["old"], operation["new"] = expanded
+                    operation_index += 1
+                    continue
+                equivalent_rows = _expand_equivalent_helper_replacements(
+                    source,
+                    operation_scope,
+                    old=old,
+                    new=new,
+                    operations=[row for row in operations if isinstance(row, dict)],
+                )
+                if equivalent_rows:
+                    operations[operation_index:operation_index + 1] = equivalent_rows
+                    operation_index += len(equivalent_rows)
+                    continue
+                operation_index += 1
                 continue
 
             if operation_name == "delete":
                 old = operation.get("old")
                 if not isinstance(old, str):
+                    operation_index += 1
                     continue
 
                 # A delete anchor cannot simply be expanded: EditManager would
@@ -890,13 +1005,16 @@ def repair_ambiguous_replace_anchors(
                             "new": expanded[1],
                         }
                     )
+                operation_index += 1
                 continue
 
             if operation_name not in {"insert_before", "insert_after"}:
+                operation_index += 1
                 continue
 
             anchor = operation.get("anchor")
             if not isinstance(anchor, str):
+                operation_index += 1
                 continue
 
             expanded_anchor = _expand_unique_insert_anchor(
@@ -907,6 +1025,7 @@ def repair_ambiguous_replace_anchors(
             )
             if expanded_anchor:
                 operation["anchor"] = expanded_anchor
+            operation_index += 1
 
     return repaired
 

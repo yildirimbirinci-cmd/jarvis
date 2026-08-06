@@ -1108,15 +1108,11 @@ def test_structural_method_target_normalizes_nested_model_name(tmp_path: Path) -
     assert operation["_structural_block"].startswith("TaskOrchestrator.wrap:")
 
 
-def test_ambiguous_anchor_falls_back_to_unique_method_inside_approved_class(
+def test_equivalent_helper_extraction_expands_all_ambiguous_calls(
     tmp_path: Path,
 ) -> None:
     source = (
         "class TaskOrchestrator:\n"
-        "    def other(self, action):\n"
-        "        result = action()\n"
-        "        return result\n"
-        "\n"
         "    def wrap(self, task_id, token, action):\n"
         "        def execute():\n"
         "            token.raise_if_cancelled()\n"
@@ -1125,17 +1121,28 @@ def test_ambiguous_anchor_falls_back_to_unique_method_inside_approved_class(
         "            return result\n"
         "        return execute\n"
     )
+    (tmp_path / "core").mkdir()
     target = tmp_path / "core" / "task_orchestrator.py"
-    target.parent.mkdir(parents=True)
     target.write_text(source, encoding="utf-8")
     payload = {
         "files": [{
             "path": "core/task_orchestrator.py",
-            "operations": [{
-                "op": "replace",
-                "old": "result = action()",
-                "new": "return self._execute_task(task_id, token, action)",
-            }],
+            "operations": [
+                {
+                    "op": "insert_after",
+                    "anchor": "        return execute\n",
+                    "content": (
+                        "\n    def _check_cancel(self, token):\n"
+                        "        token.raise_if_cancelled()\n"
+                    ),
+                    "_structural_method": "_check_cancel",
+                },
+                {
+                    "op": "replace",
+                    "old": "            token.raise_if_cancelled()\n",
+                    "new": "            self._check_cancel(token)\n",
+                },
+            ],
         }],
     }
 
@@ -1143,12 +1150,13 @@ def test_ambiguous_anchor_falls_back_to_unique_method_inside_approved_class(
         payload,
         project_root=tmp_path,
         instruction=(
-            "RUN bulgusu icin onayli sembol "
-            "TaskOrchestrator.execute_task"
+            "TaskOrchestrator.execute_task bulgusu. "
+            "Konum TaskOrchestrator.wrap.execute"
         ),
     )
 
-    operation = repaired["files"][0]["operations"][0]
-    assert operation["old"] != "result = action()"
-    assert source.count(operation["old"]) == 1
-    assert "self._execute_task(task_id, token, action)" in operation["new"]
+    operations = repaired["files"][0]["operations"]
+    replace_operations = [row for row in operations if row["op"] == "replace"]
+    assert len(replace_operations) == 2
+    assert all(source.count(row["old"]) == 1 for row in replace_operations)
+    assert all("self._check_cancel(token)" in row["new"] for row in replace_operations)
