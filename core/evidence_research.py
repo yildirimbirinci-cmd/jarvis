@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Iterable
 
 from artmach_assistant.core.evidence_maintenance import (
@@ -45,15 +45,10 @@ class EvidenceResearchPlan:
             f"Bulgu: {self.title}",
             (
                 f"Konum: {self.path}"
-                + (
-                    f" - {self.symbol}"
-                    if self.symbol
-                    else ""
-                )
+                + (f" - {self.symbol}" if self.symbol else "")
             ),
             f"Neden: {self.reason}",
         ]
-
         if self.local_questions:
             rows.append(
                 "Yerel inceleme:\n- "
@@ -65,7 +60,6 @@ class EvidenceResearchPlan:
                 "Dis arastirma sorgulari:\n- "
                 + "\n- ".join(self.external_queries)
             )
-
         if self.preferred_sources:
             rows.append(
                 "Tercih edilen kaynaklar:\n- "
@@ -77,7 +71,6 @@ class EvidenceResearchPlan:
                 "Guvenlik sinirlari:\n- "
                 + "\n- ".join(self.safety_constraints)
             )
-
         if self.requires_external_approval:
             rows.append(
                 "Internet arastirmasi henuz baslatilmadi. "
@@ -88,17 +81,12 @@ class EvidenceResearchPlan:
 
 
 def _symbol_tail(symbol: str) -> str:
-    return (
-        str(symbol or "")
-        .rsplit(".", 1)[-1]
-        .strip()
-    )
+    return str(symbol or "").rsplit(".", 1)[-1].strip()
 
 
 def _unique(values: Iterable[str]) -> tuple[str, ...]:
     rows: list[str] = []
     seen: set[str] = set()
-
     for value in values:
         cleaned = " ".join(str(value or "").split())
         key = cleaned.casefold()
@@ -115,13 +103,33 @@ def _unique(values: Iterable[str]) -> tuple[str, ...]:
     return tuple(rows)
 
 
+def _resolved_finding_location(
+    finding: EvidenceMaintenanceFinding,
+) -> EvidenceMaintenanceFinding:
+    path = str(finding.path or "").strip()
+    symbol = str(finding.symbol or "").strip()
+    title = str(finding.title or "").casefold()
+    source = str(finding.source or "").casefold()
+
+    if (
+        source == "runtime"
+        and "taskorchestrator.execute_task" in title
+    ):
+        path = path or "core/task_orchestrator.py"
+        symbol = symbol or "TaskOrchestrator.wrap.execute"
+
+    if path == finding.path and symbol == finding.symbol:
+        return finding
+
+    return replace(finding, path=path, symbol=symbol)
+
+
 def _external_queries(
     finding: EvidenceMaintenanceFinding,
 ) -> tuple[str, ...]:
     symbol = finding.symbol or _symbol_tail(finding.title)
     symbol_tail = _symbol_tail(symbol)
     path = finding.path or "unknown source"
-
     return _unique(
         (
             (
@@ -163,6 +171,7 @@ def build_evidence_research_plan(
     *,
     retest_result: RetestExecutionResult | None = None,
 ) -> EvidenceResearchPlan:
+    finding = _resolved_finding_location(finding)
     common = {
         "title": finding.title,
         "path": finding.path,
@@ -175,7 +184,6 @@ def build_evidence_research_plan(
             "Arastirma sonucu mevcut validator ve worktree zincirini atlayamaz.",
         ),
     }
-
     if retest_result is not None:
         if retest_result.status == RETEST_PASSED:
             return EvidenceResearchPlan(
@@ -186,7 +194,6 @@ def build_evidence_research_plan(
                 ),
                 **common,
             )
-
         if retest_result.status == RETEST_BLOCKED:
             return EvidenceResearchPlan(
                 status=BLOCKED,
@@ -196,7 +203,6 @@ def build_evidence_research_plan(
                 ),
                 **common,
             )
-
         if retest_result.status == RETEST_FAILED:
             return EvidenceResearchPlan(
                 status=EXTERNAL_APPROVAL_REQUIRED,
@@ -213,7 +219,6 @@ def build_evidence_research_plan(
                 ),
                 **common,
             )
-
     if (
         finding.lifecycle == "ACTIVE"
         and finding.classification in {"A", "B"}
@@ -227,7 +232,6 @@ def build_evidence_research_plan(
             ),
             **common,
         )
-
     return EvidenceResearchPlan(
         status=NOT_NEEDED,
         reason=(

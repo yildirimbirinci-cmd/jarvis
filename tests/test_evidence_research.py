@@ -52,7 +52,6 @@ def test_passed_retest_does_not_require_research() -> None:
         _finding(lifecycle="NEEDS_RETEST"),
         retest_result=_result(RETEST_PASSED),
     )
-
     assert plan.status == NOT_NEEDED
     assert plan.external_queries == ()
     assert plan.requires_external_approval is False
@@ -63,7 +62,6 @@ def test_failed_retest_requires_external_approval() -> None:
         _finding(lifecycle="NEEDS_RETEST"),
         retest_result=_result(RETEST_FAILED),
     )
-
     assert plan.status == EXTERNAL_APPROVAL_REQUIRED
     assert plan.requires_external_approval is True
     assert 1 <= len(plan.external_queries) <= 4
@@ -91,6 +89,40 @@ def test_active_high_risk_finding_starts_local_review() -> None:
     assert plan.status == LOCAL_REVIEW
     assert plan.local_questions
     assert plan.external_queries == ()
+
+
+def test_runtime_task_orchestrator_location_is_recovered() -> None:
+    finding = EvidenceMaintenanceFinding(
+        classification="A",
+        score=90,
+        source="runtime",
+        title=(
+            "Tekrarlanan yavas islem: "
+            "TaskOrchestrator.execute_task"
+        ),
+        path="",
+        symbol="",
+        evidence="Repeated runtime latency.",
+        repair_candidate=False,
+        lifecycle="ACTIVE",
+    )
+
+    plan = build_evidence_research_plan(finding)
+
+    assert plan.path == "core/task_orchestrator.py"
+    assert plan.symbol == "TaskOrchestrator.wrap.execute"
+    assert (
+        "Konum: core/task_orchestrator.py - "
+        "TaskOrchestrator.wrap.execute"
+    ) in plan.report()
+    assert "core/task_orchestrator.py icindeki" in plan.local_questions[0]
+
+
+def test_existing_location_is_preserved() -> None:
+    plan = build_evidence_research_plan(_finding())
+
+    assert plan.path == "core/example.py"
+    assert plan.symbol == "Example.run"
 
 
 def test_low_risk_static_hint_needs_no_research() -> None:
