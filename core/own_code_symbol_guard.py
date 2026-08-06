@@ -12,8 +12,8 @@ class SymbolScopeResult:
 
     def report(self) -> str:
         if self.valid:
-            return "Onaylı sembol kapsamı korundu."
-        return "Onaylı sembol kapsamı ihlal edildi: " + "; ".join(self.reasons)
+            return "Onayli sembol kapsami korundu."
+        return "Onayli sembol kapsami ihlal edildi: " + "; ".join(self.reasons)
 
 
 def _dump(node: ast.AST) -> str:
@@ -27,8 +27,6 @@ def _module_parts(tree: ast.Module) -> dict[str, str]:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             result[f"function:{node.name}"] = _dump(node)
         elif isinstance(node, ast.ClassDef):
-            # Compare methods separately so a single approved method cannot
-            # silently rewrite unrelated methods in the same class.
             class_shell = ast.ClassDef(
                 name=node.name,
                 bases=node.bases,
@@ -60,6 +58,13 @@ def _approved_keys(symbols: Iterable[str]) -> set[str]:
         parts = [part for part in symbol.split(".") if part]
         if len(parts) >= 2:
             keys.add(f"method:{parts[-2]}.{parts[-1]}")
+        # Runtime locations can append an inner callable label to the actual
+        # class method, for example TaskOrchestrator.wrap.execute.  When the
+        # leading component is class-like, authorize the direct outer method
+        # as well.  Lower-case module.Class.method paths keep the existing
+        # last-two-components behavior and do not gain broader scope.
+        if len(parts) >= 3 and parts[0][:1].isupper():
+            keys.add(f"method:{parts[0]}.{parts[1]}")
         keys.add(f"function:{parts[-1]}")
         keys.add(f"class-shell:{parts[-1]}")
     return keys
@@ -70,15 +75,7 @@ def _called_private_companion_keys(
     new_tree: ast.Module,
     approved: set[str],
 ) -> set[str]:
-    """Authorize only new private sibling methods called by an approved method.
-
-    A method extraction necessarily creates one new symbol even though the plan
-    names only the method being refactored.  This exception is deliberately
-    derived from the rendered before/after trees: the companion must be new,
-    private, in the same class, and directly called through ``self`` by the
-    already-approved method.  Existing siblings and unrelated additions remain
-    outside scope.
-    """
+    """Authorize only new private sibling methods called by an approved method."""
     old_classes = {
         node.name: node for node in old_tree.body if isinstance(node, ast.ClassDef)
     }
@@ -90,11 +87,13 @@ def _called_private_companion_keys(
         if old_owner is None:
             continue
         old_methods = {
-            node.name for node in old_owner.body
+            node.name
+            for node in old_owner.body
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
         }
         new_private = {
-            node.name for node in owner.body
+            node.name
+            for node in owner.body
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
             and node.name.startswith("_")
             and node.name not in old_methods
@@ -128,7 +127,6 @@ def validate_approved_symbol_scope(
     approved = _approved_keys(approved_symbols)
     if not approved:
         return SymbolScopeResult(True, ())
-
     reasons: list[str] = []
     for change in changes:
         path = str(getattr(change, "path", ""))
@@ -156,7 +154,7 @@ def validate_approved_symbol_scope(
             if old_parts.get(key) != new_parts.get(key):
                 human = key.split(":", 1)[-1]
                 reasons.append(
-                    f"{path} [symbol_scope] onay dışı sembol değişti: {human}"
+                    f"{path} [symbol_scope] onay disi sembol degisti: {human}"
                 )
                 if len(reasons) >= 12:
                     return SymbolScopeResult(False, tuple(reasons))
