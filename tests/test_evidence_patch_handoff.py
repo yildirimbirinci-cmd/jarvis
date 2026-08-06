@@ -82,3 +82,26 @@ def test_apply_permission_is_rejected(tmp_path: Path) -> None:
 
     assert handoff.status == HANDOFF_BLOCKED
     assert "uygulama izni" in handoff.reason
+
+
+def test_nested_runtime_symbol_resolves_to_owning_method(tmp_path: Path) -> None:
+    target = tmp_path / "core" / "task_orchestrator.py"
+    target.parent.mkdir(parents=True)
+    target.write_text(
+        "class TaskOrchestrator:\n"
+        "    def wrap(self):\n"
+        "        def execute():\n"
+        "            return None\n"
+        "        return execute\n",
+        encoding="utf-8",
+    )
+
+    handoff = build_evidence_patch_handoff(
+        _proposal(target_symbol="TaskOrchestrator.wrap.execute"),
+        project_root=tmp_path,
+    )
+
+    assert handoff.status == HANDOFF_READY
+    assert handoff.approved_symbols == ("TaskOrchestrator.wrap",)
+    assert "Runtime hedef sembol: TaskOrchestrator.wrap.execute" in handoff.instruction
+    assert "Duzenlenebilir kapsam sembolu: TaskOrchestrator.wrap" in handoff.instruction

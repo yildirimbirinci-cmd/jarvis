@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -44,6 +45,48 @@ class EvidencePatchHandoff:
         )
 
 
+def _resolve_edit_scope_symbol(candidate: Path, target_symbol: str) -> str:
+    """Resolve runtime nested symbols to the owning editable method."""
+    parts = tuple(part for part in str(target_symbol or "").split(".") if part)
+    if len(parts) < 3:
+        return str(target_symbol or "").strip()
+    try:
+        tree = ast.parse(candidate.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, SyntaxError):
+        return str(target_symbol or "").strip()
+
+    class_name, method_name, *nested = parts
+    for node in tree.body:
+        if not isinstance(node, ast.ClassDef) or node.name != class_name:
+            continue
+        method = next(
+            (
+                item
+                for item in node.body
+                if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and item.name == method_name
+            ),
+            None,
+        )
+        if method is None:
+            break
+        current = method
+        for nested_name in nested:
+            current = next(
+                (
+                    item
+                    for item in current.body
+                    if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
+                    and item.name == nested_name
+                ),
+                None,
+            )
+            if current is None:
+                return str(target_symbol or "").strip()
+        return f"{class_name}.{method_name}"
+    return str(target_symbol or "").strip()
+
+
 def build_evidence_patch_handoff(
     proposal: EvidencePatchProposal,
     *,
@@ -83,6 +126,7 @@ def build_evidence_patch_handoff(
     if not candidate.is_file():
         return blocked("Hedef dosya mevcut degil.")
 
+    edit_scope_symbol = _resolve_edit_scope_symbol(candidate, target_symbol)
     scope = "\n".join(f"- {item}" for item in proposal.change_scope)
     validation = "\n".join(f"- {item}" for item in proposal.validation_steps)
     constraints = "\n".join(f"- {item}" for item in proposal.safety_constraints)
@@ -90,7 +134,8 @@ def build_evidence_patch_handoff(
         "KANITA DAYALI YAPILANDIRILMIS PATCH TASLAGINDAN GUVENLI EDIT ONERISI HAZIRLA.\n"
         f"Taslak kimligi: {proposal.proposal_id}\n"
         f"Hedef dosya: {target_path}\n"
-        f"Hedef sembol: {target_symbol or '(belirtilmedi)'}\n"
+        f"Runtime hedef sembol: {target_symbol or '(belirtilmedi)'}\n"
+        f"Duzenlenebilir kapsam sembolu: {edit_scope_symbol or '(belirtilmedi)'}\n"
         f"Amac: {proposal.objective}\n"
         f"Gerekce: {proposal.rationale}\n\n"
         "Degisiklik kapsami:\n"
@@ -109,7 +154,7 @@ def build_evidence_patch_handoff(
         target_symbol=target_symbol,
         instruction=instruction,
         approved_paths=(target_path,),
-        approved_symbols=((target_symbol,) if target_symbol else ()),
+        approved_symbols=((edit_scope_symbol,) if edit_scope_symbol else ()),
         reason=(
             "Taslak kapsam ve izin kontrollerinden gecti. Gercek EditProposal mevcut "
             "validator zinciri icinde uretilmeli."

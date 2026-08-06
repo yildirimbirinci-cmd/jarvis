@@ -8,6 +8,10 @@ from artmach_assistant.core.evidence_patch_proposal import (
     PROPOSAL_READY_FOR_REVIEW,
     EvidencePatchProposal,
 )
+from artmach_assistant.core.evidence_patch_session import (
+    SESSION_HANDOFF_READY,
+    EvidencePatchSessionStore,
+)
 
 
 def _proposal(status: str = PROPOSAL_READY_FOR_REVIEW) -> EvidencePatchProposal:
@@ -26,28 +30,33 @@ def _proposal(status: str = PROPOSAL_READY_FOR_REVIEW) -> EvidencePatchProposal:
     )
 
 
-def test_assistant_routes_ready_handoff_to_existing_generator(tmp_path: Path) -> None:
+def test_assistant_stages_ready_handoff_without_generator(tmp_path: Path) -> None:
     target = tmp_path / "core" / "task_orchestrator.py"
     target.parent.mkdir(parents=True)
     target.write_text("pass\n", encoding="utf-8")
     engine = AssistantEngine.__new__(AssistantEngine)
     engine.own_project_root = lambda: tmp_path
-    captured = {}
+    calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
 
-    def prepare(instruction: str, **kwargs) -> str:
-        captured["instruction"] = instruction
-        captured.update(kwargs)
+    def prepare(*args, **kwargs) -> str:
+        calls.append((args, kwargs))
         return "EDIT PROPOSAL READY"
 
     engine.prepare_own_code_proposal = prepare
     rendered = engine.prepare_evidence_patch_proposal(_proposal())
 
-    assert "Durum: READY" in rendered
-    assert "EDIT PROPOSAL READY" in rendered
-    assert captured["production_repair"] is True
-    assert captured["approved_paths"] == ("core/task_orchestrator.py",)
-    assert captured["approved_symbols"] == ("TaskOrchestrator.wrap.execute",)
-    assert captured["plan_id"] == "PP-ABC123"
+    assert calls == []
+    assert "Durum: HANDOFF_READY" in rendered
+    assert "Edit modeli baslatilmadi" in rendered
+    assert "Uygulama izni: hayir" in rendered
+
+    store = EvidencePatchSessionStore(
+        tmp_path / ".jarvis" / "evidence_patch_session.json"
+    )
+    session = store.load()
+    assert session is not None
+    assert session.status == SESSION_HANDOFF_READY
+    assert session.apply_allowed is False
 
 
 def test_assistant_does_not_call_generator_for_blocked_handoff(tmp_path: Path) -> None:
@@ -60,6 +69,5 @@ def test_assistant_does_not_call_generator_for_blocked_handoff(tmp_path: Path) -
     rendered = engine.prepare_evidence_patch_proposal(
         _proposal(PROPOSAL_BLOCKED)
     )
-
     assert "Durum: BLOCKED" in rendered
     assert "Uygulama izni: hayir" in rendered

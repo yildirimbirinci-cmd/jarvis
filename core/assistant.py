@@ -1769,12 +1769,7 @@ class AssistantEngine:
         self,
         proposal: EvidencePatchProposal,
     ) -> str:
-        """Route evidence proposal into the guarded edit proposal pipeline.
-
-        This method never applies source changes. It only performs handoff
-        preflight and asks the existing own-code proposal generator to create
-        an EditProposal inside the approved path/symbol scope.
-        """
+        """Stage an evidence patch proposal without invoking the code model."""
         session_path = Path(self.own_project_root()) / ".jarvis" / "evidence_patch_session.json"
         store = EvidencePatchSessionStore(session_path)
         session = EvidencePatchSession.create(
@@ -1795,6 +1790,41 @@ class AssistantEngine:
 
         session = session.transition(SESSION_HANDOFF_READY)
         store.save(session)
+        self._pending_evidence_patch_proposal = proposal
+        return (
+            session.report()
+            + "\n\n"
+            + handoff.report()
+            + "\n\nEdit modeli baslatilmadi. Edit taslagi uretmek icin '"
+            + session.session_id
+            + " onayla' de."
+        )
+
+    def _generate_staged_evidence_patch_proposal(
+        self,
+        session: EvidencePatchSession,
+    ) -> str:
+        """Generate and validate an edit proposal after explicit PS approval."""
+        proposal = getattr(self, "_pending_evidence_patch_proposal", None)
+        if (
+            proposal is None
+            or proposal.proposal_id != session.proposal_id
+        ):
+            return (
+                session.report()
+                + "\n\nBekleyen patch taslagi bu oturumda bulunamadi. "
+                "Arastirma sonucunu yeniden hazirla; hicbir kod degistirilmedi."
+            )
+
+        handoff = build_evidence_patch_handoff(
+            proposal,
+            project_root=self.own_project_root(),
+        )
+        if not handoff.ready:
+            failed = session.transition(SESSION_FAILED, error=handoff.reason)
+            self._evidence_patch_session_store().save(failed)
+            return failed.report() + "\n\n" + handoff.report()
+
         prepared = self.prepare_own_code_proposal(
             handoff.instruction,
             production_repair=True,
@@ -1802,12 +1832,13 @@ class AssistantEngine:
             approved_symbols=handoff.approved_symbols,
             plan_id=handoff.proposal_id,
         )
-        session = session.transition(
+        refreshed = session.transition(
             SESSION_EDIT_PROPOSAL_READY,
             edit_summary=str(prepared or "")[:2000],
         )
-        store.save(session)
-        return session.report() + "\n\n" + handoff.report() + "\n\n" + prepared
+        self._evidence_patch_session_store().save(refreshed)
+        validated = self.validate_evidence_patch_session()
+        return refreshed.report() + "\n\n" + handoff.report() + "\n\n" + str(prepared or "") + "\n\n" + validated
 
     def _evidence_patch_session_store(self) -> EvidencePatchSessionStore:
         return EvidencePatchSessionStore(
@@ -6893,6 +6924,8 @@ class AssistantEngine:
             word.startswith(("onayla", "uygula"))
             for word in normalized.split()
         ):
+            if session.status == SESSION_HANDOFF_READY:
+                return self._generate_staged_evidence_patch_proposal(session)
             approved = self.approve_evidence_patch_session(effective_id)
             refreshed = store.load()
             if (
