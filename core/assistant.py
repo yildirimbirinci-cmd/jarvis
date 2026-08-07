@@ -4633,7 +4633,9 @@ class AssistantEngine:
                 )
                 operation.checkpoint()
 
-                decision = assess_autonomous_runtime_repair(finding)
+                finding, decision, _target_validation = (
+                    self._assess_runtime_repair_with_target_refresh(finding)
+                )
                 if not decision.allowed:
                     records.append(
                         MaintenanceRepairRecord(
@@ -5209,9 +5211,31 @@ class AssistantEngine:
                     return self._apply_runtime_target_override(finding)
         return None
 
+    def _assess_runtime_repair_with_target_refresh(
+        self,
+        finding: RuntimeFinding,
+    ):
+        """Revalidate a timing-proven wrong wrapper target before final policy gating.
+
+        Source changes intentionally invalidate persisted target overrides. When fresh
+        stage timing still proves the wrapper is not the bottleneck, rebuild the
+        evidence-based action target from local runtime events, persist it for the
+        current source fingerprint, reload the finding, and then reassess policy.
+        """
+        decision = assess_autonomous_runtime_repair(finding)
+        if str(getattr(decision, "status", "") or "") != "BLOCKED_WRONG_TARGET":
+            return finding, decision, ""
+
+        validation_output = self._runtime_finding_local_validation(finding)
+        refreshed = self._find_runtime_finding(finding.finding_id)
+        if refreshed is None:
+            return finding, decision, validation_output
+
+        refreshed_decision = assess_autonomous_runtime_repair(refreshed)
+        return refreshed, refreshed_decision, validation_output
+
     def run_autonomous_runtime_repair(self, finding_id: str) -> str:
         """Run a bounded policy-controlled repair without approval prompts.
-
         The existing repair planner, proposal validator, worktree checks,
         regression comparison and rollback path remain authoritative. High-risk
         or weakly evidenced findings stop before proposal generation.
@@ -5220,23 +5244,29 @@ class AssistantEngine:
         if finding is None:
             return f"{str(finding_id).strip().upper()} is not an active runtime finding."
 
-        decision = assess_autonomous_runtime_repair(finding)
+        finding, decision, target_validation = (
+            self._assess_runtime_repair_with_target_refresh(finding)
+        )
         if not decision.allowed:
-            return decision.report() + "\n\nNo source file was changed."
+            outputs = [decision.report()]
+            if target_validation:
+                outputs.append(target_validation)
+            outputs.append("No source file was changed.")
+            return "\n\n".join(outputs)
 
         outputs = [decision.report()]
+        if target_validation:
+            outputs.append(target_validation)
         planned = self.prepare_runtime_improvement_implementation(finding.finding_id)
         outputs.append(planned)
         session = self._self_repair_store().load()
         if session is None or not session.active or session.state != "planned":
             return "\n\n".join(outputs)
-
         prepared = self._prepare_active_self_repair_proposal(session)
         outputs.append(prepared)
         session = self._self_repair_store().load()
         if session is None or not session.active or session.state != "proposal_ready":
             return "\n\n".join(outputs)
-
         applied = self._apply_active_self_repair_proposal(session)
         outputs.append(applied)
         final_session = self._self_repair_store().load()
