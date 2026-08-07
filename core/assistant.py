@@ -2414,11 +2414,24 @@ class AssistantEngine:
                 ).strip()[:8_000]
             except Exception:
                 project_context = ""
+        approved_structural_target = ""
+        if approved_symbol_rows:
+            first_symbol = str(approved_symbol_rows[0]).strip()
+            parts = [part for part in first_symbol.split(".") if part]
+            if len(parts) >= 2:
+                approved_structural_target = f"{parts[-2]}.{parts[-1]}"
+
         prompt = (
             EDIT_PROMPT
             + "\nBu, Jarvis'in kendi kaynak ağacıdır. Yalnızca aşağıdaki bağlamda bulunan "
             "göreli yolları öner; dışarıdan paket, ağ indirmesi, komut çalıştırma veya dosya silme önerme. "
             "Kullanıcı isteği belirsizse en küçük ve geri alınabilir değişikliği öner."
+            + (
+                "\n\nAPPROVED_STRUCTURAL_TARGET: "
+                + approved_structural_target
+                if approved_structural_target
+                else ""
+            )
             + "\n\nKULLANICI İSTEĞİ:\n" + raw_instruction.strip()
             + (
                 "\n\nKALICI PROJE HEDEF/KARAR BAĞLAMI:\n"

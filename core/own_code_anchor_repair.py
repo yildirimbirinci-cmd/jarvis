@@ -28,6 +28,15 @@ def _requested_symbol(instruction: str) -> tuple[str, str] | None:
     ``TaskOrchestrator.execute_task``.
     """
     text = str(instruction or "")
+
+    explicit = re.search(
+        r"(?im)^APPROVED_STRUCTURAL_TARGET:\s*"
+        r"([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)\s*$",
+        text,
+    )
+    if explicit is not None:
+        return explicit.group(1), explicit.group(2)
+
     ignored_suffixes = {
         "py", "pyw", "json", "toml", "yaml", "yml", "md", "txt",
         "ini", "cfg", "bat", "cmd", "ps1", "sh", "html", "css",
