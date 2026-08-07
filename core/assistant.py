@@ -183,6 +183,11 @@ from artmach_assistant.core.runtime_observability import (
     RuntimeHealthAnalyzer,
     RuntimeHealthReport,
 )
+from artmach_assistant.core.runtime_target_promotion import (
+    RuntimeTargetOverrideStore,
+    apply_target_override,
+    build_target_override,
+)
 from artmach_assistant.core.evidence_local_validation import (
     build_local_runtime_validation,
 )
@@ -418,6 +423,9 @@ class AssistantEngine:
             DATA_DIR / "diagnostics" / "runtime_events.json"
         )
         self.runtime_health = RuntimeHealthAnalyzer(self.runtime_events)
+        self.runtime_target_overrides = RuntimeTargetOverrideStore(
+            DATA_DIR / "diagnostics" / "runtime_target_overrides.json"
+        )
         # The engine owns the local runtime event store. Instrumentation wraps
         # existing service entry points process-wide, so the GUI-created task
         # orchestrator and every future service instance use the same safe sink.
@@ -4056,12 +4064,29 @@ class AssistantEngine:
             fallback_path=fallback_path,
             fallback_symbol=fallback_symbol,
         )
+        override = build_target_override(
+            finding,
+            report,
+            source_fingerprint=self._current_source_fingerprint(),
+        )
+        if override is not None:
+            self._runtime_target_override_store().save(override)
         self.last_action_context = {
             "kind": "runtime_local_validation",
             "finding_id": str(getattr(finding, "finding_id", "") or ""),
             "locally_confirmed": bool(report.locally_confirmed),
+            "promoted_path": str(getattr(override, "source_path", "") or ""),
+            "promoted_symbol": str(getattr(override, "symbol", "") or ""),
         }
-        return report.report()
+        rendered = report.report()
+        if override is not None:
+            rendered += (
+                "\n\nHEDEF AKTARIMI KAYDEDILDI"
+                f"\nRUN: {override.finding_id}"
+                f"\nYeni hedef: {override.source_path} - {override.symbol}"
+                "\nBu hedef kaynak degisirse otomatik gecersiz olur."
+            )
+        return rendered
 
     @staticmethod
     def _runtime_research_classification(
@@ -5089,6 +5114,34 @@ class AssistantEngine:
         )
         return report
 
+    def _runtime_target_override_store(self) -> RuntimeTargetOverrideStore:
+        store = getattr(self, "runtime_target_overrides", None)
+        if isinstance(store, RuntimeTargetOverrideStore):
+            return store
+        store = RuntimeTargetOverrideStore(
+            DATA_DIR / "diagnostics" / "runtime_target_overrides.json"
+        )
+        self.runtime_target_overrides = store
+        return store
+
+    def _apply_runtime_target_override(
+        self,
+        finding: RuntimeFinding,
+    ) -> RuntimeFinding:
+        store = self._runtime_target_override_store()
+        override = store.get(finding.finding_id)
+        if override is None:
+            return finding
+        current_fingerprint = self._current_source_fingerprint()
+        promoted = apply_target_override(
+            finding,
+            override,
+            current_source_fingerprint=current_fingerprint,
+        )
+        if promoted is finding and override.source_fingerprint != current_fingerprint:
+            store.discard(finding.finding_id)
+        return promoted
+
     def _find_runtime_finding(self, finding_id: str) -> RuntimeFinding | None:
         key = str(finding_id or "").strip().upper()
         if not key:
@@ -5115,7 +5168,7 @@ class AssistantEngine:
             finding = report.finding(key)
             if finding is not None:
                 self._last_runtime_health_report = report
-                return finding
+                return self._apply_runtime_target_override(finding)
 
         # A cached report is useful when the event service has not yet been
         # attached (for example during startup or isolated validation), but
@@ -5140,7 +5193,7 @@ class AssistantEngine:
                     and "localdialoguemanager.intent_model" in title
                 )
                 if not expected_voice_cancel and not expected_intent_fallback:
-                    return finding
+                    return self._apply_runtime_target_override(finding)
         return None
 
     def run_autonomous_runtime_repair(self, finding_id: str) -> str:
