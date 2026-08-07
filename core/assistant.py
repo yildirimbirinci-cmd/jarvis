@@ -183,6 +183,9 @@ from artmach_assistant.core.runtime_observability import (
     RuntimeHealthAnalyzer,
     RuntimeHealthReport,
 )
+from artmach_assistant.core.evidence_local_validation import (
+    build_local_runtime_validation,
+)
 from artmach_assistant.core.maintenance_advisor import MaintenanceAdvisor, MaintenanceReview
 from artmach_assistant.core.notification_store import NotificationStore
 from artmach_assistant.core.trust_inbox import TrustApprovalInbox
@@ -4035,6 +4038,31 @@ class AssistantEngine:
         rows.extend(f"- {item}" for item in finding.acceptance_criteria)
         return "\n".join(rows)
 
+    def _runtime_finding_local_validation(
+        self,
+        finding: RuntimeFinding,
+    ) -> str:
+        fallback_path, fallback_symbol = self._runtime_research_target_fallback(finding)
+        try:
+            events = self._runtime_event_service().recent(
+                limit=1200,
+                workspace=str(getattr(finding, "workspace", "") or ""),
+            )
+        except Exception:
+            events = ()
+        report = build_local_runtime_validation(
+            finding,
+            events,
+            fallback_path=fallback_path,
+            fallback_symbol=fallback_symbol,
+        )
+        self.last_action_context = {
+            "kind": "runtime_local_validation",
+            "finding_id": str(getattr(finding, "finding_id", "") or ""),
+            "locally_confirmed": bool(report.locally_confirmed),
+        }
+        return report.report()
+
     @staticmethod
     def _runtime_research_classification(
         finding: RuntimeFinding,
@@ -4746,6 +4774,21 @@ class AssistantEngine:
                     f"{run_id} artik etkin bir "
                     "calisma zamani bulgusu degil."
                 )
+
+            local_validation_intent = any(
+                marker in normalized
+                for marker in (
+                    "local validation",
+                    "local_validation",
+                    "yerel runtime dogrulama",
+                    "runtime dogrulama",
+                    "yerel dogrulama",
+                    "action_duration_ms",
+                    "wrapper_overhead_ms",
+                )
+            )
+            if local_validation_intent:
+                return self._runtime_finding_local_validation(finding)
 
             if proposal_intent:
                 return self.prepare_runtime_improvement_implementation(run_id)
