@@ -195,8 +195,12 @@ def install_main_window_voice_integration(
                 "JARVIS: Kabul testi başladı. Tam pytest çalıştığı için bu işlem "
                 "birkaç dakika sürebilir; program donmadı.\n"
             )
+        action = lambda tid=turn_id: self.engine.handle(clean, turn_id=tid)
+        action.__jarvis_action_module__ = "artmach_assistant.core.assistant"
+        action.__jarvis_action_path__ = "core/assistant.py"
+        action.__jarvis_action_symbol__ = "AssistantEngine.handle"
         self.run_worker(
-            lambda tid=turn_id: self.engine.handle(clean, turn_id=tid),
+            action,
             lambda result, tid=turn_id: self.on_answer(result, turn_id=tid),
             task_name=intent.task_name,
             source=source,

@@ -892,6 +892,92 @@ def _instrument_method(cls: type, method_name: str, spec: MethodSpec) -> None:
     setattr(cls, method_name, observed)
 
 
+def _callable_identity_metadata(
+    action: Callable[..., object],
+    workspace: str | Path,
+) -> dict[str, object]:
+    explicit_path = str(
+        getattr(action, "__jarvis_action_path__", "") or ""
+    ).strip().replace("\\", "/")
+    explicit_symbol = str(
+        getattr(action, "__jarvis_action_symbol__", "") or ""
+    ).strip()
+    explicit_module = str(
+        getattr(action, "__jarvis_action_module__", "") or ""
+    ).strip()
+
+    if explicit_path or explicit_symbol or explicit_module:
+        result: dict[str, object] = {}
+        if explicit_module:
+            result["action_module"] = explicit_module[:240]
+        if explicit_path:
+            result["action_path"] = explicit_path[:500]
+        if explicit_symbol:
+            result["action_symbol"] = explicit_symbol[:300]
+        return result
+    candidate: object = action
+    seen: set[int] = set()
+    for _ in range(5):
+        marker = id(candidate)
+        if marker in seen:
+            break
+        seen.add(marker)
+        try:
+            unwrapped = inspect.unwrap(candidate)  # type: ignore[arg-type]
+        except Exception:
+            unwrapped = candidate
+        if unwrapped is not candidate:
+            candidate = unwrapped
+            continue
+        bound_function = getattr(candidate, "__func__", None)
+        if callable(bound_function):
+            candidate = bound_function
+            continue
+        partial_function = getattr(candidate, "func", None)
+        if callable(partial_function):
+            candidate = partial_function
+            continue
+        break
+
+    module = str(getattr(candidate, "__module__", "") or "")[:240]
+    symbol = str(
+        getattr(candidate, "__qualname__", "")
+        or getattr(candidate, "__name__", "")
+        or type(candidate).__qualname__
+    )[:300]
+
+    source_path = ""
+    try:
+        source = inspect.getsourcefile(candidate) or inspect.getfile(candidate)
+    except Exception:
+        source = None
+    if source:
+        try:
+            source_file = Path(source).expanduser().resolve(strict=False)
+            workspace_path = Path(workspace).expanduser().resolve(strict=False)
+            try:
+                source_path = source_file.relative_to(workspace_path).as_posix()
+            except ValueError:
+                source_path = source_file.as_posix()
+        except Exception:
+            source_path = str(source).replace("\\", "/")
+    if (
+        (not source_path or Path(source_path).is_absolute())
+        and module.startswith("artmach_assistant.")
+    ):
+        relative_module = module.removeprefix("artmach_assistant.").replace(".", "/")
+        source_path = f"{relative_module}.py"
+
+    result: dict[str, object] = {}
+    if module:
+        result["action_module"] = module
+    if source_path:
+        result["action_path"] = source_path[:500]
+    if symbol:
+        result["action_symbol"] = symbol
+    return result
+
+
 def _instrument_task_wrap(cls: type) -> None:
     method_name = "wrap"
     key = (cls, method_name)
@@ -943,6 +1029,7 @@ def _instrument_task_wrap(cls: type) -> None:
                 "task_id": str(task_id)[:80],
                 "slow_threshold_ms": 30000.0,
             }
+            metadata.update(_callable_identity_metadata(action, workspace))
             try:
                 active = instance.active
                 if active is not None and getattr(active, "task_id", "") == task_id:
