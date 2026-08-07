@@ -4735,6 +4735,10 @@ class AssistantEngine:
                     for marker in (
                         "yerel kanit yetersiz",
                         "yerel inceleme yetersiz",
+                "yeterli kanit saglamadi",
+                "yerel kanit yeterli degil",
+                "yerel kanit yeterli olmadi",
+                "yerel inceleme yeterli olmadi",
                         "dis arastirma onayi olustur",
                         "rs onayi olustur",
                         "dis arastirmaya gec",
@@ -5930,6 +5934,10 @@ class AssistantEngine:
             for marker in (
                 "yerel kanit yetersiz",
                 "yerel inceleme yetersiz",
+                "yeterli kanit saglamadi",
+                "yerel kanit yeterli degil",
+                "yerel kanit yeterli olmadi",
+                "yerel inceleme yeterli olmadi",
                 "kanit kok nedeni aciklamak icin yetersiz",
                 "dis arastirma onayi hazirla",
                 "dis arastirma onayi olustur",
@@ -6023,6 +6031,10 @@ class AssistantEngine:
                     for marker in (
                         "yerel kanit yetersiz",
                         "yerel inceleme yetersiz",
+                "yeterli kanit saglamadi",
+                "yerel kanit yeterli degil",
+                "yerel kanit yeterli olmadi",
+                "yerel inceleme yeterli olmadi",
                         "dis arastirma onayi olustur",
                         "rs onayi olustur",
                         "dis arastirmaya gec",
