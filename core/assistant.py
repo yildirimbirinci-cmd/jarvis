@@ -2426,7 +2426,30 @@ class AssistantEngine:
         )
         store.save(session)
 
-        result = self.apply_pending_own_code_proposal()
+        try:
+            result = self.apply_pending_own_code_proposal()
+        except Exception as exc:
+            rendered = (
+                "Guvenli uygulama zinciri beklenmedik bicimde kesildi: "
+                f"{type(exc).__name__}: {exc}"
+            )
+            session = session.transition(
+                SESSION_FAILED,
+                apply_summary=rendered[-2000:],
+                rollback_summary=(
+                    "Uygulama sonucu dogrulanamadi; kaynak durumu korunmus kabul edilmedi."
+                ),
+                error=rendered[-2000:],
+            )
+            session = self._record_evidence_patch_outcome(
+                session,
+                successful=False,
+                note=session.error,
+                rollback_verified=False,
+            )
+            store.save(session)
+            return session.report() + "\n\n" + rendered
+
         rendered = str(result or "").strip()
         lowered = rendered.casefold()
         pending_after = getattr(
