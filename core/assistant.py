@@ -1911,6 +1911,127 @@ class AssistantEngine:
             and any(token in normalized for token in ("cikar", "ayir", "refaktor"))
         )
 
+    def _prepare_deterministic_restart_target_docstring_update(
+        self,
+        instruction: str,
+    ) -> EditProposal | None:
+        """Prepare the narrow restart-target docstring edit from the live AST."""
+
+        raw_instruction = str(instruction or "")
+        normalized = self.command_key(raw_instruction)
+        raw_folded = raw_instruction.casefold()
+        if "docstring" not in raw_folded:
+            return None
+        if not any(
+            token in raw_folded
+            for token in ("yalnızca", "yalnizca", "sadece")
+        ):
+            return None
+        if (
+            "assistantengine._assess_runtime_repair_with_target_refresh"
+            not in raw_folded
+        ):
+            return None
+        if "core/assistant.py" not in raw_folded.replace("\\", "/"):
+            return None
+
+        root = Path(self.own_project_root()).resolve(strict=False)
+        source_path = (root / "core" / "assistant.py").resolve(strict=False)
+        try:
+            source_path.relative_to(root)
+        except ValueError as exc:
+            raise WorkspaceError(
+                "Deterministik docstring hedefi proje kokunun disinda."
+            ) from exc
+
+        try:
+            source = source_path.read_text(encoding="utf-8")
+            tree = ast.parse(source, filename="core/assistant.py")
+        except (OSError, UnicodeError, SyntaxError) as exc:
+            raise WorkspaceError(
+                f"Deterministik docstring hedefi okunamadi: {exc}"
+            ) from exc
+
+        target_method = None
+        for owner in tree.body:
+            if not isinstance(owner, ast.ClassDef) or owner.name != "AssistantEngine":
+                continue
+            for method in owner.body:
+                if (
+                    isinstance(method, (ast.FunctionDef, ast.AsyncFunctionDef))
+                    and method.name == "_assess_runtime_repair_with_target_refresh"
+                ):
+                    target_method = method
+                    break
+
+        if target_method is None or not target_method.body:
+            raise WorkspaceError(
+                "Deterministik docstring hedef metodu bulunamadi."
+            )
+
+        first = target_method.body[0]
+        if not (
+            isinstance(first, ast.Expr)
+            and isinstance(first.value, ast.Constant)
+            and isinstance(first.value.value, str)
+        ):
+            raise WorkspaceError(
+                "Hedef metodun mevcut docstring'i bulunamadi; tahmin edilmedi."
+            )
+
+        old_docstring = ast.get_source_segment(source, first)
+        if not old_docstring or source.count(old_docstring) != 1:
+            raise WorkspaceError(
+                "Hedef docstring kaynakta benzersiz degil; tahmin edilmedi."
+            )
+
+        indent = " " * int(getattr(first, "col_offset", 8))
+        new_docstring = (
+            '"""Revalidate persisted runtime target promotion after restart.\n\n'
+            + indent
+            + "A persisted override is never applied directly when stale. "
+            + "The promoted target is accepted only after the current source "
+            + "fingerprint and fresh runtime evidence confirm that the wrapper "
+            + "remains the wrong repair target.\n"
+            + indent
+            + '"""'
+        )
+
+        payload = {
+            "summary": (
+                "Document restart-safe runtime target revalidation without "
+                "changing executable behavior."
+            ),
+            "files": [
+                {
+                    "path": "core/assistant.py",
+                    "reason": (
+                        "Clarify that stale persisted target overrides require "
+                        "fresh source-fingerprint and runtime-evidence validation."
+                    ),
+                    "operations": [
+                        {
+                            "op": "replace",
+                            "old": old_docstring,
+                            "new": new_docstring,
+                        }
+                    ],
+                }
+            ],
+        }
+        proposal = self.editor.create_proposal(
+            json.dumps(payload, ensure_ascii=False)
+        )
+        self.own_code_history.record(
+            "deterministik docstring taslagi hazirlandi",
+            dosya="core/assistant.py",
+            sembol=(
+                "AssistantEngine."
+                "_assess_runtime_repair_with_target_refresh"
+            ),
+        )
+        return proposal
+
     def _prepare_deterministic_own_code_refactor(
         self,
         instruction: str,
@@ -1923,6 +2044,14 @@ class AssistantEngine:
         behavior. The source AST, rather than model-generated code, determines
         the complete statement range.
         """
+
+        docstring_proposal = (
+            self._prepare_deterministic_restart_target_docstring_update(
+                instruction
+            )
+        )
+        if docstring_proposal is not None:
+            return docstring_proposal
 
         if not self._is_deterministic_active_dialogue_refactor(instruction):
             return None
@@ -5575,6 +5704,10 @@ class AssistantEngine:
             return (
                 f"{str(finding_id).strip().upper()} kimlikli çalışma zamanı bulgusu "
                 "bulunamadı. Önce bakım taraması yapmalıyım."
+            )
+        if finding.category == "repeated_slow_operation":
+            finding, _repair_decision, _target_validation = (
+                self._assess_runtime_repair_with_target_refresh(finding)
             )
         if finding.category == "repeated_runtime_warning":
             return (
@@ -11477,6 +11610,32 @@ class AssistantEngine:
             retest_command = self._retest_command_request(text)
             if retest_command is not None:
                 return retest_command
+
+        pending_own_code = getattr(
+            getattr(self, "editor", None),
+            "pending",
+            None,
+        )
+        supplied_proposal_id = bool(
+            re.search(
+                r"(?<![0-9a-f])[0-9a-f]{12}(?![0-9a-f])",
+                normalized,
+            )
+        )
+        explicit_proposal_approval = normalized in {
+            "taslagi onayla",
+            "taslagi uygula",
+            "degisikligi onayla",
+            "degisikligi uygula",
+            "kod degisikligini uygula",
+        }
+        if (
+            pending_own_code is not None
+            and (supplied_proposal_id or explicit_proposal_approval)
+        ):
+            own_code_approval = self._own_code_approval_request(text)
+            if own_code_approval is not None:
+                return own_code_approval
 
         reserved_self_repair = self._reserved_self_repair_request(text)
         if reserved_self_repair is not None:
