@@ -518,11 +518,15 @@ def execute_approved_research(
             path=session.path,
             symbol=session.symbol,
         )
-        patch_proposal = build_evidence_patch_proposal(
-            engineering_plan,
-            conclusion,
-            path=session.path,
-            symbol=session.symbol,
+        patch_proposal = (
+            build_evidence_patch_proposal(
+                engineering_plan,
+                conclusion,
+                path=session.path,
+                symbol=session.symbol,
+            )
+            if engineering_plan.patch_allowed and conclusion.patch_ready
+            else None
         )
         return EvidenceResearchExecutionResult(
             status=RESEARCH_FAILED,
@@ -565,11 +569,15 @@ def execute_approved_research(
         path=session.path,
         symbol=session.symbol,
     )
-    patch_proposal = build_evidence_patch_proposal(
-        engineering_plan,
-        conclusion,
-        path=session.path,
-        symbol=session.symbol,
+    patch_proposal = (
+        build_evidence_patch_proposal(
+            engineering_plan,
+            conclusion,
+            path=session.path,
+            symbol=session.symbol,
+        )
+        if engineering_plan.patch_allowed and conclusion.patch_ready
+        else None
     )
 
     return EvidenceResearchExecutionResult(

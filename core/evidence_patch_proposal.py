@@ -76,6 +76,8 @@ def build_evidence_patch_proposal(
     ready = (
         plan.status == PLAN_PATCH_PROPOSAL
         and conclusion.confidence_level == CONFIDENCE_HIGH
+        and bool(plan.patch_allowed)
+        and bool(conclusion.patch_ready)
     )
     status = PROPOSAL_READY_FOR_REVIEW if ready else PROPOSAL_BLOCKED
     if ready:

@@ -99,23 +99,22 @@ def build_evidence_engineering_plan(
 
     if conclusion.confidence_level == CONFIDENCE_HIGH:
         return EvidenceEngineeringPlan(
-            status=PLAN_PATCH_PROPOSAL,
-            objective=f"{target} icin dar ve davranis-koruyan patch taslagi hazirla",
+            status=PLAN_LOCAL_VALIDATION,
+            objective=f"{target} icin yerel runtime dogrulamasi calistir",
             rationale=(
-                "Dis kanit guclu ancak patch oncesinde ayni darbogazin yerel "
-                "runtime verisiyle dogrulanmasi gerekiyor."
+                "Dis kanit guclu ancak ayni darbogaz yerel runtime verisiyle "
+                "henüz dogrulanmadi. Patch taslagi bu dogrulamadan once acilamaz."
             ),
             steps=(
                 "action_duration_ms ve wrapper_overhead_ms dagilimini karsilastir.",
                 "Darbogazin wrapper yerine sarilan action icinde olup olmadigini dogrula.",
-                "Yalnizca kanitlanan alt asamayi hedefleyen en kucuk patch taslagini hazirla.",
-                "Patchi worktree icinde uygula ve hedef regresyon testlerini calistir.",
+                "Ayni senaryoyu tekrarlanabilir bicimde olc ve ortanca sureleri raporla.",
+                "Yerel veri dis kanitla ayni darbogazi gostermeden patch taslagi uretme.",
             ),
             acceptance_criteria=(
                 "Yerel olcum dis kanitla ayni darbogazi gostermeli.",
-                "Cikti ve iptal davranisi korunmali.",
-                "Hedef testler ve tam regresyon gecmeli.",
-                "Ortanca runtime suresi olculebilir bicimde dusmeli.",
+                "Olcum ayni kaynak surumunde tekrarlanabilir olmali.",
+                "Cikti ve iptal davranisi icin mevcut baseline kaydedilmeli.",
             ),
             safety_constraints=safety,
             patch_allowed=False,

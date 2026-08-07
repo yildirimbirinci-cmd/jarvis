@@ -50,6 +50,7 @@ from artmach_assistant.core.evidence_research_coordinator import EvidenceResearc
 from artmach_assistant.core.evidence_research_session import EvidenceResearchApprovalStore
 from artmach_assistant.core.evidence_research_command import EvidenceResearchCommandCoordinator
 from artmach_assistant.core.evidence_patch_proposal import EvidencePatchProposal
+from artmach_assistant.core.evidence_patch_proposal_store import EvidencePatchProposalStore
 from artmach_assistant.core.evidence_patch_handoff import build_evidence_patch_handoff
 from artmach_assistant.core.evidence_patch_outcome import record_patch_outcome
 from artmach_assistant.core.evidence_patch_closeout import run_patch_closeout
@@ -1843,6 +1844,7 @@ class AssistantEngine:
             store.save(session)
             return session.report() + "\n\n" + handoff.report()
 
+        self._evidence_patch_proposal_store().save(proposal)
         session = session.transition(SESSION_HANDOFF_READY)
         store.save(session)
         self._pending_evidence_patch_proposal = proposal
@@ -1860,11 +1862,8 @@ class AssistantEngine:
         session: EvidencePatchSession,
     ) -> str:
         """Generate and validate an edit proposal after explicit PS approval."""
-        proposal = getattr(self, "_pending_evidence_patch_proposal", None)
-        if (
-            proposal is None
-            or proposal.proposal_id != session.proposal_id
-        ):
+        proposal = self._load_staged_evidence_patch_proposal(session)
+        if proposal is None:
             return (
                 session.report()
                 + "\n\nBekleyen patch taslagi bu oturumda bulunamadi. "
@@ -1895,6 +1894,34 @@ class AssistantEngine:
         validated = self.validate_evidence_patch_session()
         return refreshed.report() + "\n\n" + handoff.report() + "\n\n" + str(prepared or "") + "\n\n" + validated
 
+    def _evidence_patch_proposal_store(self) -> EvidencePatchProposalStore:
+        return EvidencePatchProposalStore(
+            Path(self.own_project_root())
+            / ".jarvis"
+            / "evidence_patch_proposal.json"
+        )
+    def _load_staged_evidence_patch_proposal(
+        self,
+        session: EvidencePatchSession,
+    ) -> EvidencePatchProposal | None:
+        proposal = getattr(self, "_pending_evidence_patch_proposal", None)
+        if proposal is None:
+            try:
+                proposal = self._evidence_patch_proposal_store().load()
+            except Exception:
+                return None
+        if proposal is None:
+            return None
+        if (
+            proposal.proposal_id != session.proposal_id
+            or proposal.target_path != session.target_path
+            or proposal.target_symbol != session.target_symbol
+            or not proposal.user_approval_required
+            or proposal.apply_allowed
+        ):
+            return None
+        self._pending_evidence_patch_proposal = proposal
+        return proposal
     def _evidence_patch_session_store(self) -> EvidencePatchSessionStore:
         return EvidencePatchSessionStore(
             Path(self.own_project_root())

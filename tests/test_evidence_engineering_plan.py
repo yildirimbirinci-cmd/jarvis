@@ -53,14 +53,15 @@ def test_medium_confidence_requires_local_validation() -> None:
     assert plan.patch_allowed is False
 
 
-def test_high_confidence_allows_only_patch_proposal() -> None:
+def test_high_confidence_still_requires_local_runtime_validation() -> None:
     plan = build_evidence_engineering_plan(
         _conclusion(CONFIDENCE_HIGH, 90),
         title="slow task",
         path="core/task_orchestrator.py",
         symbol="TaskOrchestrator.wrap.execute",
     )
-    assert plan.status == PLAN_PATCH_PROPOSAL
+    assert plan.status == PLAN_LOCAL_VALIDATION
     assert any("action_duration_ms" in step for step in plan.steps)
     assert plan.patch_allowed is False
+    assert "yerel runtime dogrulamasi" in plan.objective
     assert "Patch izni: hayir" in plan.report()

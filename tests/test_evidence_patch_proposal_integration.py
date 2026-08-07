@@ -18,9 +18,13 @@ def test_research_result_contains_review_only_patch_proposal() -> None:
             ResearchSource("pytest docs","https://docs.pytest.org/en/stable/","Python test profiling guidance.",content),
         ])]
     result=execute_approved_research(_session(), search_many=search_many)
-    assert result.patch_proposal is not None
-    assert result.patch_proposal.apply_allowed is False
+    assert result.patch_proposal is None
+    assert result.engineering_plan is not None
+    assert result.engineering_plan.status == "LOCAL_VALIDATION"
+    assert result.engineering_plan.patch_allowed is False
     rendered=result.report()
-    assert "YAPILANDIRILMIS PATCH TASLAGI" in rendered
-    assert "Kullanici onayi gerekli: evet" in rendered
+    assert "Durum: LOCAL_VALIDATION" in rendered
+    assert "Patch izni: hayir" in rendered
+    assert "YAPILANDIRILMIS PATCH TASLAGI" not in rendered
+    assert "Kullanici onayi gerekli: evet" not in rendered
     assert "Kaynak kodu degistirilmedi" in rendered
