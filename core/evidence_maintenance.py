@@ -26,6 +26,7 @@ class EvidenceMaintenanceFinding:
     score: int
     source: str
     title: str
+    finding_id: str = ""
     path: str = ""
     symbol: str = ""
     evidence: str = ""
@@ -422,6 +423,7 @@ def build_evidence_maintenance_report(
                 score=_runtime_score(finding),
                 source="runtime",
                 title=finding.title,
+                finding_id=finding.finding_id,
                 path=path,
                 symbol=symbol,
                 evidence=(

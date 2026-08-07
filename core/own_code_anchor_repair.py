@@ -1316,10 +1316,14 @@ def build_ambiguous_anchor_guidance(
         for operation_index, operation in enumerate(operations, start=1):
             if not isinstance(operation, dict):
                 continue
-            if str(operation.get("op", "")).strip().casefold() != "replace":
+            operation_kind = str(operation.get("op", "")).strip().casefold()
+            if operation_kind == "replace":
+                old = operation.get("old")
+            elif operation_kind == "replace_method_block":
+                old = operation.get("block_test")
+            else:
                 continue
 
-            old = operation.get("old")
             if not isinstance(old, str) or not old:
                 continue
 
@@ -1352,7 +1356,14 @@ def build_ambiguous_anchor_guidance(
                     (
                         f"The same old text occurs {len(positions)} times "
                         f"({len(positions)} kez bulundu). "
-                        "Use exactly one intended candidate block below as the old field."
+                        + (
+                            "The replace_method_block block_test is structurally ambiguous. "
+                            "Do not reuse that generic block_test. Convert this operation to "
+                            "a normal replace operation and use exactly one intended source "
+                            "candidate below as the old field."
+                            if operation_kind == "replace_method_block"
+                            else "Use exactly one intended candidate block below as the old field."
+                        )
                     ),
                 )
             )
@@ -1812,10 +1823,10 @@ def build_missing_anchor_guidance(
                 continue
 
             if operation_name == "replace_method_block":
-                requested_anchor = _normalize_if_test_selector(
-                    operation.get("block_test", "")
-                )
+                raw_block_test = str(operation.get("block_test", "") or "").strip()
+                requested_anchor = _normalize_if_test_selector(raw_block_test)
                 if not requested_anchor:
+                    rows.extend(("", f"INVALID STRUCTURAL BLOCK: {raw_path} operation {operation_index}", "Use an exact existing if condition or a unique source-backed replace anchor.", f"\nAPPROVED METHOD SOURCE:\n{scoped_source}"))
                     continue
 
                 try:
@@ -1884,6 +1895,7 @@ def build_missing_anchor_guidance(
                 requested_anchor,
             )
             if not closest:
+                rows.extend(("", f"MISSING ANCHOR GUIDANCE: {raw_path} operation {operation_index}", "Choose a short exact method-local block from the approved live source.", f"\nAPPROVED METHOD SOURCE:\n{scoped_source}"))
                 continue
 
             rows.extend(

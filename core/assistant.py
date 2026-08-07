@@ -1258,7 +1258,15 @@ class AssistantEngine:
 
         def is_anchor_error(value: object) -> bool:
             error_text = str(value or "")
-            return "Patch anchor" in error_text and "bulunan=" in error_text
+            folded = error_text.casefold()
+            return (("patch anchor" in folded and "bulunan=" in folded) or "replace_method_block" in folded or "yapısal blok koşulu" in folded or "yapisal blok kosulu" in folded)
+
+        def is_helper_shape_error(value: object) -> bool:
+            folded = str(value or "").casefold()
+            return (
+                "yardımcı metot content alanı" in folded
+                and "tek bir metot" in folded
+            )
 
         def is_noop_error(value: object) -> bool:
             return "Patch işlemi gerçek değişiklik üretmedi" in str(value or "")
@@ -1290,11 +1298,14 @@ class AssistantEngine:
                     )
             return ""
 
-        attempts = max(1, min(int(max_attempts), 3))
+        base_attempts = max(1, min(int(max_attempts), 3))
+        attempts = base_attempts + 1
         previous_response = ""
         previous_error = ""
         seen_responses: set[str] = set()
         failures: list[str] = []
+        anchor_retry_guidance = ""
+        helper_shape_retry_guidance = ""
         diagnostic_run_id = (
             datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
             + "-"
@@ -1351,6 +1362,12 @@ class AssistantEngine:
                 pass
 
         for attempt in range(1, attempts + 1):
+            if (
+                attempt > base_attempts
+                and not anchor_retry_guidance
+                and not helper_shape_retry_guidance
+            ):
+                break
             current_prompt = prompt
             structural_guidance = ""
 
@@ -1415,6 +1432,19 @@ class AssistantEngine:
                     "`replace` kullan ve old alanına benzersiz tam kaynak bloğunu koy."
                 )
 
+            if is_helper_shape_error(previous_error):
+                current_prompt += (
+                    "\n\nHELPER SHAPE RECOVERY CONTRACT: "
+                    "`insert_class_method.content` must contain exactly one complete "
+                    "method definition. Never bundle sibling `def` blocks in one "
+                    "operation. If more than one helper is truly required, emit one "
+                    "`insert_class_method` operation per helper. Do not use `pass`, "
+                    "`TODO`, placeholder bodies, or invented cache/state APIs. "
+                    "Keep every helper inside the approved class and file scope. "
+                    "If the evidence does not justify a complete helper, return an "
+                    "empty `files` list instead of guessing."
+                )
+
             if is_noop_error(previous_error):
                 current_prompt += (
                     "\n\nNO-OP OPERASYONU TEKRARLAMA. replace işleminde new, old "
@@ -1447,6 +1477,18 @@ class AssistantEngine:
                     "replacement bu sonucu gerçek break ile uygulamalıdır."
                 )
 
+            if anchor_retry_guidance:
+                current_prompt += (
+                    "\n\nANCHOR RETRY CONTRACT (MANDATORY):\n"
+                    + anchor_retry_guidance[-12_000:]
+                    + "\nSelect exactly one candidate source block for the rejected "
+                    "old/anchor field. Copy it verbatim, including indentation. "
+                    "Do not shorten, merge, rewrite, or reuse the ambiguous common line. "
+                    "The selected block must be method-local and unique in the live source. "
+                    "If this is the dedicated anchor recovery attempt, returning the common "
+                    "ambiguous line again is a hard failure; use one complete CANDIDATE/ADAY "
+                    "block exactly as provided or return an empty files list."
+                )
             raw = self._request_code_model_json(
                 current_prompt,
                 temperature=0.0 if attempt > 1 else 0.05,
@@ -1503,6 +1545,35 @@ class AssistantEngine:
             payload: object = None
             try:
                 payload = self._validate_own_code_payload_shape(raw)
+
+                # Enforce evidence-bound file scope before anchor repair or
+                # EditManager validation.
+                scope_match = re.search(
+                    r"(?im)^İzinli dosyalar:\s*(.+?)\s*$",
+                    prompt,
+                )
+                if scope_match and isinstance(payload, dict):
+                    allowed_paths = {
+                        row.strip().replace("\\", "/")
+                        for row in scope_match.group(1).split(",")
+                        if row.strip()
+                    }
+                    payload_files = payload.get("files")
+                    if isinstance(payload_files, list):
+                        produced_paths = {
+                            str(row.get("path", "")).strip().replace("\\", "/")
+                            for row in payload_files
+                            if isinstance(row, dict) and str(row.get("path", "")).strip()
+                        }
+                        unexpected_paths = sorted(produced_paths - allowed_paths)
+                        if unexpected_paths:
+                            raise WorkspaceError(
+                                "KANITA BAGLI KAPSAM REDDI: hedef disi dosya: "
+                                + ", ".join(unexpected_paths)
+                                + ". Yalniz izinli dosyalari kullan: "
+                                + ", ".join(sorted(allowed_paths))
+                            )
+
                 if (
                     isinstance(payload, dict)
                     and isinstance(payload.get("files"), list)
@@ -1520,7 +1591,160 @@ class AssistantEngine:
                     )
                     raise _OwnCodeSafeAbstention(message)
                 payload = merge_duplicate_operation_rows(payload)
+
+                # Reject invented replace-style anchors before later repair
+                # stages. This gate never guesses or rewrites an anchor.
+                try:
+                    grounded_root = self.own_project_root()
+                    for grounded_file in payload.get("files", []):
+                        if not isinstance(grounded_file, dict):
+                            continue
+                        grounded_path = str(grounded_file.get("path", "")).strip()
+                        if not grounded_path:
+                            continue
+                        grounded_source_path = grounded_root / grounded_path
+                        if not grounded_source_path.is_file():
+                            continue
+                        grounded_source = grounded_source_path.read_text(
+                            encoding="utf-8"
+                        )
+                        for grounded_index, grounded_operation in enumerate(
+                            grounded_file.get("operations", []),
+                            start=1,
+                        ):
+                            if not isinstance(grounded_operation, dict):
+                                continue
+                            grounded_kind = str(
+                                grounded_operation.get("op", "")
+                            ).strip().casefold()
+                            if grounded_kind == "replace":
+                                grounded_anchor = grounded_operation.get("old")
+                            elif grounded_kind == "replace_method_block":
+                                grounded_anchor = grounded_operation.get("block_test")
+                            else:
+                                continue
+                            if (
+                                not isinstance(grounded_anchor, str)
+                                or not grounded_anchor
+                            ):
+                                continue
+                            if grounded_anchor in grounded_source:
+                                continue
+                            raise WorkspaceError(
+                                "SOURCE GROUNDED ANCHOR REDDI: "
+                                f"{grounded_path} operation {grounded_index}; "
+                                "anchor live source icinde yok. "
+                                "Model anchorini tahmin ederek duzeltme; "
+                                "yalniz live source icindeki exact bir blok kullan."
+                            )
+                except WorkspaceError:
+                    raise
+                except Exception:
+                    pass
                 payload = remove_redundant_noop_replaces(payload)
+                # HELPER BUNDLE NORMALIZER
+                try:
+                    import textwrap as _stage2_textwrap
+
+                    for _bundle_file in payload.get("files", []):
+                        if not isinstance(_bundle_file, dict):
+                            continue
+                        _bundle_operations = _bundle_file.get("operations")
+                        if not isinstance(_bundle_operations, list):
+                            continue
+
+                        _normalized_operations = []
+                        for _bundle_operation in _bundle_operations:
+                            if (
+                                not isinstance(_bundle_operation, dict)
+                                or str(_bundle_operation.get("op", "")).strip().casefold()
+                                != "insert_class_method"
+                            ):
+                                _normalized_operations.append(_bundle_operation)
+                                continue
+
+                            _bundle_content = _bundle_operation.get("content")
+                            if not isinstance(_bundle_content, str):
+                                _normalized_operations.append(_bundle_operation)
+                                continue
+
+                            _dedented_bundle = _stage2_textwrap.dedent(
+                                _bundle_content
+                            ).strip("\n")
+                            try:
+                                _bundle_tree = ast.parse(_dedented_bundle)
+                            except SyntaxError:
+                                _normalized_operations.append(_bundle_operation)
+                                continue
+
+                            _bundle_nodes = list(_bundle_tree.body)
+                            if len(_bundle_nodes) <= 1:
+                                _normalized_operations.append(_bundle_operation)
+                                continue
+                            if not all(
+                                isinstance(_node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                                for _node in _bundle_nodes
+                            ):
+                                _normalized_operations.append(_bundle_operation)
+                                continue
+                            if any(
+                                getattr(_node, "decorator_list", None)
+                                for _node in _bundle_nodes
+                            ):
+                                _normalized_operations.append(_bundle_operation)
+                                continue
+
+                            _bundle_names = [
+                                str(getattr(_node, "name", "")).strip()
+                                for _node in _bundle_nodes
+                            ]
+                            if (
+                                any(not _name for _name in _bundle_names)
+                                or len(set(_bundle_names)) != len(_bundle_names)
+                            ):
+                                _normalized_operations.append(_bundle_operation)
+                                continue
+                            if any(
+                                isinstance(_child, ast.Pass)
+                                for _node in _bundle_nodes
+                                for _child in ast.walk(_node)
+                            ):
+                                _normalized_operations.append(_bundle_operation)
+                                continue
+                            if "todo" in _dedented_bundle.casefold():
+                                _normalized_operations.append(_bundle_operation)
+                                continue
+
+                            _split_operations = []
+                            _split_failed = False
+                            for _node in _bundle_nodes:
+                                _segment = ast.get_source_segment(
+                                    _dedented_bundle,
+                                    _node,
+                                )
+                                if not isinstance(_segment, str) or not _segment.strip():
+                                    _split_failed = True
+                                    break
+                                _indented_segment = "\n".join(
+                                    ("    " + _line) if _line else ""
+                                    for _line in _segment.splitlines()
+                                )
+                                _split_operation = dict(_bundle_operation)
+                                _split_operation["content"] = (
+                                    _indented_segment.rstrip() + "\n"
+                                )
+                                _split_operations.append(_split_operation)
+
+                            if _split_failed:
+                                _normalized_operations.append(_bundle_operation)
+                                continue
+
+                            _normalized_operations.extend(_split_operations)
+
+                        _bundle_file["operations"] = _normalized_operations
+                except Exception:
+                    pass
+
                 payload = qualify_inserted_private_helper_calls(
                     payload,
                     instruction=prompt,
@@ -1595,6 +1819,25 @@ class AssistantEngine:
                 except Exception:
                     pass
 
+                if "KANITA BAGLI KAPSAM REDDI:" in previous_error:
+                    anchor_retry_guidance = ""
+                    helper_shape_retry_guidance = ""
+                    previous_response = ""
+                else:
+                    if not is_anchor_error(previous_error):
+                        anchor_retry_guidance = ""
+                    if not is_helper_shape_error(previous_error):
+                        helper_shape_retry_guidance = ""
+
+                if is_helper_shape_error(previous_error):
+                    previous_response = ""
+                    helper_shape_retry_guidance = (
+                        "HELPER SHAPE RECOVERY CONTRACT: one complete helper method "
+                        "per insert_class_method operation; no bundled defs, no pass, "
+                        "no TODO, no invented state APIs."
+                    )
+                    previous_error += "\n\n" + helper_shape_retry_guidance
+
                 if is_anchor_error(previous_error):
                     previous_response = ""
                     guidance = build_ambiguous_anchor_guidance(
@@ -1611,6 +1854,7 @@ class AssistantEngine:
                         )
 
                     if guidance:
+                        anchor_retry_guidance = guidance
                         previous_error += "\n\n" + guidance
 
                 failures.append(f"deneme {attempt}: {previous_error}")
@@ -1639,9 +1883,9 @@ class AssistantEngine:
                 pass
             return proposal
 
-        detail = " | ".join(failures[-3:]) or "geçerli taslak üretilemedi"
+        detail = " | ".join(failures[-4:]) or "geçerli taslak üretilemedi"
         raise WorkspaceError(
-            f"Kod modeli {attempts} kontrollü denemede güvenli taslak üretemedi. "
+            f"Kod modeli {len(diagnostic_attempts)} kontrollü denemede güvenli taslak üretemedi. "
             f"{detail}"
         )
 
@@ -5153,9 +5397,37 @@ class AssistantEngine:
             override,
             current_source_fingerprint=current_fingerprint,
         )
-        if promoted is finding and override.source_fingerprint != current_fingerprint:
-            store.discard(finding.finding_id)
+        # Keep stale promotion history for source-aware retest lineage.
         return promoted
+
+    def _runtime_finding_for_retest_lifecycle(
+        self,
+        finding: RuntimeFinding,
+    ) -> RuntimeFinding:
+        """Use a persisted promoted target only for source-change retest classification.
+
+        A source edit intentionally invalidates the normal runtime target override.
+        Retest planning still needs the previously evidence-proven target path so it
+        can notice that this exact source changed after the last runtime sample.
+        This helper never reactivates the override for repair or proposal scope.
+        """
+        override = self._runtime_target_override_store().get(
+            finding.finding_id
+        )
+        if (
+            override is None
+            or finding.category != "repeated_slow_operation"
+            or not str(override.source_path or "").strip()
+            or not str(override.symbol or "").strip()
+        ):
+            return finding
+
+        return replace(
+            finding,
+            affected_paths=(override.source_path,),
+            affected_symbols=(override.symbol,),
+            last_seen=(override.evidence_last_seen or finding.last_seen),
+        )
 
     def _find_runtime_finding(self, finding_id: str) -> RuntimeFinding | None:
         key = str(finding_id or "").strip().upper()
@@ -7046,7 +7318,8 @@ class AssistantEngine:
         else:
             self._last_runtime_health_report = runtime_report
             runtime_findings = tuple(
-                runtime_report.findings
+                self._runtime_finding_for_retest_lifecycle(finding)
+                for finding in runtime_report.findings
             )
 
         evidence_report = build_evidence_maintenance_report(
@@ -10256,6 +10529,32 @@ class AssistantEngine:
             return result
         return None
 
+    def _needs_dialogue_intent_interpretation(self, text: str) -> bool:
+        """Use the intent model only when a side-effecting intent is plausible."""
+        if (
+            self.learning_mode
+            or self.program_teaching_mode
+            or self.pending_dialogue_task is not None
+            or self.pending_learning_proposal is not None
+        ):
+            return True
+        normalized = self.command_key(text)
+        tokens = normalized.split()
+        stems = (
+            "ac", "kapat", "calistir", "baslat", "durdur", "sonlandir",
+            "uyku", "sessiz",
+            "ogren", "ogret", "hatirla", "unut", "kaydet",
+            "hafiza", "bellek",
+            "duzelt", "yanlis", "dogrusu",
+            "geri", "bildirim",
+            "uygulama", "program", "komut",
+        )
+        return any(
+            token.startswith(stem)
+            for token in tokens
+            for stem in stems
+        )
+
     def _learn_from_conversation(self, text: str) -> str | None:
         """Model-first conversational learning.  It stores data, never code."""
         record = self.learning_memory.match(text)
@@ -10269,6 +10568,8 @@ class AssistantEngine:
         if explained_behavior is not None:
             return explained_behavior
 
+        if not self._needs_dialogue_intent_interpretation(text):
+            return None
         decision = self.dialogue.interpret(
             text, self.dialogue_active, self.learning_memory.context(), self._dialogue_runtime_context(),
             cancel_check=self._interaction_cancelled,
@@ -11136,12 +11437,32 @@ class AssistantEngine:
         patch_session_command = self._patch_session_command_request(text)
         if patch_session_command is not None:
             return patch_session_command
+
+        # Explicit retest language must outrank the generic RUN/RPR self-repair
+        # handler. Otherwise commands such as "RUN-... yeniden test et" are
+        # consumed as a finding lookup and never reach RetestCommandCoordinator.
+        explicit_retest = any(
+            phrase in normalized
+            for phrase in (
+                "yeniden test",
+                "yeniden dogrula",
+                "tekrar test",
+                "retest",
+            )
+        )
+        if explicit_retest:
+            retest_command = self._retest_command_request(text)
+            if retest_command is not None:
+                return retest_command
+
         reserved_self_repair = self._reserved_self_repair_request(text)
         if reserved_self_repair is not None:
             return reserved_self_repair
-        retest_command = self._retest_command_request(text)
-        if retest_command is not None:
-            return retest_command
+
+        if not explicit_retest:
+            retest_command = self._retest_command_request(text)
+            if retest_command is not None:
+                return retest_command
         research_command = self._research_command_request(text)
         if research_command is not None:
             return research_command
@@ -11341,7 +11662,19 @@ class AssistantEngine:
                 "Önce hedefi ya da RUN bulgu kimliğini belirtmelisin."
             )
 
-        local_model = self._local_model_request(text)
+        with self._runtime_observer(
+            component="AssistantEngine",
+            action="local_model_request",
+            workspace=self.own_project_root(),
+            scope="own_code",
+            source_path="core/assistant.py",
+            symbol="AssistantEngine._local_model_request",
+            metadata={
+                "parent_action": "handle_local_command",
+                "health_excluded": True,
+            },
+        ):
+            local_model = self._local_model_request(text)
         if local_model is not None:
             return local_model
         pronunciation = self._pronunciation_learning_request(text)
@@ -11525,7 +11858,19 @@ class AssistantEngine:
         # Only an utterance which could not be handled locally reaches the
         # conversational model.  This preserves natural, in-conversation
         # learning without making ordinary commands and known replies slow.
-        memory_result = self._learn_from_conversation(text)
+        with self._runtime_observer(
+            component="AssistantEngine",
+            action="learn_from_conversation",
+            workspace=self.own_project_root(),
+            scope="own_code",
+            source_path="core/assistant.py",
+            symbol="AssistantEngine._learn_from_conversation",
+            metadata={
+                "parent_action": "handle_local_command",
+                "health_excluded": True,
+            },
+        ):
+            memory_result = self._learn_from_conversation(text)
         if memory_result is not None:
             return memory_result
 
@@ -11535,12 +11880,24 @@ class AssistantEngine:
         cached_reasoning = self._reasoning_cache
         self._reasoning_cache = None
         decision = cached_reasoning[1] if cached_reasoning and cached_reasoning[0] == text else None
-        if decision is None:
-            decision = self.dialogue.interpret(
-                text, self.dialogue_active, self.learning_memory.context(), self._dialogue_runtime_context(),
-                cancel_check=self._interaction_cancelled,
-                progress_callback=self._interaction_model_progress,
-            )
+        if decision is None and self._needs_dialogue_intent_interpretation(text):
+            with self._runtime_observer(
+                component="AssistantEngine",
+                action="dialogue_interpret",
+                workspace=self.own_project_root(),
+                scope="own_code",
+                source_path="core/assistant.py",
+                symbol="LocalDialogueManager.interpret",
+                metadata={
+                    "parent_action": "handle_local_command",
+                    "health_excluded": True,
+                },
+            ):
+                decision = self.dialogue.interpret(
+                    text, self.dialogue_active, self.learning_memory.context(), self._dialogue_runtime_context(),
+                    cancel_check=self._interaction_cancelled,
+                    progress_callback=self._interaction_model_progress,
+                )
         # General questions and missing-information questions are language
         # only.  Reusing this first result keeps the same decision protocol
         # for every subject while avoiding a second, slow inference.
@@ -11611,14 +11968,26 @@ class AssistantEngine:
 
         # Intent extraction is deliberately strict.  General conversation must
         # still work even when the model did not return the required JSON.
-        response = self.dialogue.respond(
-            text,
-            self.learning_memory.context(),
-            self._dialogue_runtime_context(),
-            project_context=self._conversation_project_context(text),
-            cancel_check=self._interaction_cancelled,
-            progress_callback=self._interaction_model_progress,
-        )
+        with self._runtime_observer(
+            component="AssistantEngine",
+            action="dialogue_respond",
+            workspace=self.own_project_root(),
+            scope="own_code",
+            source_path="core/assistant.py",
+            symbol="LocalDialogueManager.respond",
+            metadata={
+                "parent_action": "handle_local_command",
+                "health_excluded": True,
+            },
+        ):
+            response = self.dialogue.respond(
+                text,
+                self.learning_memory.context(),
+                self._dialogue_runtime_context(),
+                project_context=self._conversation_project_context(text),
+                cancel_check=self._interaction_cancelled,
+                progress_callback=self._interaction_model_progress,
+            )
         if response:
             # Do not mistake a guess for learning. A domain-independent
             # clarification keeps one hands-free reply turn, so a user can
@@ -11784,7 +12153,19 @@ class AssistantEngine:
                 self.self_awareness.mark_user_activity()
                 if runtime is not None:
                     runtime.raise_if_cancelled(turn_id)
-                answer = self.handle_local_command(raw_text)
+                with self._runtime_observer(
+                    component="AssistantEngine",
+                    action="handle_local_command",
+                    workspace=observer_root,
+                    scope="own_code",
+                    source_path="core/assistant.py",
+                    symbol="AssistantEngine.handle_local_command",
+                    metadata={
+                        "parent_action": "handle_command",
+                        "health_excluded": True,
+                    },
+                ):
+                    answer = self.handle_local_command(raw_text)
                 if runtime is not None:
                     runtime.raise_if_cancelled(turn_id)
                 if answer in {
@@ -11805,10 +12186,34 @@ class AssistantEngine:
                     )
                     self._skip_dialogue_memory_once = False
                     if not skip_memory:
-                        self.dialogue.remember(raw_text, answer)
-                    suggestion = self.proactive_advisor.suggestion(
-                        self.command_router.behavior, raw_text
-                    )
+                        with self._runtime_observer(
+                            component="AssistantEngine",
+                            action="dialogue_remember",
+                            workspace=observer_root,
+                            scope="own_code",
+                            source_path="core/assistant.py",
+                            symbol="AssistantEngine.handle",
+                            metadata={
+                                "parent_action": "handle_command",
+                                "health_excluded": True,
+                            },
+                        ):
+                            self.dialogue.remember(raw_text, answer)
+                    with self._runtime_observer(
+                        component="AssistantEngine",
+                        action="proactive_suggestion",
+                        workspace=observer_root,
+                        scope="own_code",
+                        source_path="core/assistant.py",
+                        symbol="AssistantEngine.handle",
+                        metadata={
+                            "parent_action": "handle_command",
+                            "health_excluded": True,
+                        },
+                    ):
+                        suggestion = self.proactive_advisor.suggestion(
+                            self.command_router.behavior, raw_text
+                        )
                     final_answer = (
                         f"{answer}\n\nÖneri: {suggestion}" if suggestion else answer
                     )
@@ -11819,13 +12224,38 @@ class AssistantEngine:
             # Maintenance findings are operational notifications, not part of
             # the conversational answer. Keep them pending for the GUI/log layer
             # so they never enter the response packet or TTS text.
-            maintenance_note = self._automatic_maintenance_note()
+            with self._runtime_observer(
+                component="AssistantEngine",
+                action="automatic_maintenance_note",
+                workspace=observer_root,
+                scope="own_code",
+                source_path="core/assistant.py",
+                symbol="AssistantEngine.handle",
+                metadata={
+                    "parent_action": "handle_command",
+                    "health_excluded": True,
+                },
+            ):
+                maintenance_note = self._automatic_maintenance_note()
             self._pending_maintenance_notice = maintenance_note or ""
             if runtime is not None:
                 runtime.raise_if_cancelled(turn_id)
+                with self._runtime_observer(
+                    component="AssistantEngine",
+                    action="spoken_response",
+                    workspace=observer_root,
+                    scope="own_code",
+                    source_path="core/assistant.py",
+                    symbol="AssistantEngine.spoken_response",
+                    metadata={
+                        "parent_action": "handle_command",
+                        "health_excluded": True,
+                    },
+                ):
+                    spoken_answer = self.spoken_response(final_answer)
                 runtime.response_ready(
                     final_answer,
-                    self.spoken_response(final_answer),
+                    spoken_answer,
                     turn_id=turn_id,
                 )
             return final_answer

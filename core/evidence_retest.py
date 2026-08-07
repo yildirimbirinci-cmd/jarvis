@@ -27,6 +27,7 @@ class RetestItem:
     symbol: str
     status: str
     finding_titles: tuple[str, ...] = ()
+    finding_ids: tuple[str, ...] = ()
     primary_test_paths: tuple[str, ...] = ()
     supporting_test_paths: tuple[str, ...] = ()
     test_paths: tuple[str, ...] = ()
@@ -449,6 +450,13 @@ def build_retest_plan(
                 for finding in rows
             )
         )
+        finding_ids = tuple(
+            dict.fromkeys(
+                finding.finding_id
+                for finding in rows
+                if str(finding.finding_id or "").strip()
+            )
+        )
 
         if _hardware_blocked(rows):
             items.append(
@@ -458,6 +466,7 @@ def build_retest_plan(
                     symbol=representative.symbol,
                     status=BLOCKED,
                     finding_titles=titles,
+                    finding_ids=finding_ids,
                     reason=(
                         "Fiziksel ses aygiti veya kullanici "
                         "dogrulamasi gerekiyor."
@@ -479,6 +488,7 @@ def build_retest_plan(
                     symbol=representative.symbol,
                     status=NO_TEST_FOUND,
                     finding_titles=titles,
+                    finding_ids=finding_ids,
                     reason=(
                         "Dosya ve sembolle guclu bicimde "
                         "eslesen otomatik regresyon testi bulunamadi."
@@ -517,6 +527,7 @@ def build_retest_plan(
                 symbol=representative.symbol,
                 status=AUTOMATED,
                 finding_titles=titles,
+                    finding_ids=finding_ids,
                 primary_test_paths=primary_paths,
                 supporting_test_paths=supporting_paths,
                 test_paths=test_paths,

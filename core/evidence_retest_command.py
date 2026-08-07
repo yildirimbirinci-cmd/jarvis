@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import unicodedata
 from pathlib import Path
 from typing import Callable
@@ -54,8 +55,19 @@ def _normalized(text: str) -> str:
     return " ".join(value.split())
 
 
+def _requested_finding_id(text: str) -> str:
+    match = re.search(r"\bRUN-[A-Z0-9]+\b", str(text or ""), re.IGNORECASE)
+    return match.group(0).upper() if match else ""
+
+
 def is_retest_start_request(text: str) -> bool:
-    return _normalized(text) in _START_REQUESTS
+    normalized = _normalized(text)
+    if normalized in _START_REQUESTS:
+        return True
+    finding_id = _requested_finding_id(text)
+    if not finding_id:
+        return False
+    return any(phrase in normalized for phrase in ("yeniden test", "yeniden dogrula", "tekrar test", "retest"))
 
 
 def _item_from_session(
@@ -204,6 +216,17 @@ class RetestCommandCoordinator:
             None,
         )
 
+    def _automated_for_request(
+        self,
+        plan: RetestPlan,
+        finding_id: str,
+    ) -> RetestItem | None:
+        if not finding_id:
+            return self._first_automated(plan)
+        completed_ids = self._completed_ids()
+        target = finding_id.casefold()
+        return next((item for item in plan.items if (item.status == AUTOMATED and approval_id_for_item(item) not in completed_ids and target in {str(value or "").casefold() for value in item.finding_ids})), None)
+
     def handle(
         self,
         text: str,
@@ -318,14 +341,13 @@ class RetestCommandCoordinator:
             return render_pending_session(session)
 
         plan = self.plan_provider()
-        item = self._first_automated(plan)
+        finding_id = _requested_finding_id(text)
+        item = self._automated_for_request(plan, finding_id)
 
         if item is None:
-            return (
-                "Otomatik primary yeniden teste uygun "
-                "bekleyen bir bulgu bulunamadi. "
-                "Hicbir test calistirilmadi."
-            )
+            if finding_id:
+                return (f"{finding_id} icin mevcut kaynak surumunde otomatik primary yeniden teste uygun bekleyen bir plan bulunamadi. Hicbir test calistirilmadi.")
+            return ("Otomatik primary yeniden teste uygun bekleyen bir bulgu bulunamadi. Hicbir test calistirilmadi.")
 
         created = RetestApprovalSession.create(
             item

@@ -104,9 +104,17 @@ class SourceLifecycleResolver:
             return None
 
         if normalized not in self._cache:
+            git_change = self._latest_git_change(normalized)
+            file_change = self._latest_file_change(normalized)
+            candidates = [
+                value
+                for value in (git_change, file_change)
+                if value is not None
+            ]
             self._cache[normalized] = (
-                self._latest_git_change(normalized)
-                or self._latest_file_change(normalized)
+                max(candidates)
+                if candidates
+                else None
             )
 
         return self._cache[normalized]

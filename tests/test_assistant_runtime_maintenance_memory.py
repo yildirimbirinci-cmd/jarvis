@@ -192,11 +192,17 @@ def test_handle_records_failure_with_source_and_symbol(tmp_path: Path) -> None:
         engine.handle("test command")
 
     events = engine.runtime_events.load()
-    assert len(events) == 1
-    assert events[0].status == "failed"
-    assert events[0].source_path == "core/assistant.py"
-    assert events[0].symbol == "AssistantEngine.handle"
-    assert events[0].metadata == {
+    aggregate_events = [
+        event
+        for event in events
+        if event.metadata.get("aggregate_operation") is True
+    ]
+    assert len(aggregate_events) == 1
+    event = aggregate_events[0]
+    assert event.status == "failed"
+    assert event.source_path == "core/assistant.py"
+    assert event.symbol == "AssistantEngine.handle"
+    assert event.metadata == {
         "input_chars": 12,
         "aggregate_operation": True,
         "health_excluded": True,

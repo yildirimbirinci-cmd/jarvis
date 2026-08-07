@@ -237,7 +237,7 @@ def test_all_raw_ollama_attempts_are_preserved_for_diagnosis(
     payload = json.loads(log_path.read_text(encoding="utf-8"))
 
     assert payload["schema_version"] == 1
-    assert payload["attempt_limit"] == 3
+    assert payload["attempt_limit"] == 4
     assert [row["attempt"] for row in payload["attempts"]] == [1, 2, 3]
     assert [row["raw_model_response"] for row in payload["attempts"]] == [
         first,
@@ -387,7 +387,8 @@ def test_duplicate_missing_anchor_changes_next_retry_prompt(tmp_path) -> None:
     assert len(prompts) == 3
     assert prompts[1] != prompts[2]
     assert "aynısını tekrar üretti" in prompts[2]
-    assert "aynı old/anchor değerlerini yeniden kullanma" in prompts[2]
+    assert "\u00d6NCEK\u0130 TASLAK REDDED\u0130LD\u0130. DO\u011eRULAYICI RAPORU:" in prompts[2]
+    assert "ÖNCEKİ TASLAK REDDEDİLDİ. DOĞRULAYICI RAPORU:" in prompts[2]
 
 
 def test_duplicate_after_noop_keeps_actionable_validator_error(tmp_path) -> None:
