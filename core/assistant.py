@@ -139,7 +139,6 @@ from artmach_assistant.core.own_code_worktree import OwnCodeWorktreeValidator
 from artmach_assistant.core.own_code_pending_proposal_store import OwnCodePendingProposalStore
 from artmach_assistant.core.own_code_validation_state import OwnCodeValidationStateStore
 from artmach_assistant.core.own_code_worktree_recovery import OwnCodeWorktreeRecovery
-from artmach_assistant.core.own_code_apply_recovery import OwnCodeApplyRecoveryStore
 from artmach_assistant.core.own_code_readiness import assess_readiness
 from artmach_assistant.core.conversation_runtime import ConversationRuntime
 from artmach_assistant.core.refactoring_transaction_history import (
@@ -3382,14 +3381,6 @@ class AssistantEngine:
             self._own_code_validation_state_store().clear()
         except Exception:
             pass
-        if isinstance(approved_proposal, EditProposal):
-            try:
-                self._own_code_apply_recovery_store().save_prepared(
-                    approved_proposal,
-                    proposal_fingerprint(approved_proposal),
-                )
-            except Exception as exc:
-                return f"Apply recovery state kaydedilemedi; canlı kaynak değiştirilmedi: {exc}"
         self._save_own_code_cycle(
             "applying",
             "Onaylı değişiklik checkpoint ile uygulanıyor.",
@@ -3405,20 +3396,6 @@ class AssistantEngine:
                 failures=sorted(baseline_failures),
             )
             return f"Kod değişikliği uygulanmadı: {exc}"
-        if isinstance(approved_proposal, EditProposal):
-            try:
-                self._own_code_apply_recovery_store().mark_phase("applied")
-            except Exception as exc:
-                self._save_own_code_cycle(
-                    "recovery_required",
-                    f"Apply tamamlandi ancak recovery state guncellenemedi: {exc}",
-                    failures=sorted(baseline_failures),
-                    changed_paths=cycle_paths,
-                )
-                return (
-                    "Kod degisikligi yazildi ancak restart-safe apply kaydi "
-                    f"guncellenemedi. Yeni islem engellendi: {exc}"
-                )
         rollback_paths = (
             tuple(
                 str(change.path)
@@ -3450,7 +3427,6 @@ class AssistantEngine:
             if mismatches:
                 try:
                     rollback = self.own_code_transactions.undo()
-                    self._own_code_apply_recovery_store().clear()
                 except Exception as rollback_error:
                     return (
                         "Kod değişikliği yazıldı olarak raporlandı ancak hedef dosya "
@@ -3473,17 +3449,6 @@ class AssistantEngine:
                     f"başarısız oldu; değişiklik geri alındı. {rollback}. "
                     f"Dosyalar: {', '.join(mismatches)}"
                 )
-        if isinstance(approved_proposal, EditProposal):
-            try:
-                self._own_code_apply_recovery_store().mark_phase("validating")
-            except Exception as exc:
-                self._save_own_code_cycle(
-                    "recovery_required",
-                    f"Post-apply validation state kaydedilemedi: {exc}",
-                    failures=sorted(baseline_failures),
-                    changed_paths=cycle_paths,
-                )
-                return f"Post-apply validation guvenli bicimde baslatilamadi: {exc}"
         self._save_own_code_cycle(
             "validating",
             "Uygulanan değişiklik derleniyor ve regresyon testleri çalıştırılıyor.",
@@ -3494,7 +3459,6 @@ class AssistantEngine:
         if not compile_ok:
             try:
                 rollback = self.own_code_transactions.undo()
-                self._own_code_apply_recovery_store().clear()
             except Exception as rollback_error:
                 self._save_own_validation(False, compile_output)
                 self.own_code_history.record(
@@ -3529,7 +3493,6 @@ class AssistantEngine:
         if not runtime_ok:
             try:
                 rollback = self.own_code_transactions.undo()
-                self._own_code_apply_recovery_store().clear()
             except Exception as rollback_error:
                 self._save_own_validation(False, runtime_output)
                 return (
@@ -3574,7 +3537,6 @@ class AssistantEngine:
         if new_failures or unverifiable_failure:
             try:
                 rollback = self.own_code_transactions.undo()
-                self._own_code_apply_recovery_store().clear()
             except Exception as rollback_error:
                 self._save_own_validation(False, test_output)
                 return (
@@ -3609,7 +3571,6 @@ class AssistantEngine:
         if "Kayıtlı kod değişikliği sürümü yok" in version_report:
             try:
                 rollback = self.own_code_transactions.undo()
-                self._own_code_apply_recovery_store().clear()
             except Exception as rollback_error:
                 self._save_own_validation(False, str(rollback_error))
                 return (
@@ -3650,10 +3611,6 @@ class AssistantEngine:
             if isinstance(approved_proposal, EditProposal)
             else ()
         )
-        try:
-            self._own_code_apply_recovery_store().clear()
-        except Exception:
-            pass
         self._save_own_code_cycle(
             "completed",
             "Değişiklik uygulandı; derleme ve regresyon karşılaştırması tamamlandı.",
@@ -3924,11 +3881,6 @@ class AssistantEngine:
             Path(self.own_project_root()) / ".jarvis" / "own_code_validation_state.json"
         )
 
-    def _own_code_apply_recovery_store(self) -> OwnCodeApplyRecoveryStore:
-        return OwnCodeApplyRecoveryStore(
-            Path(self.own_project_root()) / ".jarvis" / "own_code_apply_recovery.json"
-        )
-
     def _restore_restart_safe_pending_proposal(self) -> tuple[bool, str]:
         pending = getattr(getattr(self, "editor", None), "pending", None)
         if pending is not None:
@@ -3973,22 +3925,6 @@ class AssistantEngine:
             except Exception:
                 pass
             return False, "Restart-safe validation state fingerprint does not match pending proposal."
-        proposal_paths = tuple(
-            str(change.path).strip().replace("\\", "/")
-            for change in proposal.files
-            if str(change.path).strip()
-        )
-        state_paths = tuple(
-            str(path).strip().replace("\\", "/")
-            for path in state.changed_paths
-            if str(path).strip()
-        )
-        if state_paths and state_paths != proposal_paths:
-            try:
-                store.clear()
-            except Exception:
-                pass
-            return False, "Restart-safe validation paths do not match pending proposal."
         if state.phase not in {"validating", "revalidating", "revalidated"}:
             try:
                 store.clear()
@@ -4030,26 +3966,9 @@ class AssistantEngine:
                 else " No stale Jarvis worktree required cleanup."
             )
             if cleanup.warnings:
-                warning_detail = (
-                    "Restart-safe worktree cleanup was incomplete; resume is blocked: "
-                    + ", ".join(cleanup.warnings[:3])
-                )
-                self._save_own_code_cycle(
-                    "recovery_required",
-                    warning_detail,
-                    changed_paths=[str(change.path) for change in proposal.files],
-                    validation_summary=warning_detail,
-                )
-                return self.own_code_cycle_report()
+                cleanup_detail += f" Cleanup warnings: {len(cleanup.warnings)}."
         except Exception as exc:
-            warning_detail = f"Restart-safe worktree cleanup failed; resume is blocked: {exc}"
-            self._save_own_code_cycle(
-                "recovery_required",
-                warning_detail,
-                changed_paths=[str(change.path) for change in proposal.files],
-                validation_summary=warning_detail,
-            )
-            return self.own_code_cycle_report()
+            cleanup_detail = f" Worktree cleanup could not be completed: {exc}."
         baseline_success, baseline_output = self._run_own_tests()
         baseline_failures = self._test_failure_ids(baseline_output)
         changed_paths = tuple(
@@ -4201,26 +4120,6 @@ class AssistantEngine:
         cycle: dict[str, object],
     ) -> tuple[bool, str]:
         root = Path(self.own_project_root())
-        try:
-            apply_inspection = self._own_code_apply_recovery_store().inspect(root)
-        except Exception as exc:
-            return False, f"Apply recovery state okunamadi; fail-closed: {exc}"
-        if apply_inspection.disposition == "baseline":
-            try:
-                self._own_code_apply_recovery_store().clear()
-            except Exception as exc:
-                return False, f"Baseline apply recovery state temizlenemedi: {exc}"
-        elif apply_inspection.disposition == "applied":
-            return False, (
-                "Yarim apply hedeflerinin tamami proposed content ile eslesiyor; "
-                "otomatik recovered sayilmadi. Post-apply revalidation gereklidir. "
-                + apply_inspection.detail
-            )
-        elif apply_inspection.disposition in {"partial", "diverged", "corrupt"}:
-            return False, (
-                "Yarim apply kaynak durumu guvenli baseline degil; rollback veya "
-                "manuel recovery gereklidir. " + apply_inspection.detail
-            )
         changed_paths = tuple(
             str(item).strip()
             for item in (cycle.get("changed_paths", []) or [])
