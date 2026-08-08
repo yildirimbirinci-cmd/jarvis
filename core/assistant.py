@@ -3550,7 +3550,7 @@ class AssistantEngine:
         command = [sys.executable, "-m", "pytest", "-q", str(tests)]
         try:
             completed = subprocess.run(
-                command, cwd=str(root.parent), capture_output=True, text=True,
+                command, cwd=str(root), capture_output=True, text=True,
                 encoding="utf-8", errors="replace", timeout=300,
             )
             output = (completed.stdout + "\n" + completed.stderr).strip()
