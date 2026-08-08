@@ -4024,6 +4024,7 @@ class AssistantEngine:
         previous_process_state = (
             cycle_owner_pid <= 0 or cycle_owner_pid != os.getpid()
         )
+        just_marked_recovery_required = False
         if previous_process_state and stage == "isolated_validation":
             self._save_own_code_cycle(
                 "interrupted_validation",
@@ -4062,8 +4063,9 @@ class AssistantEngine:
             cycle = self._load_own_code_cycle() or cycle
             stage = str(cycle.get("stage", "recovery_required"))
             detail = str(cycle.get("detail", "")).strip()
+            just_marked_recovery_required = True
 
-        if stage == "recovery_required":
+        if stage == "recovery_required" and not just_marked_recovery_required:
             recovery_ok, recovery_detail = (
                 self._verify_interrupted_engineering_recovery(cycle)
             )
