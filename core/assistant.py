@@ -5639,12 +5639,9 @@ class AssistantEngine:
         self,
         finding: RuntimeFinding,
     ):
-        """Revalidate a timing-proven wrong wrapper target before final policy gating.
+        """Revalidate persisted runtime target promotion after restart.
 
-        Source changes intentionally invalidate persisted target overrides. When fresh
-        stage timing still proves the wrapper is not the bottleneck, rebuild the
-        evidence-based action target from local runtime events, persist it for the
-        current source fingerprint, reload the finding, and then reassess policy.
+        A persisted override is never applied directly when stale. The promoted target is accepted only after the current source fingerprint and fresh runtime evidence confirm that the wrapper remains the wrong repair target.
         """
         decision = assess_autonomous_runtime_repair(finding)
         if str(getattr(decision, "status", "") or "") != "BLOCKED_WRONG_TARGET":
