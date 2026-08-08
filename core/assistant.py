@@ -3319,6 +3319,15 @@ class AssistantEngine:
                 failures=sorted(baseline_failures),
             )
             return f"Kod değişikliği uygulanmadı: {exc}"
+        rollback_paths = (
+            tuple(
+                str(change.path)
+                for change in approved_proposal.files
+                if str(change.path).strip()
+            )
+            if isinstance(approved_proposal, EditProposal)
+            else ()
+        )
         if isinstance(approved_proposal, EditProposal):
             mismatches: list[str] = []
             for change in approved_proposal.files:
@@ -3351,6 +3360,12 @@ class AssistantEngine:
                     "rolled_back",
                     "Yazma sonrası SHA-256 doğrulaması başarısız oldu.",
                     failures=sorted(baseline_failures),
+                    changed_paths=rollback_paths,
+                    validation_summary=(
+                        "Yazma sonrası SHA-256 doğrulaması başarısız oldu; "
+                        "değişiklik otomatik geri alındı."
+                    ),
+                    version_summary=str(rollback)[:3000],
                 )
                 return (
                     "Kod değişikliği uygulanmadı: yazma sonrası SHA-256 doğrulaması "
@@ -3385,6 +3400,12 @@ class AssistantEngine:
             self._save_own_code_cycle(
                 "rolled_back", compile_output[-1200:],
                 failures=sorted(baseline_failures),
+                changed_paths=rollback_paths,
+                validation_summary=(
+                    "Derleme doğrulaması başarısız oldu; değişiklik "
+                    "otomatik geri alındı."
+                ),
+                version_summary=str(rollback)[:3000],
             )
             return (
                 "Değişiklik derleme doğrulamasından geçmediği için otomatik olarak geri alındı. "
@@ -3409,6 +3430,12 @@ class AssistantEngine:
             self._save_own_code_cycle(
                 "rolled_back", runtime_output[-1200:],
                 failures=sorted(baseline_failures),
+                changed_paths=rollback_paths,
+                validation_summary=(
+                    "Temiz süreç başlatılabilirlik kontrolü başarısız oldu; "
+                    "değişiklik otomatik geri alındı."
+                ),
+                version_summary=str(rollback)[:3000],
             )
             return (
                 "Değişiklik Jarvis'in temiz bir süreçte başlatılmasını bozduğu için "
@@ -3451,6 +3478,12 @@ class AssistantEngine:
             self._save_own_code_cycle(
                 "rolled_back", failure_summary,
                 failures=sorted(current_failures),
+                changed_paths=rollback_paths,
+                validation_summary=(
+                    "Yeni regresyon algılandı; değişiklik otomatik geri alındı "
+                    "ve önceki doğrulanmış kaynak geri yüklendi."
+                ),
+                version_summary=str(rollback)[:3000],
             )
             return (
                 "Değişiklik yeni bir test hatası oluşturduğu için otomatik olarak geri alındı. "
@@ -3472,6 +3505,12 @@ class AssistantEngine:
                 "rolled_back",
                 "Doğrulanabilir sürüm kaydı oluşmadığı için değişiklik geri alındı.",
                 failures=sorted(current_failures),
+                changed_paths=rollback_paths,
+                validation_summary=(
+                    "Doğrulanabilir sürüm kaydı oluşmadı; değişiklik "
+                    "güvenlik amacıyla otomatik geri alındı."
+                ),
+                version_summary=str(rollback)[:3000],
             )
             return (
                 "Doğrulanabilir kod sürümü oluşmadığı için değişiklik güvenlik "
