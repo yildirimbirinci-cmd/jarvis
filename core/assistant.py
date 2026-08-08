@@ -136,6 +136,9 @@ from artmach_assistant.core.own_code_test_cache import (
     source_tree_fingerprint,
 )
 from artmach_assistant.core.own_code_worktree import OwnCodeWorktreeValidator
+from artmach_assistant.core.own_code_pending_proposal_store import OwnCodePendingProposalStore
+from artmach_assistant.core.own_code_validation_state import OwnCodeValidationStateStore
+from artmach_assistant.core.own_code_worktree_recovery import OwnCodeWorktreeRecovery
 from artmach_assistant.core.own_code_readiness import assess_readiness
 from artmach_assistant.core.conversation_runtime import ConversationRuntime
 from artmach_assistant.core.refactoring_transaction_history import (
@@ -3205,6 +3208,17 @@ class AssistantEngine:
         )
         risk = assess_own_code_proposal(proposal)
         self._pending_own_code_fingerprint = proposal_fingerprint(proposal)
+        try:
+            self._own_code_pending_proposal_store().save(
+                proposal, self._pending_own_code_fingerprint
+            )
+        except Exception as exc:
+            self.editor.reject()
+            self._pending_own_code_fingerprint = None
+            return (
+                "Taslak hazırlandı ancak restart-safe pending proposal kaydı "
+                f"oluşturulamadı: {exc}. Hiçbir dosya değiştirilmedi."
+            )
         approval_id = short_fingerprint(proposal)
         self.own_code_history.record(
             "değişiklik taslağı onay kimliği oluşturuldu",
@@ -3320,6 +3334,15 @@ class AssistantEngine:
                 changed_paths=cycle_paths,
             )
             try:
+                self._own_code_validation_state_store().save(
+                    phase="validating",
+                    proposal_fingerprint=proposal_fingerprint(approved_proposal),
+                    baseline_failures=sorted(baseline_failures),
+                    changed_paths=cycle_paths,
+                )
+            except Exception as exc:
+                return f"Worktree validation state kaydedilemedi: {exc}"
+            try:
                 isolated = OwnCodeWorktreeValidator(
                     self.own_project_root()
                 ).validate(
@@ -3354,6 +3377,10 @@ class AssistantEngine:
                     "worktree doğrulamasından geçmedi. Hata özeti: "
                     + isolated.output[-900:]
                 )
+        try:
+            self._own_code_validation_state_store().clear()
+        except Exception:
+            pass
         self._save_own_code_cycle(
             "applying",
             "Onaylı değişiklik checkpoint ile uygulanıyor.",
@@ -3844,6 +3871,175 @@ class AssistantEngine:
         )
         return result
 
+    def _own_code_pending_proposal_store(self) -> OwnCodePendingProposalStore:
+        return OwnCodePendingProposalStore(
+            Path(self.own_project_root()) / ".jarvis" / "own_code_pending_proposal.json"
+        )
+
+    def _own_code_validation_state_store(self) -> OwnCodeValidationStateStore:
+        return OwnCodeValidationStateStore(
+            Path(self.own_project_root()) / ".jarvis" / "own_code_validation_state.json"
+        )
+
+    def _restore_restart_safe_pending_proposal(self) -> tuple[bool, str]:
+        pending = getattr(getattr(self, "editor", None), "pending", None)
+        if pending is not None:
+            return True, "Pending proposal already available in memory."
+        try:
+            restored = self._own_code_pending_proposal_store().load(self.own_project_root())
+        except Exception as exc:
+            try:
+                self._own_code_pending_proposal_store().clear()
+            except Exception:
+                pass
+            return False, f"Restart-safe pending proposal could not be restored: {exc}"
+        if restored is None:
+            return False, "No restart-safe pending proposal is stored."
+        actual = proposal_fingerprint(restored.proposal)
+        if actual != restored.fingerprint:
+            try:
+                self._own_code_pending_proposal_store().clear()
+            except Exception:
+                pass
+            return False, "Restart-safe pending proposal fingerprint mismatch."
+        self.editor.pending = restored.proposal
+        self._pending_own_code_fingerprint = restored.fingerprint
+        return True, "Restart-safe pending proposal restored and source baseline verified."
+
+    def _validate_restart_safe_resume_state(self, proposal: EditProposal) -> tuple[bool, str]:
+        fingerprint = proposal_fingerprint(proposal)
+        store = self._own_code_validation_state_store()
+        try:
+            state = store.load()
+        except Exception as exc:
+            try:
+                store.clear()
+            except Exception:
+                pass
+            return False, f"Restart-safe validation state could not be read: {exc}"
+        if state is None:
+            return True, "No interrupted validation state exists; revalidation will start from scratch."
+        if state.proposal_fingerprint != fingerprint:
+            try:
+                store.clear()
+            except Exception:
+                pass
+            return False, "Restart-safe validation state fingerprint does not match pending proposal."
+        if state.phase not in {"validating", "revalidating", "revalidated"}:
+            try:
+                store.clear()
+            except Exception:
+                pass
+            return False, f"Unsupported restart-safe validation phase: {state.phase}"
+        return True, f"Restart-safe validation state accepted: {state.phase}."
+
+    def _revalidate_restored_pending_proposal(self) -> str:
+        restored, detail = self._restore_restart_safe_pending_proposal()
+        if not restored or self.editor.pending is None:
+            self._save_own_code_cycle(
+                "stale",
+                detail,
+                validation_summary=detail,
+            )
+            return self.own_code_cycle_report()
+        proposal = self.editor.pending
+        resume_ok, resume_detail = self._validate_restart_safe_resume_state(proposal)
+        if not resume_ok:
+            self.editor.reject()
+            self._pending_own_code_fingerprint = None
+            try:
+                self._own_code_pending_proposal_store().clear()
+            except Exception:
+                pass
+            self._save_own_code_cycle(
+                "stale",
+                resume_detail,
+                changed_paths=[str(change.path) for change in proposal.files],
+                validation_summary=resume_detail,
+            )
+            return self.own_code_cycle_report()
+        try:
+            cleanup = OwnCodeWorktreeRecovery(self.own_project_root()).cleanup_orphans()
+            cleanup_detail = (
+                f" Removed {len(cleanup.removed)} stale Jarvis worktree(s)."
+                if cleanup.removed
+                else " No stale Jarvis worktree required cleanup."
+            )
+            if cleanup.warnings:
+                cleanup_detail += f" Cleanup warnings: {len(cleanup.warnings)}."
+        except Exception as exc:
+            cleanup_detail = f" Worktree cleanup could not be completed: {exc}."
+        baseline_success, baseline_output = self._run_own_tests()
+        baseline_failures = self._test_failure_ids(baseline_output)
+        changed_paths = tuple(
+            str(change.path) for change in proposal.files if str(change.path).strip()
+        )
+        fingerprint = proposal_fingerprint(proposal)
+        state_store = self._own_code_validation_state_store()
+        state_store.save(
+            phase="revalidating",
+            proposal_fingerprint=fingerprint,
+            baseline_failures=sorted(baseline_failures),
+            changed_paths=changed_paths,
+        )
+        self._save_own_code_cycle(
+            "isolated_validation",
+            "Restart sonrası restore edilen taslak yeni worktree içinde yeniden doğrulanıyor."
+            + cleanup_detail,
+            failures=sorted(baseline_failures),
+            changed_paths=changed_paths,
+        )
+        try:
+            isolated = OwnCodeWorktreeValidator(self.own_project_root()).validate(
+                proposal,
+                lambda root: self._validate_own_code_at_root(
+                    root, baseline_failures=baseline_failures
+                ),
+            )
+        except Exception as exc:
+            self.editor.reject()
+            self._pending_own_code_fingerprint = None
+            self._own_code_pending_proposal_store().clear()
+            state_store.clear()
+            self._save_own_code_cycle(
+                "proposal_failed",
+                f"Restart sonrası worktree yeniden doğrulaması başlatılamadı: {exc}",
+                failures=sorted(baseline_failures),
+                changed_paths=changed_paths,
+                validation_summary=str(exc)[:2000],
+            )
+            return self.own_code_cycle_report()
+        if not isolated.ok:
+            self.editor.reject()
+            self._pending_own_code_fingerprint = None
+            self._own_code_pending_proposal_store().clear()
+            state_store.clear()
+            self._save_own_code_cycle(
+                "proposal_failed",
+                "Restart sonrası worktree yeniden doğrulaması başarısız.",
+                failures=sorted(baseline_failures),
+                changed_paths=changed_paths,
+                validation_summary=isolated.output[-2000:],
+            )
+            return self.own_code_cycle_report()
+        state_store.save(
+            phase="revalidated",
+            proposal_fingerprint=fingerprint,
+            baseline_failures=sorted(baseline_failures),
+            changed_paths=changed_paths,
+        )
+        self._save_own_code_cycle(
+            "proposal_ready",
+            "Restart sonrası pending proposal restore edildi ve yeni worktree doğrulamasından geçti; yeni açık onay bekleniyor.",
+            failures=sorted(baseline_failures),
+            changed_paths=changed_paths,
+            validation_summary=(
+                "Restart-safe proposal source/fingerprint doğrulaması ve worktree testi başarılı. "
+                "Canlı apply otomatik başlatılmadı; yeni açık onay gerekli."
+            ),
+        )
+        return self.own_code_cycle_report()
+
     @staticmethod
     def _save_own_code_cycle(
         stage: str,
@@ -4015,11 +4211,20 @@ class AssistantEngine:
             stage = str(cycle.get("stage", "stale"))
             detail = str(cycle.get("detail", "")).strip()
         elif stage == "proposal_ready" and pending is None:
-            detail = (
-                "Önceki taslağın durumu kaydedilmiş, ancak güvenlik nedeniyle "
-                "dosya içeriği yeniden başlatmalar arasında bellekte tutulmamış. "
-                "Taslak yeniden hazırlanmalı ve yeni onay kimliğiyle onaylanmalı."
-            )
+            restored, restore_detail = self._restore_restart_safe_pending_proposal()
+            pending = getattr(getattr(self, "editor", None), "pending", None)
+            detail = restore_detail
+            if not restored:
+                self._save_own_code_cycle(
+                    "stale",
+                    restore_detail,
+                    failures=list(cycle.get("failures", []) or []),
+                    attempt=self._cycle_attempt(cycle),
+                    changed_paths=list(cycle.get("changed_paths", []) or []),
+                    validation_summary=restore_detail,
+                )
+                cycle = self._load_own_code_cycle() or cycle
+                stage = str(cycle.get("stage", "stale"))
         cycle_owner_pid = int(cycle.get("owner_pid", 0) or 0)
         previous_process_state = (
             cycle_owner_pid <= 0 or cycle_owner_pid != os.getpid()
@@ -4152,12 +4357,8 @@ class AssistantEngine:
             )
         if stage == "recovery_required":
             return self.own_code_cycle_report()
-        if stage == "proposal_ready":
-            return (
-                "Önceki onarım taslağı yeniden başlatma sırasında bellekte tutulmadı. "
-                "Kayıtlı hata sonucundan güvenli taslağı yeniden hazırlıyorum. "
-                + self.prepare_own_code_repair_proposal()
-            )
+        if stage in {"proposal_ready", "interrupted_validation"}:
+            return self._revalidate_restored_pending_proposal()
         if stage in {"analyzing", "proposal_failed", "rolled_back", "validating", "applying"}:
             if self.has_own_code_authority():
                 return self.repair_own_code_with_authority()
