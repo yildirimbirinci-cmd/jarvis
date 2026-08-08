@@ -54,6 +54,10 @@ _STRICT_READ_ONLY_PHRASES = (
     "sadece kontrol et", "yalnizca kontrol et", "hicbir plan hazirlama",
     "patch hazirlama", "taslak hazirlama", "oneride bulunma",
     "gelistirm yapmiyoruz", "gelistirme yapmiyoruz",
+    "hicbir kodu degistirme", "hicbir kod degistirme",
+    "yalnizca mevcut kayitli durumu goster",
+    "yalnizca mevcut durumu goster",
+    "yeni plan", "yeni proposal", "yeni patch",
 )
 
 _NEGATED_CHANGE_PHRASES = (

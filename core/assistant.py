@@ -8153,8 +8153,148 @@ class AssistantEngine:
         except Exception:
             return
 
+    def _authoritative_git_state_report(self) -> str:
+        """Read Git state from Git itself; never synthesize repository facts."""
+        root = Path(self.own_project_root()).resolve(strict=False)
+
+        def run_git(*args: str) -> str:
+            completed = subprocess.run(
+                ["git", *args],
+                cwd=str(root),
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=30,
+            )
+            if completed.returncode != 0:
+                detail = (completed.stderr or completed.stdout or "").strip()
+                raise RuntimeError(detail or f"git {' '.join(args)} failed")
+            return completed.stdout.rstrip("\r\n")
+
+        try:
+            head = run_git("rev-parse", "HEAD").strip()
+            branch = run_git("branch", "--show-current").strip()
+            porcelain = run_git("status", "--porcelain")
+        except Exception as exc:
+            return (
+                "Gercek Git durumu okunamadi. Tahmin veya kayitli session kimligi "
+                f"Git bilgisi olarak kullanilmadi. Hata: {exc}"
+            )
+
+        branch_text = branch or "DETACHED_HEAD"
+        status_lines = [line for line in porcelain.splitlines() if line.strip()]
+        if status_lines:
+            status_text = "\n".join(status_lines)
+            clean_text = "Hayir"
+        else:
+            status_text = "(bos)"
+            clean_text = "Evet"
+        return (
+            "GERCEK GIT DURUMU\n"
+            f"HEAD: {head}\n"
+            f"Branch: {branch_text}\n"
+            f"Calisma agaci temiz: {clean_text}\n"
+            "git status --porcelain:\n"
+            f"{status_text}\n"
+            "Kaynak: proje kokunde dogrudan calistirilan Git komutlari."
+        )
+
+    def _persisted_engineering_state_report(self) -> str:
+        """Report the persisted own-code cycle without mutating recovery state."""
+        cycle = self._load_own_code_cycle()
+        if not cycle:
+            return "KAYITLI ENGINEERING DURUMU\nKayitli bir own-code engineering cycle yok."
+        stage = str(cycle.get("stage", "bilinmiyor") or "bilinmiyor")
+        attempt = self._cycle_attempt(cycle)
+        detail = str(cycle.get("detail", "") or "").strip() or "(bos)"
+        changed = [
+            str(item).strip()
+            for item in (cycle.get("changed_paths", []) or [])
+            if str(item).strip()
+        ]
+        validation = str(cycle.get("validation_summary", "") or "").strip() or "(bos)"
+        recovery = (
+            "Gerekli"
+            if stage in {"interrupted_validation", "recovery_required"}
+            else "Gerekli degil"
+        )
+        paths = ", ".join(changed) if changed else "(yok)"
+        return (
+            "KAYITLI ENGINEERING DURUMU\n"
+            f"Stage: {stage}\n"
+            f"Attempt: {attempt}/3\n"
+            f"Detail: {detail}\n"
+            f"Changed paths: {paths}\n"
+            f"Validation: {validation}\n"
+            f"Recovery: {recovery}\n"
+            "Kaynak: diskteki own-code cycle kaydi; raporlama yeni plan, proposal veya recovery islemi baslatmaz."
+        )
+
+    def _engineering_state_report(self) -> str:
+        """Report persisted engineering state together with authoritative Git state."""
+        return self._persisted_engineering_state_report() + "\n\n" + self._authoritative_git_state_report()
+
+    @staticmethod
+    def _asks_for_authoritative_git_state(text: str) -> bool:
+        normalized = normalize_text(str(text or ""))
+        git_subject = "git" in normalized
+        git_facts = any(
+            marker in normalized
+            for marker in (
+                "rev-parse", "branch --show-current", "status --porcelain",
+                "head commit", "git calisma agaci", "git durum",
+                "git bilgis", "uncommitted",
+            )
+        )
+        return git_subject and git_facts
+
+    @staticmethod
+    def _asks_for_engineering_state_only(text: str) -> bool:
+        normalized = normalize_text(str(text or ""))
+        state_subject = any(
+            marker in normalized
+            for marker in (
+                "muhendislik durum", "engineering state",
+                "kendi-kod gelistirme durum", "kendi kod gelistirme durum",
+                "self-development oturum", "self development oturum",
+                "self-development", "self development",
+                "own-code engineering", "own code engineering",
+                "engineering cycle", "own-code cycle", "own code cycle",
+            )
+        )
+        state_request = any(
+            marker in normalized
+            for marker in (
+                "incele", "rapor", "goster", "devam eden",
+                "yarim kal", "yeniden dogrulama", "mevcut kayitli durum",
+            )
+        )
+        no_change = any(
+            marker in normalized
+            for marker in (
+                "hicbir kodu degistirme", "hicbir kod degistirme",
+                "degisiklik yapma", "yeni plan", "yeni proposal",
+                "yeni patch", "yalnizca mevcut",
+            )
+        )
+        return state_subject and state_request and no_change
+
     def _own_code_read_only_request(self, text: str) -> str | None:
         """Handle source inspection before stale plans or language models."""
+
+        if self._asks_for_engineering_state_only(text):
+            normalized = normalize_text(str(text or ""))
+            git_requested = self._asks_for_authoritative_git_state(text)
+            git_excluded = any(
+                marker in normalized
+                for marker in ("git durumunu tekrar etme", "git bilgisini tekrar etme")
+            )
+            if git_requested and not git_excluded:
+                return self._engineering_state_report()
+            return self._persisted_engineering_state_report()
+        if self._asks_for_authoritative_git_state(text):
+            return self._authoritative_git_state_report()
 
         context_kind = str((getattr(self, "last_action_context", None) or {}).get("kind", ""))
         intent = classify_own_code_intent(

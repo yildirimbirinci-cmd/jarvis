@@ -3,6 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from artmach_assistant.core import assistant as assistant_module
 from artmach_assistant.core.assistant import AssistantEngine
 from artmach_assistant.core.edit_manager import EditProposal, ProposedFileChange
@@ -10,6 +12,18 @@ from artmach_assistant.core.own_code_approval import (
     proposal_fingerprint,
     short_fingerprint,
 )
+
+
+@pytest.fixture(autouse=True)
+def _isolate_own_code_cycle_file(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(
+        assistant_module,
+        "OWN_CODE_CYCLE_FILE",
+        tmp_path / "own_code_cycle.json",
+    )
 
 
 def _engine() -> AssistantEngine:
