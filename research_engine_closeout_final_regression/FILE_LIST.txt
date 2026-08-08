@@ -1,3 +1,0 @@
-install_research_engine_closeout_final_regression.py
-README_TR.txt
-FILE_LIST.txt
