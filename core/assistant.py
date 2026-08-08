@@ -3551,14 +3551,14 @@ class AssistantEngine:
         try:
             completed = subprocess.run(
                 command, cwd=str(root), capture_output=True, text=True,
-                encoding="utf-8", errors="replace", timeout=300,
+                encoding="utf-8", errors="replace", timeout=1800,
             )
             output = (completed.stdout + "\n" + completed.stderr).strip()
             return completed.returncode == 0, output
         except subprocess.TimeoutExpired as exc:
             stdout = exc.stdout.decode("utf-8", "replace") if isinstance(exc.stdout, bytes) else (exc.stdout or "")
             stderr = exc.stderr.decode("utf-8", "replace") if isinstance(exc.stderr, bytes) else (exc.stderr or "")
-            return False, "Pytest beş dakika içinde tamamlanamadı.\n" + stdout + "\n" + stderr
+            return False, "Pytest otuz dakika içinde tamamlanamadı.\n" + stdout + "\n" + stderr
         except Exception as exc:
             return False, f"Pytest başlatılamadı: {exc}"
 
