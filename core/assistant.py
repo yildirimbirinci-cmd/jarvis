@@ -2681,6 +2681,34 @@ class AssistantEngine:
             )
         return session.report() + "\n\n" + rendered
 
+    def _own_code_recovery_gate(self) -> str:
+        cycle = self._load_own_code_cycle()
+        if not isinstance(cycle, dict):
+            return ""
+        stage = str(cycle.get("stage", "") or "").strip()
+        if stage != "recovery_required":
+            return ""
+        changed_paths = tuple(
+            str(item).strip()
+            for item in (cycle.get("changed_paths", []) or [])
+            if str(item).strip()
+        )
+        validation_summary = str(
+            cycle.get("validation_summary", "") or ""
+        ).strip()
+        detail = str(cycle.get("detail", "") or "").strip()
+        result = (
+            "Yeni kendi-kod taslagi veya apply baslatilmadi: once yarim "
+            "engineering oturumunun recovery dogrulamasi tamamlanmali."
+        )
+        if changed_paths:
+            result += " Hedef dosyalar: " + ", ".join(changed_paths) + "."
+        if validation_summary:
+            result += " Dogrulama: " + validation_summary[-900:]
+        elif detail:
+            result += " Son kayit: " + detail[-900:]
+        return result
+
     def prepare_own_code_proposal(
         self,
         raw_instruction: str,
@@ -2697,6 +2725,9 @@ class AssistantEngine:
         can be inspected or approved in the following workflow stage.  This
         method deliberately has no file-writing operation.
         """
+        recovery_gate = self._own_code_recovery_gate()
+        if recovery_gate:
+            return recovery_gate
         project_runtime = getattr(self, "project_improvements", None)
         if (
             project_runtime is not None
@@ -3185,6 +3216,11 @@ class AssistantEngine:
             failures=sorted(self._test_failure_ids(
                 (self._load_own_validation() or (True, ""))[1]
             )),
+            changed_paths=tuple(
+                str(change.path)
+                for change in proposal.files
+                if str(change.path).strip()
+            ),
         )
         return (
             f"Kod değişikliği önerisini hazırladım. Özet: {proposal.summary}. "
@@ -3195,6 +3231,9 @@ class AssistantEngine:
 
     def apply_pending_own_code_proposal(self) -> str:
         """Apply an approved proposal, verify it, and roll back broken source."""
+        recovery_gate = self._own_code_recovery_gate()
+        if recovery_gate:
+            return recovery_gate
         if self.editor.pending is None:
             return "Uygulanacak bekleyen bir kod değişikliği önerisi yok. Önce açıkça bir değişiklik taslağı istemelisin."
         approved_proposal = self.editor.pending
@@ -3264,11 +3303,21 @@ class AssistantEngine:
                 kaynak_kimliği=baseline_cache.fingerprint[:12],
             )
         baseline_failures = self._test_failure_ids(baseline_output)
+        cycle_paths = (
+            tuple(
+                str(change.path)
+                for change in approved_proposal.files
+                if str(change.path).strip()
+            )
+            if isinstance(approved_proposal, EditProposal)
+            else ()
+        )
         if isinstance(approved_proposal, EditProposal):
             self._save_own_code_cycle(
                 "isolated_validation",
                 "Taslak geçici Git worktree içinde doğrulanıyor.",
                 failures=sorted(baseline_failures),
+                changed_paths=cycle_paths,
             )
             try:
                 isolated = OwnCodeWorktreeValidator(
@@ -3309,6 +3358,7 @@ class AssistantEngine:
             "applying",
             "Onaylı değişiklik checkpoint ile uygulanıyor.",
             failures=sorted(baseline_failures),
+            changed_paths=cycle_paths,
         )
         try:
             report = self.editor.apply()
@@ -3376,6 +3426,7 @@ class AssistantEngine:
             "validating",
             "Uygulanan değişiklik derleniyor ve regresyon testleri çalıştırılıyor.",
             failures=sorted(baseline_failures),
+            changed_paths=cycle_paths,
         )
         compile_ok, compile_output = self._compile_own_code()
         if not compile_ok:
@@ -3839,6 +3890,7 @@ class AssistantEngine:
                     "validation_summary": str(validation_summary)[-4000:],
                     "version_summary": str(version_summary)[-4000:],
                     "updated_at": datetime.now(timezone.utc).isoformat(),
+                    "owner_pid": os.getpid(),
                 },
                 max_bytes=OWN_CODE_CYCLE_MAX_BYTES,
             )
@@ -3867,6 +3919,56 @@ class AssistantEngine:
         except (TypeError, ValueError, OverflowError):
             return 0
 
+    def _verify_interrupted_engineering_recovery(
+        self,
+        cycle: dict[str, object],
+    ) -> tuple[bool, str]:
+        root = Path(self.own_project_root())
+        changed_paths = tuple(
+            str(item).strip()
+            for item in (cycle.get("changed_paths", []) or [])
+            if str(item).strip()
+        )
+        try:
+            status = subprocess.run(
+                ["git", "status", "--porcelain=v1", "--untracked-files=no"],
+                cwd=str(root),
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=60,
+            )
+        except Exception as exc:
+            return False, f"Git recovery doğrulaması başlatılamadı: {exc}"
+        if status.returncode != 0:
+            detail = (status.stderr or status.stdout or "").strip()
+            return False, "Git recovery doğrulaması başarısız oldu: " + detail[-700:]
+        tracked_changes = [
+            line.strip()
+            for line in status.stdout.splitlines()
+            if line.strip()
+        ]
+        if tracked_changes:
+            return False, (
+                "Canlı Git çalışma ağacında kaydedilmemiş tracked değişiklikler "
+                "var; yarım apply otomatik recovered sayılamaz. "
+                + " | ".join(tracked_changes[:20])
+            )
+        missing = [
+            item for item in changed_paths
+            if not (root / item).is_file()
+        ]
+        if missing:
+            return False, (
+                "Recovery hedef dosyaları eksik: "
+                + ", ".join(missing[:20])
+            )
+        return True, (
+            "Git çalışma ağacı temiz ve yarım engineering oturumunun hedef "
+            "dosyaları mevcut; canlı kaynak doğrulanmış baseline ile uyumlu."
+        )
+
     def own_code_cycle_report(self) -> str:
         cycle = self._load_own_code_cycle()
         if not cycle:
@@ -3877,8 +3979,11 @@ class AssistantEngine:
             "proposal_failed": "onarım taslağı hazırlanamadı",
             "baseline": "değişiklik öncesi testler çalışıyor",
             "isolated_validation": "taslak geçici worktree içinde doğrulanıyor",
+            "interrupted_validation": "restart nedeniyle worktree doğrulaması kesildi",
             "applying": "onaylı değişiklik uygulanıyor",
             "validating": "değişiklik doğrulanıyor",
+            "recovery_required": "yarım uygulama için kaynak doğrulaması gerekiyor",
+            "recovered": "yarım uygulama sonrası kaynak durumu doğrulandı",
             "completed": "döngü başarıyla tamamlandı",
             "rolled_back": "başarısız değişiklik geri alındı",
             "stale": "restart sonrası eski taslak kaydı geçersizleştirildi",
@@ -3915,6 +4020,75 @@ class AssistantEngine:
                 "dosya içeriği yeniden başlatmalar arasında bellekte tutulmamış. "
                 "Taslak yeniden hazırlanmalı ve yeni onay kimliğiyle onaylanmalı."
             )
+        cycle_owner_pid = int(cycle.get("owner_pid", 0) or 0)
+        previous_process_state = (
+            cycle_owner_pid <= 0 or cycle_owner_pid != os.getpid()
+        )
+        if previous_process_state and stage == "isolated_validation":
+            self._save_own_code_cycle(
+                "interrupted_validation",
+                (
+                    "Restart sırasında geçici worktree doğrulaması yarıda kaldı. "
+                    "Ana kaynak ağacına apply başlamadığı için yeni bir proposal "
+                    "üzerinden worktree doğrulaması yeniden çalıştırılmalıdır."
+                ),
+                failures=list(cycle.get("failures", []) or []),
+                attempt=self._cycle_attempt(cycle),
+                changed_paths=list(cycle.get("changed_paths", []) or []),
+                validation_summary=(
+                    "Önceki worktree doğrulaması tamamlanmadı; canlı kaynak "
+                    "değiştirilmiş kabul edilmedi."
+                ),
+            )
+            cycle = self._load_own_code_cycle() or cycle
+            stage = str(cycle.get("stage", "interrupted_validation"))
+            detail = str(cycle.get("detail", "")).strip()
+        elif previous_process_state and stage in {"applying", "validating"}:
+            self._save_own_code_cycle(
+                "recovery_required",
+                (
+                    "Restart, apply veya post-apply doğrulama tamamlanmadan "
+                    "gerçekleşti. Yeni bir kaynak değişikliği yapılmadan önce "
+                    "Git durumu, checkpoint ve hedef dosyalar doğrulanmalıdır."
+                ),
+                failures=list(cycle.get("failures", []) or []),
+                attempt=self._cycle_attempt(cycle),
+                changed_paths=list(cycle.get("changed_paths", []) or []),
+                validation_summary=(
+                    "Canlı kaynak durumu belirsiz kabul edildi; otomatik yeni "
+                    "apply engellendi ve recovery doğrulaması gerekiyor."
+                ),
+            )
+            cycle = self._load_own_code_cycle() or cycle
+            stage = str(cycle.get("stage", "recovery_required"))
+            detail = str(cycle.get("detail", "")).strip()
+
+        if stage == "recovery_required":
+            recovery_ok, recovery_detail = (
+                self._verify_interrupted_engineering_recovery(cycle)
+            )
+            if recovery_ok:
+                self._save_own_code_cycle(
+                    "recovered",
+                    (
+                        "Restart sonrası yarım engineering oturumu için canlı "
+                        "kaynak doğrulaması tamamlandı."
+                    ),
+                    failures=list(cycle.get("failures", []) or []),
+                    attempt=self._cycle_attempt(cycle),
+                    changed_paths=list(cycle.get("changed_paths", []) or []),
+                    validation_summary=recovery_detail,
+                    version_summary=str(
+                        cycle.get("version_summary", "") or ""
+                    ),
+                )
+                cycle = self._load_own_code_cycle() or cycle
+                stage = str(cycle.get("stage", "recovered"))
+                detail = str(cycle.get("detail", "")).strip()
+            else:
+                cycle = dict(cycle)
+                cycle["validation_summary"] = recovery_detail
+
         failures = cycle.get("failures", [])
         count = len(failures) if isinstance(failures, list) else 0
         attempt = self._cycle_attempt(cycle)
@@ -3976,6 +4150,8 @@ class AssistantEngine:
                 "Güvenli onarım sınırı olan üç denemeye ulaşıldı. "
                 "Yeni bir değişiklik uygulamadan önce hata raporunu birlikte incelemeliyiz."
             )
+        if stage == "recovery_required":
+            return self.own_code_cycle_report()
         if stage == "proposal_ready":
             return (
                 "Önceki onarım taslağı yeniden başlatma sırasında bellekte tutulmadı. "
