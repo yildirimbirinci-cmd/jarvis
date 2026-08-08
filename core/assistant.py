@@ -3485,10 +3485,29 @@ class AssistantEngine:
         # analyze and repair those original problems later.
         self._save_own_validation(test_success, validation_output)
         self.own_code_history.record("onaylı değişiklik uygulandı", sonuç=report.replace("\n", " ")[:700])
+        completed_paths = (
+            tuple(
+                str(change.path)
+                for change in approved_proposal.files
+                if str(change.path).strip()
+            )
+            if isinstance(approved_proposal, EditProposal)
+            else ()
+        )
         self._save_own_code_cycle(
             "completed",
             "Değişiklik uygulandı; derleme ve regresyon karşılaştırması tamamlandı.",
             failures=sorted(current_failures),
+            changed_paths=completed_paths,
+            validation_summary=(
+                "Derleme, temiz süreç ve regresyon karşılaştırması tamamlandı."
+                if test_success
+                else (
+                    "Yeni regresyon oluşmadı; yalnız önceden mevcut test "
+                    "hataları kaldı."
+                )
+            ),
+            version_summary=version_report.replace("\n", " ")[:3000],
         )
         baseline_note = ""
         if not test_success and current_failures:
@@ -3742,21 +3761,45 @@ class AssistantEngine:
         *,
         failures: list[str] | None = None,
         attempt: int | None = None,
+        changed_paths: tuple[str, ...] | list[str] | None = None,
+        validation_summary: str = "",
+        version_summary: str = "",
     ) -> None:
         try:
+            previous = AssistantEngine._load_own_code_cycle() or {}
             if attempt is None:
-                previous = AssistantEngine._load_own_code_cycle() or {}
                 attempt = AssistantEngine._cycle_attempt(previous)
+            if changed_paths is None:
+                previous_paths = previous.get("changed_paths", ())
+                changed_paths = (
+                    list(previous_paths)
+                    if isinstance(previous_paths, (list, tuple))
+                    else []
+                )
+            if not validation_summary:
+                validation_summary = str(
+                    previous.get("validation_summary", "") or ""
+                )
+            if not version_summary:
+                version_summary = str(
+                    previous.get("version_summary", "") or ""
+                )
             atomic_write_json(
                 OWN_CODE_CYCLE_FILE,
                 {
-                    # Version 3 discards cycles created before deterministic
-                    # RUN/plan routing was fixed.
-                    "version": 3,
+                    "version": 4,
                     "stage": str(stage),
                     "detail": str(detail)[-6000:],
                     "failures": list(failures or [])[:100],
                     "attempt": max(0, min(int(attempt), 3)),
+                    "changed_paths": [
+                        str(item).strip()
+                        for item in (changed_paths or ())
+                        if str(item).strip()
+                    ][:32],
+                    "validation_summary": str(validation_summary)[-4000:],
+                    "version_summary": str(version_summary)[-4000:],
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
                 },
                 max_bytes=OWN_CODE_CYCLE_MAX_BYTES,
             )
@@ -3772,7 +3815,7 @@ class AssistantEngine:
             )
             return (
                 data
-                if isinstance(data, dict) and data.get("version") == 3
+                if isinstance(data, dict) and data.get("version") in {3, 4}
                 else None
             )
         except Exception:
@@ -3794,15 +3837,40 @@ class AssistantEngine:
             "proposal_ready": "onarım taslağı onay bekliyor",
             "proposal_failed": "onarım taslağı hazırlanamadı",
             "baseline": "değişiklik öncesi testler çalışıyor",
+            "isolated_validation": "taslak geçici worktree içinde doğrulanıyor",
             "applying": "onaylı değişiklik uygulanıyor",
             "validating": "değişiklik doğrulanıyor",
             "completed": "döngü başarıyla tamamlandı",
             "rolled_back": "başarısız değişiklik geri alındı",
+            "stale": "restart sonrası eski taslak kaydı geçersizleştirildi",
         }
         stage = str(cycle.get("stage", "bilinmiyor"))
         detail = str(cycle.get("detail", "")).strip()
         pending = getattr(getattr(self, "editor", None), "pending", None)
-        if stage == "proposal_ready" and pending is None:
+        legacy_pending_without_proposal = (
+            int(cycle.get("version", 0) or 0) == 3
+            and stage == "proposal_ready"
+            and pending is None
+        )
+        if legacy_pending_without_proposal:
+            self._save_own_code_cycle(
+                "stale",
+                (
+                    "Restart sonrasında eski v3 proposal_ready kaydı bulundu, "
+                    "ancak uygulanabilir pending EditProposal bellekte yok. "
+                    "Eski taslak güvenli biçimde geçersizleştirildi."
+                ),
+                failures=list(cycle.get("failures", []) or []),
+                attempt=self._cycle_attempt(cycle),
+                validation_summary=(
+                    "Legacy pending proposal restart sonrasında doğrulanamadı; "
+                    "yeni apply için yeni proposal gereklidir."
+                ),
+            )
+            cycle = self._load_own_code_cycle() or cycle
+            stage = str(cycle.get("stage", "stale"))
+            detail = str(cycle.get("detail", "")).strip()
+        elif stage == "proposal_ready" and pending is None:
             detail = (
                 "Önceki taslağın durumu kaydedilmiş, ancak güvenlik nedeniyle "
                 "dosya içeriği yeniden başlatmalar arasında bellekte tutulmamış. "
@@ -3816,6 +3884,22 @@ class AssistantEngine:
             result += f" Onarım denemesi {attempt}/3."
         if count:
             result += f" Kayıtlı {count} test hatası var."
+        changed_paths = cycle.get("changed_paths", ())
+        if isinstance(changed_paths, (list, tuple)) and changed_paths:
+            result += " Dosyalar: " + ", ".join(
+                str(item) for item in changed_paths if str(item).strip()
+            )
+            result += "."
+        validation_summary = str(
+            cycle.get("validation_summary", "") or ""
+        ).strip()
+        if validation_summary:
+            result += " Doğrulama: " + validation_summary[-700:]
+        version_summary = str(
+            cycle.get("version_summary", "") or ""
+        ).strip()
+        if version_summary:
+            result += " Sürüm: " + version_summary[-700:]
         if detail:
             result += " Son kayıt: " + detail[-500:]
         return result
@@ -11587,6 +11671,13 @@ class AssistantEngine:
         if not text:
             return "Komut duyamadım."
         normalized = self.command_key(text)
+        if normalized in {
+            "kendi kod gelistirme durumu",
+            "kendi kod gelistirme raporu",
+            "kendi kod dongu durumu",
+            "kendi kod islem durumu",
+        }:
+            return self.own_code_cycle_report()
         patch_session_command = self._patch_session_command_request(text)
         if patch_session_command is not None:
             return patch_session_command
