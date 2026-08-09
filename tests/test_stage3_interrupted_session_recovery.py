@@ -108,3 +108,60 @@ def test_intermediate_states_persist_target_paths_and_owner_pid():
     assert '"owner_pid": os.getpid()' in source
     assert source.count("changed_paths=cycle_paths") >= 3
     assert "changed_paths=tuple(" in source
+
+
+def test_recovery_rolls_back_interrupted_apply_before_marking_recovered(
+    monkeypatch, tmp_path: Path,
+):
+    target = tmp_path / "core" / "assistant.py"
+    target.parent.mkdir(parents=True)
+    target.write_text("changed", encoding="utf-8")
+    engine = AssistantEngine.__new__(AssistantEngine)
+    engine.own_project_root = lambda: tmp_path
+    calls = []
+    engine.own_code_transactions = SimpleNamespace(
+        recover_incomplete=lambda: calls.append("recover") or "checkpoint recovered",
+        undo=lambda: calls.append("undo") or "rollback complete",
+    )
+    statuses = iter([
+        SimpleNamespace(returncode=0, stdout=" M core/assistant.py\n", stderr=""),
+        SimpleNamespace(returncode=0, stdout="", stderr=""),
+    ])
+    monkeypatch.setattr("subprocess.run", lambda *args, **kwargs: next(statuses))
+
+    ok, detail = engine._verify_interrupted_engineering_recovery({
+        "changed_paths": ["core/assistant.py"],
+    })
+
+    assert ok is True
+    assert calls == ["recover", "undo"]
+    assert "baseline" in detail
+
+
+def test_recovery_never_rolls_back_changes_outside_interrupted_scope(
+    monkeypatch, tmp_path: Path,
+):
+    target = tmp_path / "core" / "assistant.py"
+    target.parent.mkdir(parents=True)
+    target.write_text("changed", encoding="utf-8")
+    engine = AssistantEngine.__new__(AssistantEngine)
+    engine.own_project_root = lambda: tmp_path
+    engine.own_code_transactions = SimpleNamespace(
+        recover_incomplete=lambda: (_ for _ in ()).throw(AssertionError()),
+        undo=lambda: (_ for _ in ()).throw(AssertionError()),
+    )
+    monkeypatch.setattr(
+        "subprocess.run",
+        lambda *args, **kwargs: SimpleNamespace(
+            returncode=0,
+            stdout=" M core/assistant.py\n M core/unrelated.py\n",
+            stderr="",
+        ),
+    )
+
+    ok, detail = engine._verify_interrupted_engineering_recovery({
+        "changed_paths": ["core/assistant.py"],
+    })
+
+    assert ok is False
+    assert "core/unrelated.py" in detail

@@ -4086,16 +4086,66 @@ class AssistantEngine:
             detail = (status.stderr or status.stdout or "").strip()
             return False, "Git recovery doğrulaması başarısız oldu: " + detail[-700:]
         tracked_changes = [
-            line.strip()
+            line.rstrip("\r\n")
             for line in status.stdout.splitlines()
             if line.strip()
         ]
         if tracked_changes:
-            return False, (
-                "Canlı Git çalışma ağacında kaydedilmemiş tracked değişiklikler "
-                "var; yarım apply otomatik recovered sayılamaz. "
-                + " | ".join(tracked_changes[:20])
+            allowed_paths = {
+                item.replace("\\", "/") for item in changed_paths
+            }
+            dirty_paths = {
+                line[3:].strip().split(" -> ")[-1].replace("\\", "/")
+                for line in tracked_changes
+                if len(line) > 3
+            }
+            unexpected = sorted(dirty_paths.difference(allowed_paths))
+            if unexpected:
+                return False, (
+                    "Recovery hedefi dışında tracked değişiklikler var; "
+                    "otomatik geri alma yapılmadı. " + ", ".join(unexpected[:20])
+                )
+            transactions = getattr(self, "own_code_transactions", None)
+            if transactions is None:
+                return False, (
+                    "kaydedilmemiş tracked değişiklikler var; transaction "
+                    "yöneticisi kullanılamadığı için otomatik geri alma yapılmadı."
+                )
+            try:
+                recovery_notice = getattr(
+                    transactions, "recover_incomplete", lambda: ""
+                )()
+                rollback_notice = transactions.undo()
+            except Exception as exc:
+                return False, f"Yarım apply transaction recovery başarısız oldu: {exc}"
+            try:
+                recovered_status = subprocess.run(
+                    ["git", "status", "--porcelain=v1", "--untracked-files=no"],
+                    cwd=str(root),
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=60,
+                )
+            except Exception as exc:
+                return False, f"Rollback sonrası Git doğrulaması başlatılamadı: {exc}"
+            if recovered_status.returncode != 0 or recovered_status.stdout.strip():
+                detail = (
+                    recovered_status.stderr or recovered_status.stdout or ""
+                ).strip()
+                return False, (
+                    "Transaction recovery sonrası Git çalışma ağacı temiz değil: "
+                    + detail[-700:]
+                )
+            transaction_detail = " ".join(
+                part for part in (str(recovery_notice), str(rollback_notice))
+                if part.strip()
             )
+            return True, (
+                "Yarım apply transaction geri alındı ve Git çalışma ağacı "
+                "doğrulanmış baseline durumuna döndü. " + transaction_detail
+            ).strip()
         missing = [
             item for item in changed_paths
             if not (root / item).is_file()
