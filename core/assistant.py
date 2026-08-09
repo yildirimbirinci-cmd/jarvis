@@ -3469,6 +3469,12 @@ class AssistantEngine:
                 failures=sorted(baseline_failures),
             )
             return f"Kod değişikliği uygulanmadı: {exc}"
+        # The proposal has been consumed once the transactional editor has
+        # written it.  From this point validation may either accept the new
+        # source or roll it back, but the same approval must never become
+        # actionable again after a restart.
+        self._clear_own_code_pending_proposal_store()
+        self._pending_own_code_fingerprint = None
         rollback_paths = (
             tuple(
                 str(change.path)

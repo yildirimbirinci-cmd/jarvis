@@ -33,10 +33,10 @@ def _isolate_own_code_cycle_file(
 
 def _engine() -> AssistantEngine:
     engine = object.__new__(AssistantEngine)
-    engine.editor = SimpleNamespace(
-        pending=object(),
-        apply=lambda: "1 dosya güncellendi.",
-    )
+    editor = SimpleNamespace(pending=object())
+    editor.apply = lambda: "1 dosya güncellendi."
+    editor.reject = lambda: setattr(editor, "pending", None) or "Taslak tüketildi."
+    engine.editor = editor
     engine.workspace = SimpleNamespace(set_workspace=lambda _root: None)
     engine.own_code_history = SimpleNamespace(record=lambda *_args, **_kwargs: None)
     engine.own_code_transactions = SimpleNamespace(
