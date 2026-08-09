@@ -1,0 +1,240 @@
+{
+  "version": 1,
+  "intents": {
+    "CREATE_PROPOSAL": {
+      "positive": [
+        "proposal hazirla",
+        "proposal olustur",
+        "proposal uret",
+        "yeni proposal",
+        "taslak hazirla",
+        "taslak olustur",
+        "taslak uret",
+        "taslagi cikar",
+        "degisiklik taslagi",
+        "kod degisikligi taslagi",
+        "patch tasarla",
+        "patch onerisi hazirla",
+        "degisiklik onerisi olustur",
+        "once ne degistirecegini goster",
+        "degisikligi once goster",
+        "kaynaklara dokunmadan degisikligi cikar",
+        "bir taslak cikar",
+        "taslagi bir cikar",
+        "degisikligi taslak olarak goster",
+        "ne degistirecegini once yaz",
+        "once degisikligi tasarla",
+        "proposal cikar",
+        "patchi tasarla",
+        "patch hazirla",
+        "degisiklik onerisi hazirla",
+        "kod onerisi hazirla",
+        "bana once patchi goster",
+        "show me the patch first",
+        "prepare a proposal",
+        "create a proposal",
+        "draft the change",
+        "prepare the patch",
+        "make a draft but do not apply",
+        "prepare a code change proposal",
+        "propozal hazirla",
+        "propasal hazirla",
+        "taslak hazrla",
+        "degisiklik taslagi hazrla"
+      ],
+      "negative_constraints": [
+        "uygulama",
+        "uygulamadan",
+        "henuz uygulama",
+        "simdilik uygulama",
+        "degisikligi uygulama",
+        "kodu uygulama",
+        "patchi uygulama",
+        "taslagi uygulama",
+        "onay bekle",
+        "onayimi bekle",
+        "canli kaynaga yazma",
+        "dosyaya yazma",
+        "sadece goster",
+        "once goster",
+        "kaynaklara dokunma",
+        "el surme",
+        "do not apply",
+        "dont apply",
+        "do not modify",
+        "dont modify",
+        "show me first",
+        "wait for approval",
+        "wait for my approval",
+        "once bana sor",
+        "benden onay al",
+        "once onay al"
+      ]
+    },
+    "CREATE_PLAN": {
+      "positive": [
+        "plan hazirla",
+        "plan olustur",
+        "teknik plan hazirla",
+        "gelistirme plani hazirla",
+        "degisiklik plani olustur",
+        "nasil yapacagini planla",
+        "once planini cikar",
+        "ne yapacagini planla",
+        "degisikligi planla",
+        "bir teknik plan cikar",
+        "prepare a plan",
+        "create a plan",
+        "plan the change",
+        "make a technical plan"
+      ]
+    },
+    "APPLY_PENDING": {
+      "positive": [
+        "taslagi uygula",
+        "taslagi onayla",
+        "proposal uygula",
+        "proposali uygula",
+        "proposal onayla",
+        "proposali onayla",
+        "bekleyen taslagi uygula",
+        "bekleyen proposali uygula",
+        "patchi uygula",
+        "patch uygula",
+        "hazir taslagi uygula",
+        "hazir patchi uygula",
+        "bekleyen patchi uygula",
+        "hazir proposal uygula",
+        "mevcut taslagi uygula",
+        "apply the proposal",
+        "apply the pending proposal",
+        "apply the draft",
+        "apply the patch",
+        "go ahead with the proposal"
+      ]
+    },
+    "APPROVE_PLAN": {
+      "positive": [
+        "plani onayla",
+        "plani onayliyorum",
+        "plan onayla",
+        "planla devam",
+        "plan ile devam",
+        "plani uygula",
+        "plani kabul ediyorum",
+        "plan uygun devam et",
+        "plan tamam devam",
+        "approve the plan",
+        "continue with the plan",
+        "the plan is approved"
+      ]
+    },
+    "REJECT_PENDING": {
+      "positive": [
+        "taslagi reddet",
+        "proposal reddet",
+        "proposali reddet",
+        "bekleyen taslagi reddet",
+        "bekleyen proposali reddet",
+        "taslagi iptal et",
+        "proposal iptal",
+        "patchi reddet",
+        "reject the proposal",
+        "reject the draft",
+        "discard the proposal"
+      ]
+    },
+    "REPORT_ENGINEERING_STATE": {
+      "positive": [
+        "muhendislik durumunu raporla",
+        "engineering state goster",
+        "kendi kod gelistirme durumunu goster",
+        "self-development oturumunu goster",
+        "own-code engineering durumunu raporla",
+        "engineering cycle durumunu incele",
+        "yarim kalmis self-development oturumu var mi",
+        "engineering durumunu soyle",
+        "aktif gelistirme oturumu var mi",
+        "yarim kalan gelistirme var mi",
+        "bekleyen engineering state var mi",
+        "show engineering state",
+        "report current engineering state",
+        "show current self development state"
+      ]
+    },
+    "REPORT_GIT_STATE": {
+      "positive": [
+        "git durumunu raporla",
+        "git bilgisini goster",
+        "head commit goster",
+        "git status porcelain",
+        "uncommitted dosyalari goster",
+        "branch bilgisini goster",
+        "git head nedir",
+        "hangi branchteyiz",
+        "calisma agaci temiz mi",
+        "show git status",
+        "show current branch",
+        "show git head",
+        "show uncommitted files"
+      ]
+    }
+  },
+  "jargon": {
+    "proposal": [
+      "proposal",
+      "taslak",
+      "patch onerisi",
+      "degisiklik onerisi",
+      "oneri taslagi",
+      "draft",
+      "change proposal",
+      "code proposal",
+      "patch draft",
+      "kod taslagi",
+      "degisiklik taslagi"
+    ],
+    "apply": [
+      "uygula",
+      "canli kaynaga gecir",
+      "dosyaya yaz",
+      "degisikligi gerceklestir",
+      "apply",
+      "execute change",
+      "commit change",
+      "canliya gecir"
+    ],
+    "do_not_apply": [
+      "uygulama",
+      "dokunma",
+      "yazma",
+      "onayimi bekle",
+      "once goster",
+      "el surme",
+      "do not apply",
+      "dont apply",
+      "show me first",
+      "wait for approval",
+      "once bana sor",
+      "benden onay al"
+    ],
+    "plan": [
+      "plan",
+      "teknik plan",
+      "gelistirme plani",
+      "degisiklik plani",
+      "technical plan",
+      "change plan",
+      "implementation plan"
+    ],
+    "engineering_state": [
+      "muhendislik durumu",
+      "engineering state",
+      "self-development oturumu",
+      "own-code cycle",
+      "engineering status",
+      "self development state",
+      "current engineering cycle"
+    ]
+  }
+}

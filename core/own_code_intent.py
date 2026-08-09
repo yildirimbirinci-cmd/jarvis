@@ -57,7 +57,6 @@ _STRICT_READ_ONLY_PHRASES = (
     "hicbir kodu degistirme", "hicbir kod degistirme",
     "yalnizca mevcut kayitli durumu goster",
     "yalnizca mevcut durumu goster",
-    "yeni plan", "yeni proposal", "yeni patch",
 )
 
 _NEGATED_CHANGE_PHRASES = (
@@ -242,6 +241,26 @@ def classify_own_code_intent(
     has_plan = any(marker in normalized for marker in _PLAN_MARKERS)
     strict_read_only = any(phrase in normalized for phrase in _STRICT_READ_ONLY_PHRASES)
     defer_application = any(phrase in normalized for phrase in _DEFER_APPLICATION_PHRASES)
+
+    explicit_proposal_request = any(
+        phrase in normalized
+        for phrase in (
+            "proposal hazirla",
+            "proposal olustur",
+            "yeni proposal",
+            "taslak hazirla",
+            "taslak olustur",
+            "degisiklik taslagi",
+            "kod degisikligi taslagi",
+        )
+    )
+
+    if explicit_proposal_request and not strict_read_only:
+        return OwnCodeIntent(
+            OwnCodeIntentKind.CHANGE,
+            normalized,
+            "explicit proposal generation request",
+        )
 
     # A development/repair request that explicitly asks for a plan is a CHANGE
     # intent even when the same sentence says not to modify files yet.  Jarvis'

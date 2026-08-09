@@ -1,22 +1,44 @@
-from pathlib import Path
+from __future__ import annotations
 
-def _source() -> str:
-    root = Path(__file__).resolve().parents[1]
-    return (root / "core" / "assistant.py").read_text(encoding="utf-8")
+from artmach_assistant.core.assistant import AssistantEngine
+
+
+def _engine_with_cycle(cycle: dict[str, object]) -> AssistantEngine:
+    engine = AssistantEngine.__new__(AssistantEngine)
+    state = dict(cycle)
+
+    engine._load_own_code_cycle = lambda: dict(state)
+    engine._load_pending_own_code_proposal = lambda: None
+
+    def save_cycle(stage: str, detail: str, **kwargs):
+        state["stage"] = stage
+        state["detail"] = detail
+        state.update(kwargs)
+
+    engine._save_own_code_cycle = save_cycle
+    return engine
+
 
 def test_unversioned_lost_proposal_keeps_safe_legacy_message():
-    source = _source()
-    start = source.index("def own_code_cycle_report")
-    end = source.index("\n    def _own_code_cycle_request", start)
-    block = source[start:end]
-    assert 'elif stage == "proposal_ready" and pending is None:' in block
-    assert "bellekte tutulmamış" in block
+    engine = _engine_with_cycle(
+        {
+            "stage": "proposal_ready",
+            "attempt": 1,
+            "changed_paths": ["core/example.py"],
+        }
+    )
+    report = engine.own_code_cycle_report()
+    assert "bellekte tutulmamış" in report
 
-def test_v3_persisted_proposal_still_reconciles_to_stale():
-    source = _source()
-    start = source.index("def own_code_cycle_report")
-    end = source.index("\n    def _own_code_cycle_request", start)
-    block = source[start:end]
-    assert 'int(cycle.get("version", 0) or 0) == 3' in block
-    assert '"stale"' in block
-    assert "cycle = self._load_own_code_cycle() or cycle" in block
+
+def test_v3_persisted_proposal_reconciles_to_stale():
+    engine = _engine_with_cycle(
+        {
+            "version": 3,
+            "stage": "proposal_ready",
+            "attempt": 1,
+            "changed_paths": ["core/example.py"],
+        }
+    )
+    report = engine.own_code_cycle_report()
+    assert "restart sonrası eski taslak kaydı geçersizleştirildi" in report

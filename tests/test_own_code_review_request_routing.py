@@ -21,6 +21,11 @@ def _isolate_own_code_cycle_file(
         "OWN_CODE_CYCLE_FILE",
         tmp_path / "own_code_cycle.json",
     )
+    monkeypatch.setattr(
+        assistant_module,
+        "OWN_CODE_PENDING_PROPOSAL_FILE",
+        tmp_path / "own_code_pending_proposal.json",
+    )
 
 
 def _routing_engine() -> AssistantEngine:

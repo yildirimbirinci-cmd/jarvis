@@ -84,6 +84,14 @@ from artmach_assistant.core.own_code_intent import (
     OwnCodeIntentKind,
     classify_own_code_intent,
 )
+from artmach_assistant.core.own_code_command_router import (
+    OwnCodeAction,
+    classify_own_code_command,
+)
+from artmach_assistant.core.own_code_language_intelligence import (
+    activate_learned_phrase,
+    canonicalize_taught_meaning,
+)
 from artmach_assistant.core.source_context import build_symbol_context
 from artmach_assistant.core.model_roles import ModelRoleResolver
 from artmach_assistant.core.learning_memory import LearningMemory, LearnedMemory
@@ -136,6 +144,7 @@ from artmach_assistant.core.own_code_test_cache import (
     source_tree_fingerprint,
 )
 from artmach_assistant.core.own_code_worktree import OwnCodeWorktreeValidator
+from artmach_assistant.core.own_code_pending_proposal_store import OwnCodePendingProposalStore
 from artmach_assistant.core.own_code_readiness import assess_readiness
 from artmach_assistant.core.conversation_runtime import ConversationRuntime
 from artmach_assistant.core.refactoring_transaction_history import (
@@ -287,6 +296,8 @@ OWN_CODE_CYCLE_FILE = DATA_DIR / "own_code_cycle.json"
 OWN_CODE_PLAN_FILE = DATA_DIR / "own_code_plan.json"
 SELF_REPAIR_SESSION_FILE = DATA_DIR / "self_repair_session.json"
 OWN_CODE_BASELINE_CACHE_FILE = DATA_DIR / "own_code_baseline_cache.json"
+OWN_CODE_PENDING_PROPOSAL_FILE = DATA_DIR / "own_code_pending_proposal.json"
+OWN_CODE_USER_LANGUAGE_FILE = DATA_DIR / "own_code_user_language.json"
 LEARNED_DIALOGUES_MAX_BYTES = 4 * 1024 * 1024
 OWN_CODE_VALIDATION_MAX_BYTES = 32 * 1024
 OWN_CODE_AUTHORITY_MAX_BYTES = 4 * 1024
@@ -3205,6 +3216,22 @@ class AssistantEngine:
         )
         risk = assess_own_code_proposal(proposal)
         self._pending_own_code_fingerprint = proposal_fingerprint(proposal)
+        if isinstance(proposal, EditProposal):
+            try:
+                self._own_code_pending_proposal_store().save(
+                    proposal, self._pending_own_code_fingerprint
+                )
+            except Exception as exc:
+                reject = getattr(self.editor, "reject", None)
+                if callable(reject):
+                    reject()
+                else:
+                    self.editor.pending = None
+                self._pending_own_code_fingerprint = None
+                return (
+                    "Taslak hazirlandi ancak restart-safe pending proposal kaydi "
+                    f"olusturulamadi: {exc}. Hicbir dosya degistirilmedi."
+                )
         approval_id = short_fingerprint(proposal)
         self.own_code_history.record(
             "değişiklik taslağı onay kimliği oluşturuldu",
@@ -3235,7 +3262,24 @@ class AssistantEngine:
         if recovery_gate:
             return recovery_gate
         if self.editor.pending is None:
-            return "Uygulanacak bekleyen bir kod değişikliği önerisi yok. Önce açıkça bir değişiklik taslağı istemelisin."
+            cycle = self._load_own_code_cycle() or {}
+            if str(cycle.get("stage", "")) == "proposal_ready":
+                restored, restore_detail = self._restore_restart_safe_pending_proposal()
+                if not restored:
+                    self._save_own_code_cycle(
+                        "stale",
+                        restore_detail,
+                        failures=list(cycle.get("failures", []) or []),
+                        attempt=self._cycle_attempt(cycle),
+                        changed_paths=list(cycle.get("changed_paths", []) or []),
+                        validation_summary=restore_detail,
+                    )
+                    return (
+                        "Bekleyen taslak restart sonrasinda guvenli bicimde restore "
+                        f"edilemedi; apply engellendi. {restore_detail}"
+                    )
+            if self.editor.pending is None:
+                return "Uygulanacak bekleyen bir kod değişikliği önerisi yok. Önce açıkça bir değişiklik taslağı istemelisin."
         approved_proposal = self.editor.pending
         expected_fingerprint = getattr(
             self, "_pending_own_code_fingerprint", None
@@ -3245,6 +3289,7 @@ class AssistantEngine:
             if actual_fingerprint != expected_fingerprint:
                 self.editor.reject()
                 self._pending_own_code_fingerprint = None
+                self._clear_own_code_pending_proposal_store()
                 self.own_code_history.record(
                     "onay sonrası değişen taslak reddedildi",
                     beklenen=expected_fingerprint[:12],
@@ -3845,6 +3890,41 @@ class AssistantEngine:
         return result
 
     @staticmethod
+    def _own_code_pending_proposal_store() -> OwnCodePendingProposalStore:
+        return OwnCodePendingProposalStore(OWN_CODE_PENDING_PROPOSAL_FILE)
+
+    @staticmethod
+    def _clear_own_code_pending_proposal_store() -> None:
+        try:
+            OwnCodePendingProposalStore(OWN_CODE_PENDING_PROPOSAL_FILE).clear()
+        except Exception:
+            pass
+
+    def _restore_restart_safe_pending_proposal(self) -> tuple[bool, str]:
+        pending = getattr(getattr(self, "editor", None), "pending", None)
+        if pending is not None:
+            return True, "Pending proposal already available in memory."
+        try:
+            restored = self._own_code_pending_proposal_store().load(
+                self.own_project_root()
+            )
+        except Exception as exc:
+            self._clear_own_code_pending_proposal_store()
+            return False, f"Restart-safe pending proposal restore failed: {exc}"
+        if restored is None:
+            return False, "No restart-safe pending proposal is stored."
+        actual = proposal_fingerprint(restored.proposal)
+        if actual != restored.fingerprint:
+            self._clear_own_code_pending_proposal_store()
+            return False, "Restart-safe pending proposal fingerprint mismatch."
+        self.editor.pending = restored.proposal
+        self._pending_own_code_fingerprint = restored.fingerprint
+        return (
+            True,
+            "Restart-safe pending proposal restored; source baseline and fingerprint verified.",
+        )
+
+    @staticmethod
     def _save_own_code_cycle(
         stage: str,
         detail: str,
@@ -3992,7 +4072,7 @@ class AssistantEngine:
         detail = str(cycle.get("detail", "")).strip()
         pending = getattr(getattr(self, "editor", None), "pending", None)
         legacy_pending_without_proposal = (
-            int(cycle.get("version", 0) or 0) == 3
+            int(cycle.get("version", 0) or 0) < 4
             and stage == "proposal_ready"
             and pending is None
         )
@@ -4000,9 +4080,9 @@ class AssistantEngine:
             self._save_own_code_cycle(
                 "stale",
                 (
-                    "Restart sonrasında eski v3 proposal_ready kaydı bulundu, "
-                    "ancak uygulanabilir pending EditProposal bellekte yok. "
-                    "Eski taslak güvenli biçimde geçersizleştirildi."
+                    "Restart sonrasında eski proposal_ready kaydı bulundu, "
+                    "ancak uygulanabilir pending EditProposal bellekte tutulmamış. "
+                    "Eski taslak geçersiz; yeni onay kimliğiyle yeniden hazırlanmalıdır."
                 ),
                 failures=list(cycle.get("failures", []) or []),
                 attempt=self._cycle_attempt(cycle),
@@ -4011,15 +4091,31 @@ class AssistantEngine:
                     "yeni apply için yeni proposal gereklidir."
                 ),
             )
-            cycle = self._load_own_code_cycle() or cycle
-            stage = str(cycle.get("stage", "stale"))
-            detail = str(cycle.get("detail", "")).strip()
-        elif stage == "proposal_ready" and pending is None:
-            detail = (
-                "Önceki taslağın durumu kaydedilmiş, ancak güvenlik nedeniyle "
-                "dosya içeriği yeniden başlatmalar arasında bellekte tutulmamış. "
-                "Taslak yeniden hazırlanmalı ve yeni onay kimliğiyle onaylanmalı."
+            cycle = dict(cycle)
+            cycle["stage"] = "stale"
+            cycle["detail"] = (
+                "Restart sonrasında eski proposal_ready kaydı bulundu, "
+                "ancak uygulanabilir pending EditProposal bellekte tutulmamış. "
+                "Eski taslak geçersiz; yeni onay kimliğiyle yeniden hazırlanmalıdır."
             )
+            cycle["validation_summary"] = (
+                "Legacy pending proposal restart sonrasında doğrulanamadı; "
+                "yeni apply için yeni proposal gereklidir."
+            )
+            stage = "stale"
+            detail = str(cycle["detail"])
+        elif stage == "proposal_ready" and pending is None:
+            if OWN_CODE_PENDING_PROPOSAL_FILE.is_file():
+                detail = (
+                    "Restart-safe pending proposal diskte kayitli. Salt-okunur durum "
+                    "raporu taslagi bellekte restore etmedi; devam veya acik onay "
+                    "sirasinda kaynak ve fingerprint yeniden dogrulanacak."
+                )
+            else:
+                detail = (
+                    "Onceki taslagin cycle kaydi var ancak restart-safe pending "
+                    "proposal dosyasi yok. Yeni apply icin taslak yeniden hazirlanmali."
+                )
         cycle_owner_pid = int(cycle.get("owner_pid", 0) or 0)
         previous_process_state = (
             cycle_owner_pid <= 0 or cycle_owner_pid != os.getpid()
@@ -4155,11 +4251,22 @@ class AssistantEngine:
         if stage == "recovery_required":
             return self.own_code_cycle_report()
         if stage == "proposal_ready":
-            return (
-                "Önceki onarım taslağı yeniden başlatma sırasında bellekte tutulmadı. "
-                "Kayıtlı hata sonucundan güvenli taslağı yeniden hazırlıyorum. "
-                + self.prepare_own_code_repair_proposal()
+            restored, restore_detail = self._restore_restart_safe_pending_proposal()
+            if restored:
+                return (
+                    "Restart-safe onarim taslagi geri yuklendi. "
+                    "Canli kaynak degistirilmedi; uygulama icin yeni acik onay gerekiyor. "
+                    + restore_detail
+                )
+            self._save_own_code_cycle(
+                "stale",
+                restore_detail,
+                failures=list(cycle.get("failures", []) or []),
+                attempt=attempt,
+                changed_paths=list(cycle.get("changed_paths", []) or []),
+                validation_summary=restore_detail,
             )
+            return self.own_code_cycle_report()
         if stage in {"analyzing", "proposal_failed", "rolled_back", "validating", "applying"}:
             if self.has_own_code_authority():
                 return self.repair_own_code_with_authority()
@@ -7707,6 +7814,8 @@ class AssistantEngine:
         runtime = getattr(self, "project_improvements", None)
         if runtime is not None and runtime.has_pending_project_edit:
             return runtime.reject_pending()
+        self._clear_own_code_pending_proposal_store()
+        self._pending_own_code_fingerprint = None
         return self.editor.reject()
 
     def create_snapshot(self, note: str = "Manuel snapshot"):
@@ -8230,6 +8339,138 @@ class AssistantEngine:
             f"Recovery: {recovery}\n"
             "Kaynak: diskteki own-code cycle kaydi; raporlama yeni plan, proposal veya recovery islemi baslatmaz."
         )
+
+    def _own_code_language_learning_request(self, text: str) -> str | None:
+        """Learn an explicitly taught user phrase without executing an engineering action."""
+
+        raw = str(text or "").strip()
+        normalized = self.command_key(raw)
+        teaching_markers = (
+            "bundan sonra",
+            "dedigimde",
+            "dedigim zaman",
+            "soyledigimde",
+            "kullanici dilime kaydet",
+            "dilime kaydet",
+            "bunu ogren",
+            "bu ifadeyi ogren",
+        )
+        if not any(marker in normalized for marker in teaching_markers):
+            return None
+
+        quoted = re.search(r'["“”]([^"“”]{2,160})["“”]', raw)
+        if quoted is None:
+            quoted = re.search(r"'([^']{2,160})'", raw)
+        if quoted is None:
+            return (
+                "Ogrenecegim ifadeyi tirnak icinde vermelisin. "
+                'Ornek: Bundan sonra "taslagi bir cikar" dedigimde proposal olustur.'
+            )
+
+        phrase = quoted.group(1).strip()
+        remainder = raw[quoted.end():].strip()
+        if not remainder:
+            return (
+                "Ifadeyi aldim ancak ne anlama geldigini belirleyemedim. "
+                "Beklenen davranisi da acikca soylemelisin."
+            )
+
+        canonical_remainder = canonicalize_taught_meaning(remainder)
+        meaning_command = classify_own_code_command(canonical_remainder)
+        if meaning_command.action is OwnCodeAction.NONE:
+            # Some teaching sentences put the semantic explanation before the
+            # quoted phrase. Use the full sentence after removing only the
+            # quoted surface phrase, then canonicalize Turkish teaching-clause
+            # inflections before deterministic classification.
+            semantic_text = (raw[:quoted.start()] + " " + raw[quoted.end():]).strip()
+            semantic_text = canonicalize_taught_meaning(semantic_text)
+            meaning_command = classify_own_code_command(semantic_text)
+
+        if meaning_command.action is OwnCodeAction.NONE:
+            return (
+                "Ifadeyi kaydetmedim; ogretilen anlami guvenilir bicimde "
+                "structured action'a ceviremedim. CREATE_PROPOSAL, CREATE_PLAN, "
+                "REPORT_ENGINEERING_STATE gibi davranisi daha acik tarif et."
+            )
+
+        intent = meaning_command.action.value.upper()
+        decision = activate_learned_phrase(
+            OWN_CODE_USER_LANGUAGE_FILE,
+            phrase=phrase,
+            intent=intent,
+        )
+        if not decision.active:
+            return (
+                "Ifadeyi aktive etmedim. "
+                f"Neden: {decision.reason}. Hicbir engineering islemi baslatilmadi."
+            )
+
+        return (
+            "KULLANICI DILI OGRENILDI\n"
+            f"Ifade: {decision.phrase}\n"
+            f"Anlam: {decision.intent}\n"
+            "Durum: ACTIVE\n"
+            "Bu komut yalnizca dil hafizasini guncelledi; proposal, plan veya apply baslatmadi."
+        )
+
+    def _structured_own_code_command_request(self, text: str) -> str | None:
+        """Execute one deterministic action produced by the own-code command router."""
+
+        command = classify_own_code_command(
+            text,
+            learned_store_path=OWN_CODE_USER_LANGUAGE_FILE,
+        )
+        if command.action is OwnCodeAction.NONE:
+            return None
+        if command.action is OwnCodeAction.REPORT_ENGINEERING_STATE:
+            return self._persisted_engineering_state_report()
+        if command.action is OwnCodeAction.REPORT_ENGINEERING_AND_GIT:
+            return self._engineering_state_report()
+        if command.action is OwnCodeAction.REPORT_GIT_STATE:
+            return self._authoritative_git_state_report()
+        if command.action is OwnCodeAction.CREATE_PLAN:
+            return self.prepare_own_code_plan(text)
+        if command.action is OwnCodeAction.CREATE_PROPOSAL:
+            explicit_paths, explicit_symbols = self._explicit_own_code_scope(text)
+            if not explicit_paths:
+                return self.prepare_own_code_plan(text)
+            root = Path(self.own_project_root()).resolve(strict=False)
+            approved_paths: list[str] = []
+            for relative in explicit_paths:
+                normalized = str(relative).strip().replace("\\", "/")
+                if not self._is_active_own_code_source_path(normalized):
+                    continue
+                try:
+                    candidate = (root / normalized).resolve(strict=False)
+                    candidate.relative_to(root)
+                except (OSError, ValueError):
+                    continue
+                if candidate.is_file() and not self._is_test_path(normalized):
+                    approved_paths.append(normalized)
+            if not approved_paths:
+                return (
+                    "Yeni proposal istegindeki hedef aktif kaynak agacinda "
+                    "dogrulanamadi; hicbir taslak veya patch uretilmedi."
+                )
+            return self.prepare_own_code_proposal(
+                text,
+                approved_paths=tuple(dict.fromkeys(approved_paths)),
+                approved_symbols=explicit_symbols,
+                plan_id="DIRECT-PROPOSAL",
+            )
+        if command.action is OwnCodeAction.APPROVE_PLAN:
+            result = self._handle_own_code_plan_follow_up("plani onayla")
+            return result or "Onay bekleyen bir kendi-kod gelistirme plani yok."
+        if command.action is OwnCodeAction.APPLY_PENDING:
+            result = self._own_code_approval_request(text)
+            return result or (
+                "Uygulanacak bekleyen bir kod degisikligi onerisi yok. "
+                "Once acikca yeni bir degisiklik taslagi istemelisin."
+            )
+        if command.action is OwnCodeAction.REJECT_PENDING:
+            result = self._own_code_approval_request(text)
+            return result or "Reddedilecek bekleyen bir kod degisikligi onerisi yok."
+        return None
 
     def _engineering_state_report(self) -> str:
         """Report persisted engineering state together with authoritative Git state."""
@@ -9595,6 +9836,32 @@ class AssistantEngine:
         except Exception:
             return None
 
+    @staticmethod
+    def _is_active_own_code_source_path(path: str) -> bool:
+        """Return True only for files that belong to the active source tree."""
+        normalized = str(path or "").strip().replace(chr(92), "/")
+        while normalized.startswith("./"):
+            normalized = normalized[2:]
+        if not normalized:
+            return False
+        parts = tuple(part.casefold() for part in normalized.split("/") if part)
+        blocked_parts = {
+            ".artmach_assistant",
+            ".jarvis",
+            ".jarvis_fix_backup",
+            "checkpoints",
+            "checkpoint",
+            "backup",
+            "backups",
+            "__pycache__",
+            ".pytest_cache",
+        }
+        if any(part in blocked_parts for part in parts):
+            return False
+        if any(part.startswith("stage") and "backup" in part for part in parts):
+            return False
+        return True
+
     def _resolve_own_code_candidate_paths(
         self, instruction: str, *, max_files: int = 6
     ) -> tuple[str, ...]:
@@ -9653,6 +9920,8 @@ class AssistantEngine:
             else:
                 path = raw_path.lstrip("./")
             if self._is_test_path(path):
+                continue
+            if not self._is_active_own_code_source_path(path):
                 continue
             if path not in candidates:
                 candidates.append(path)
@@ -9762,6 +10031,7 @@ class AssistantEngine:
                             not relative
                             or Path(relative).is_absolute()
                             or self._is_test_path(relative)
+                            or not self._is_active_own_code_source_path(relative)
                         ):
                             continue
                         try:
@@ -9826,6 +10096,7 @@ class AssistantEngine:
                     if (
                         candidate.is_file()
                         and not self._is_test_path(relative)
+                        and self._is_active_own_code_source_path(relative)
                     ):
                         candidates.append(relative)
 
@@ -10137,7 +10408,40 @@ class AssistantEngine:
                 f"Plan durumu: {plan.get('status', 'bilinmiyor')}. "
                 f"Hedef: {plan.get('instruction', '')}. Olası dosyalar: {targets}."
             )
-        if any(word.startswith(("onayla", "onayliyorum", "devam", "uygula")) for word in words):
+        deferred_application = any(
+            phrase in normalized
+            for phrase in (
+                "uygulama",
+                "henuz uygulama",
+                "simdilik uygulama",
+                "degisikligi uygulama",
+                "kodu uygulama",
+                "taslagi uygulama",
+                "patch uygulama",
+                "onay bekle",
+                "onayimi bekle",
+            )
+        )
+        explicit_plan_approval = (
+            not deferred_application
+            and (
+                normalized in {
+                    "plani onayla",
+                    "planı onayla",
+                    "plani onayliyorum",
+                    "planı onaylıyorum",
+                    "planla devam",
+                    "plan ile devam",
+                    "plani uygula",
+                    "planı uygula",
+                }
+                or (
+                    any(word.startswith(("onayla", "onayliyorum", "devam")) for word in words)
+                    and not any(word.startswith(("hazirla", "olustur", "uret")) for word in words)
+                )
+            )
+        )
+        if explicit_plan_approval:
             # Delegate to the state-aware path so runtime repair plans retain their
             # exact file/symbol boundary.
             return self._handle_own_code_plan_follow_up(text)
@@ -12135,6 +12439,17 @@ class AssistantEngine:
         voice_diagnostic_follow_up = self._active_voice_diagnostic_plan_request(text)
         if voice_diagnostic_follow_up is not None:
             return voice_diagnostic_follow_up
+
+        language_learning = self._own_code_language_learning_request(text)
+        if language_learning is not None:
+            return language_learning
+
+        # Explicit own-code control requests are classified once into a
+        # structured action before any legacy plan/apply follow-up can
+        # reinterpret the same sentence.
+        structured_own_code = self._structured_own_code_command_request(text)
+        if structured_own_code is not None:
+            return structured_own_code
 
         # A pending own-code plan owns short, generic approval phrases such as
         # "Onaylıyorum".  The generic agent-tool bridge also accepts those

@@ -18,7 +18,7 @@ IGNORED_DIRS = {
     ".git", ".svn", ".hg", ".idea", ".vs", ".vscode", ".venv", "venv", "env",
     "node_modules", "__pycache__", "build", "dist", "out", "target", ".pytest_cache",
     ".mypy_cache", ".ruff_cache", "coverage", ".next", ".nuxt",
-    ".jarvis_fix_backup",
+    ".jarvis_fix_backup", ".artmach_assistant", ".jarvis",
 }
 
 
