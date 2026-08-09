@@ -497,6 +497,23 @@ def test_vague_development_request_asks_one_clarifying_question() -> None:
     assert result.count("?") == 1
 
 
+def test_precise_proposal_routing_request_is_not_rejected_as_vague() -> None:
+    engine = _engine()
+    engine._resolve_own_code_candidate_paths = (
+        lambda _instruction, max_files=6: ("core/assistant.py",)
+    )
+
+    result = engine.prepare_own_code_plan(
+        "AssistantEngine._own_code_approval_request icinde dogrulanmis bekleyen "
+        "proposal'in acik uygula komutunu apply_pending_own_code_proposal "
+        "metoduna yonlendir; test basarisizsa rollback yap ve test basariliysa "
+        "closeout kaydi olustur; yalnizca proposal hazirla, henuz uygulama."
+    )
+
+    assert "yeterince somut degil" not in result.casefold()
+    assert "planı onayla" in result
+
+
 def test_plan_is_persisted_before_patch_generation(
     tmp_path, monkeypatch
 ) -> None:

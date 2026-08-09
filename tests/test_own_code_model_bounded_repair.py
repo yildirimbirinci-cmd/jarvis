@@ -149,6 +149,61 @@ def test_same_invalid_patch_is_not_repeated_forever(tmp_path, monkeypatch) -> No
     assert engine.editor.pending is None
 
 
+def test_existing_helper_rejection_keeps_retry_on_approved_method(tmp_path) -> None:
+    engine = _engine(tmp_path)
+    source = tmp_path / "core" / "assistant.py"
+    source.write_text(
+        "class AssistantEngine:\n"
+        "    def _own_code_approval_request(self, text: str):\n"
+        "        return False\n\n"
+        "    def _own_code_risk_request(self, text: str):\n"
+        "        return None\n",
+        encoding="utf-8",
+    )
+    responses = iter((
+        json.dumps({
+            "summary": "recreate existing helper",
+            "files": [{
+                "path": "core/assistant.py",
+                "operations": [{
+                    "op": "insert_class_method",
+                    "class_name": "AssistantEngine",
+                    "content": (
+                        "def _own_code_risk_request(self, text: str):\n"
+                        "    return None"
+                    ),
+                }],
+            }],
+        }),
+        json.dumps({
+            "summary": "edit approved method only",
+            "files": [{
+                "path": "core/assistant.py",
+                "operations": [{
+                    "op": "replace",
+                    "old": "        return False",
+                    "new": "        return text == 'uygula'",
+                }],
+            }],
+        }),
+    ))
+    prompts: list[str] = []
+    engine._request_code_model_json = (
+        lambda prompt, **_kwargs: prompts.append(prompt) or next(responses)
+    )
+
+    proposal = engine._generate_validated_own_code_proposal(
+        "Yalnızca core/assistant.py içindeki "
+        "AssistantEngine._own_code_approval_request metodunu değiştir."
+    )
+
+    assert len(prompts) == 2
+    assert "EXISTING HELPER TARGET RECOVERY CONTRACT" in prompts[1]
+    assert "Do not change __init__ or any sibling method" in prompts[1]
+    assert proposal.files[0].new_content.count("def _own_code_risk_request") == 1
+    assert "return text == 'uygula'" in proposal.files[0].new_content
+
+
 def test_structural_semantic_loss_retries_inside_proposal_loop(
     tmp_path, monkeypatch
 ) -> None:
@@ -379,15 +434,67 @@ def test_duplicate_missing_anchor_changes_next_retry_prompt(tmp_path) -> None:
 
     engine._request_code_model_json = repeat_invalid
 
-    with pytest.raises(WorkspaceError, match="3 kontrollü denemede"):
+    with pytest.raises(WorkspaceError, match=r"\d+ kontrollü denemede"):
         engine._generate_validated_own_code_proposal(
             "app.py dosyasındaki WakeWordWorker.run metodunu refaktör et"
         )
 
-    assert len(prompts) == 3
+    assert len(prompts) == 4
     assert prompts[1] != prompts[2]
-    assert "aynısını tekrar üretti" in prompts[2]
+    assert "ANCHOR RETRY CONTRACT (MANDATORY)" in prompts[1]
+    assert "APPROVED METHOD SOURCE" in prompts[1]
     assert "\u00d6NCEK\u0130 TASLAK REDDED\u0130LD\u0130. DO\u011eRULAYICI RAPORU:" in prompts[2]
+
+
+def test_source_grounded_anchor_rejection_adds_live_source_retry_guidance(
+    tmp_path,
+) -> None:
+    engine = _engine(tmp_path)
+    (tmp_path / "core").mkdir(exist_ok=True)
+    (tmp_path / "core" / "assistant.py").write_text(
+        "class AssistantEngine:\n"
+        "    def _own_code_approval_request(self, instruction):\n"
+        "        if not instruction:\n"
+        "            return None\n"
+        "        return self.apply_pending_own_code_proposal(instruction)\n",
+        encoding="utf-8",
+    )
+    invalid = json.dumps(
+        {
+            "summary": "route explicit apply",
+            "files": [
+                {
+                    "path": "core/assistant.py",
+                    "reason": "approved routing change",
+                    "operations": [
+                        {
+                            "op": "replace",
+                            "old": "        if instruction is None:\n            return None\n",
+                            "new": "        if not instruction:\n            return None\n",
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+    prompts = []
+
+    def repeat_invalid(prompt: str, **_kwargs) -> str:
+        prompts.append(prompt)
+        return invalid
+
+    engine._request_code_model_json = repeat_invalid
+
+    with pytest.raises(WorkspaceError, match=r"\d+ kontrollü denemede"):
+        engine._generate_validated_own_code_proposal(
+            "core/assistant.py içindeki "
+            "AssistantEngine._own_code_approval_request sembolünü değiştir"
+        )
+
+    assert len(prompts) == 4
+    assert "ANCHOR RETRY CONTRACT (MANDATORY)" in prompts[1]
+    assert "APPROVED METHOD SOURCE" in prompts[1]
+    assert "if not instruction:" in prompts[1]
     assert "ÖNCEKİ TASLAK REDDEDİLDİ. DOĞRULAYICI RAPORU:" in prompts[2]
 
 

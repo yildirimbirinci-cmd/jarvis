@@ -1271,7 +1271,13 @@ class AssistantEngine:
         def is_anchor_error(value: object) -> bool:
             error_text = str(value or "")
             folded = error_text.casefold()
-            return (("patch anchor" in folded and "bulunan=" in folded) or "replace_method_block" in folded or "yapısal blok koşulu" in folded or "yapisal blok kosulu" in folded)
+            return (
+                ("patch anchor" in folded and "bulunan=" in folded)
+                or "source grounded anchor reddi" in folded
+                or "replace_method_block" in folded
+                or "yapısal blok koşulu" in folded
+                or "yapisal blok kosulu" in folded
+            )
 
         def is_helper_shape_error(value: object) -> bool:
             folded = str(value or "").casefold()
@@ -1282,6 +1288,14 @@ class AssistantEngine:
 
         def is_noop_error(value: object) -> bool:
             return "Patch işlemi gerçek değişiklik üretmedi" in str(value or "")
+
+        def is_existing_helper_error(value: object) -> bool:
+            folded = str(value or "").casefold()
+            return (
+                "yardımcı metot sınıfta zaten var" in folded
+                or "yardimci metot sinifta zaten var" in folded
+                or "class method already exists" in folded
+            )
 
         def rejected_operation_detail(
             payload: object,
@@ -1318,6 +1332,7 @@ class AssistantEngine:
         failures: list[str] = []
         anchor_retry_guidance = ""
         helper_shape_retry_guidance = ""
+        existing_helper_retry_guidance = ""
         diagnostic_run_id = (
             datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
             + "-"
@@ -1378,6 +1393,7 @@ class AssistantEngine:
                 attempt > base_attempts
                 and not anchor_retry_guidance
                 and not helper_shape_retry_guidance
+                and not existing_helper_retry_guidance
             ):
                 break
             current_prompt = prompt
@@ -1464,6 +1480,19 @@ class AssistantEngine:
                     "konumda zaten bulunmamalı. İstenen refaktörü üreten en küçük "
                     "gerçek değişikliği, çalışan kaynaktan alınmış benzersiz bir "
                     "anchor ile gönder."
+                )
+
+            if is_existing_helper_error(previous_error):
+                current_prompt += (
+                    "\n\nEXISTING HELPER TARGET RECOVERY CONTRACT (MANDATORY): "
+                    "The rejected insert_class_method operation targeted a method "
+                    "that already exists. Do not insert, recreate, rename, or replace "
+                    "that helper. Discard the rejected operation completely. Modify "
+                    "only the explicitly approved target method named in the user "
+                    "instruction, using an exact unique block copied from that live "
+                    "method source. Do not change __init__ or any sibling method. "
+                    "If the requested behavior cannot be implemented inside the "
+                    "approved method, return an empty files list instead of guessing."
                 )
 
             if previous_response:
@@ -1844,12 +1873,15 @@ class AssistantEngine:
                 if "KANITA BAGLI KAPSAM REDDI:" in previous_error:
                     anchor_retry_guidance = ""
                     helper_shape_retry_guidance = ""
+                    existing_helper_retry_guidance = ""
                     previous_response = ""
                 else:
                     if not is_anchor_error(previous_error):
                         anchor_retry_guidance = ""
                     if not is_helper_shape_error(previous_error):
                         helper_shape_retry_guidance = ""
+                    if not is_existing_helper_error(previous_error):
+                        existing_helper_retry_guidance = ""
 
                 if is_helper_shape_error(previous_error):
                     previous_response = ""
@@ -1859,6 +1891,16 @@ class AssistantEngine:
                         "no TODO, no invented state APIs."
                     )
                     previous_error += "\n\n" + helper_shape_retry_guidance
+
+                if is_existing_helper_error(previous_error):
+                    previous_response = ""
+                    existing_helper_retry_guidance = (
+                        "EXISTING HELPER TARGET RECOVERY CONTRACT: discard the "
+                        "rejected insert_class_method operation; do not recreate the "
+                        "existing helper; edit only the explicitly approved target "
+                        "method with an exact live-source replace operation."
+                    )
+                    previous_error += "\n\n" + existing_helper_retry_guidance
 
                 if is_anchor_error(previous_error):
                     previous_response = ""
@@ -10273,6 +10315,7 @@ class AssistantEngine:
             if word.startswith((
                 "ekle", "duzelt", "degistir", "gelistir", "iyilestir",
                 "hizlandir", "optimiz", "kaldir", "guncelle", "uyarla",
+                "yonlendir", "hazirla", "olustur", "uygula", "tamamla",
             ))
         ]
         detail_words = [
@@ -10470,6 +10513,7 @@ class AssistantEngine:
                 "olsun", "olmasin", "insin", "ciksin", "azalsin", "artsin",
                 "duzelsin", "calissin", "gecmeli", "korunmali", "hizlan",
                 "duzelt", "degistir", "ekle", "kaldir", "engelle", "sagla",
+                "yonlendir", "hazirla", "olustur", "uygula", "tamamla",
             ))
             for word in words
         )
@@ -10503,6 +10547,7 @@ class AssistantEngine:
             word.startswith((
                 "gelistir", "iyilestir", "duzelt", "onar", "degistir",
                 "refaktor", "duzenle", "cikar", "ayir", "tasi",
+                "yonlendir", "hazirla", "olustur", "uygula", "tamamla",
             ))
             for word in words
         )

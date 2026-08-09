@@ -1911,6 +1911,7 @@ def build_missing_anchor_guidance(
                     ),
                     "Bu blo?u birebir kullan veya i?lemi yeniden tasarla.",
                     f"\nGER?EK KAYNAK BLO?U:\n{closest}",
+                    f"\nAPPROVED METHOD SOURCE:\n{scoped_source}",
                 )
             )
 
