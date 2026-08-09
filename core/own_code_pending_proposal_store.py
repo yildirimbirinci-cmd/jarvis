@@ -35,9 +35,53 @@ class OwnCodePendingProposalStore:
         self.path = Path(path)
 
     @staticmethod
+    def canonicalize(proposal: object) -> EditProposal | None:
+        """Convert a structurally valid proposal into the canonical EditProposal.
+
+        Runtime launch paths may load the same source module under different
+        package names, making strict isinstance checks unreliable.  Persistence
+        therefore validates the proposal shape and rebuilds it with the
+        canonical class used by this module.
+        """
+
+        summary = getattr(proposal, "summary", None)
+        raw_files = getattr(proposal, "files", None)
+        if not isinstance(summary, str):
+            return None
+        if not isinstance(raw_files, (list, tuple)) or not raw_files:
+            return None
+
+        changes: list[ProposedFileChange] = []
+        for change in raw_files:
+            path = getattr(change, "path", None)
+            reason = getattr(change, "reason", None)
+            old_content = getattr(change, "old_content", None)
+            new_content = getattr(change, "new_content", None)
+            existed = getattr(change, "existed", None)
+            if not isinstance(path, str) or not path.strip():
+                return None
+            if not isinstance(reason, str):
+                return None
+            if not isinstance(old_content, str) or not isinstance(new_content, str):
+                return None
+            if not isinstance(existed, bool):
+                return None
+            changes.append(
+                ProposedFileChange(
+                    path=path,
+                    reason=reason,
+                    old_content=old_content,
+                    new_content=new_content,
+                    existed=existed,
+                )
+            )
+        return EditProposal(summary, changes)
+
+    @staticmethod
     def _payload(proposal: EditProposal, fingerprint: str) -> dict[str, object]:
-        if not isinstance(proposal, EditProposal) or not proposal.files:
-            raise ValueError("A non-empty EditProposal is required.")
+        proposal = OwnCodePendingProposalStore.canonicalize(proposal)
+        if proposal is None:
+            raise ValueError("A structurally valid non-empty proposal is required.")
         if len(proposal.files) > MAX_FILES:
             raise ValueError("Pending proposal exceeds safe file count limit.")
         rows: list[dict[str, object]] = []

@@ -2036,3 +2036,171 @@ def qualify_inserted_private_helper_calls(
                 operation["new"] = ast.unparse(tree)
 
     return repaired
+
+
+def ground_requested_docstring_replace_anchors(
+    payload: dict[str, Any],
+    *,
+    project_root: Path,
+    instruction: str,
+) -> dict[str, Any]:
+    """Ground a docstring-only replace anchor from the live AST.
+
+    The model remains responsible for the replacement docstring. Jarvis only
+    replaces a missing model-generated ``old`` value when all of the following
+    are proven from the request and live source:
+
+    * the request explicitly says docstring;
+    * the operation targets an existing Python file;
+    * the requested function/method name is explicit in backticks or as a
+      dotted symbol;
+    * the live target has exactly one docstring statement;
+    * the replacement is itself only a string-literal statement.
+
+    This never guesses executable code and never broadens file scope.
+    """
+    raw_instruction = str(instruction or "")
+    if "docstring" not in raw_instruction.casefold():
+        return copy.deepcopy(payload)
+
+    repaired = copy.deepcopy(payload)
+    files = repaired.get("files")
+    if not isinstance(files, list):
+        return repaired
+
+    explicit_names = re.findall(
+        r"`([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?)`",
+        raw_instruction,
+    )
+    dotted = [
+        match.group(0)
+        for match in _DOTTED_SYMBOL_PATTERN.finditer(raw_instruction)
+        if not match.group(0).casefold().endswith(".py")
+    ]
+
+    # Runtime code-model prompts do not always preserve the user's exact
+    # backtick syntax.  The model payload itself frequently carries the target
+    # symbol in summary/reason fields, so use those fields only as additional
+    # symbol-name evidence.  The final anchor still comes exclusively from the
+    # live AST and must be unique.
+    payload_evidence: list[str] = []
+    summary = repaired.get("summary")
+    if isinstance(summary, str):
+        payload_evidence.append(summary)
+    for file_row in repaired.get("files", ()):
+        if not isinstance(file_row, dict):
+            continue
+        reason = file_row.get("reason")
+        if isinstance(reason, str):
+            payload_evidence.append(reason)
+
+    payload_names: list[str] = []
+    for evidence in payload_evidence:
+        payload_names.extend(
+            re.findall(r"\b(_[A-Za-z0-9_]+|[A-Za-z][A-Za-z0-9_]{2,})\b", evidence)
+        )
+
+    # Payload evidence is closest to the actual proposed edit and must win
+    # over unrelated symbols present elsewhere in the large code-model prompt.
+    requested_names = list(dict.fromkeys([*payload_names, *explicit_names, *dotted]))
+    if not requested_names:
+        return repaired
+
+    root = Path(project_root).resolve(strict=False)
+
+    def find_target(tree: ast.Module, requested: str):
+        parts = requested.split(".")
+        if len(parts) == 2:
+            class_name, function_name = parts
+            matches = []
+            for owner in tree.body:
+                if isinstance(owner, ast.ClassDef) and owner.name == class_name:
+                    matches.extend(
+                        child for child in owner.body
+                        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))
+                        and child.name == function_name
+                    )
+            return matches
+        function_name = parts[-1]
+        matches = [
+            node for node in tree.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name == function_name
+        ]
+        # Also allow a unique direct class method when the user supplied only
+        # the method name. Uniqueness is the proof; no class is guessed.
+        for owner in tree.body:
+            if not isinstance(owner, ast.ClassDef):
+                continue
+            matches.extend(
+                child for child in owner.body
+                if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and child.name == function_name
+            )
+        return matches
+
+    for file_row in files:
+        if not isinstance(file_row, dict):
+            continue
+        raw_path = str(file_row.get("path", "")).strip().replace("\\", "/")
+        if not raw_path.endswith(".py"):
+            continue
+        candidate = (root / raw_path).resolve(strict=False)
+        try:
+            candidate.relative_to(root)
+            source = candidate.read_text(encoding="utf-8")
+            tree = ast.parse(source, filename=raw_path)
+        except (ValueError, OSError, UnicodeError, SyntaxError):
+            continue
+
+        target = None
+        for requested in requested_names:
+            matches = find_target(tree, requested)
+            if len(matches) == 1:
+                target = matches[0]
+                break
+        if target is None or not target.body:
+            continue
+
+        first = target.body[0]
+        if not (
+            isinstance(first, ast.Expr)
+            and isinstance(first.value, ast.Constant)
+            and isinstance(first.value.value, str)
+        ):
+            continue
+        live_docstring = ast.get_source_segment(source, first)
+        if not live_docstring or source.count(live_docstring) != 1:
+            continue
+
+        operations = file_row.get("operations")
+        if not isinstance(operations, list):
+            continue
+        for operation in operations:
+            if not isinstance(operation, dict):
+                continue
+            if str(operation.get("op", "")).strip().casefold() != "replace":
+                continue
+            old = operation.get("old")
+            new = operation.get("new")
+            if not isinstance(old, str) or not isinstance(new, str):
+                continue
+            if old and old in source:
+                continue
+
+            # Prove that the model replacement is a docstring statement only.
+            try:
+                parsed_new = ast.parse(textwrap.dedent(new).strip())
+            except SyntaxError:
+                continue
+            if (
+                len(parsed_new.body) != 1
+                or not isinstance(parsed_new.body[0], ast.Expr)
+                or not isinstance(parsed_new.body[0].value, ast.Constant)
+                or not isinstance(parsed_new.body[0].value.value, str)
+            ):
+                continue
+
+            operation["old"] = live_docstring
+            operation["_live_ast_grounded"] = "docstring"
+    return repaired

@@ -113,6 +113,7 @@ from artmach_assistant.core.own_code_risk import assess_own_code_proposal
 from artmach_assistant.core.own_code_anchor_repair import (
     build_ambiguous_anchor_guidance,
     build_missing_anchor_guidance,
+    ground_requested_docstring_replace_anchors,
     build_structural_method_block_guidance,
     merge_duplicate_operation_rows,
     qualify_inserted_private_helper_calls,
@@ -1602,6 +1603,16 @@ class AssistantEngine:
                     )
                     raise _OwnCodeSafeAbstention(message)
                 payload = merge_duplicate_operation_rows(payload)
+                # For an explicit docstring-only request, the replacement text
+                # may come from the model but the old anchor must come from the
+                # live AST. This narrow grounding happens before the generic
+                # invented-anchor rejection gate and never rewrites executable
+                # code or broadens file scope.
+                payload = ground_requested_docstring_replace_anchors(
+                    payload,
+                    project_root=self.own_project_root(),
+                    instruction=prompt,
+                )
 
                 # Reject invented replace-style anchors before later repair
                 # stages. This gate never guesses or rewrites an anchor.
@@ -3216,11 +3227,13 @@ class AssistantEngine:
         )
         risk = assess_own_code_proposal(proposal)
         self._pending_own_code_fingerprint = proposal_fingerprint(proposal)
-        if isinstance(proposal, EditProposal):
+        pending_store = self._own_code_pending_proposal_store()
+        canonical_pending = pending_store.canonicalize(proposal)
+        if canonical_pending is not None:
             try:
-                self._own_code_pending_proposal_store().save(
-                    proposal, self._pending_own_code_fingerprint
-                )
+                persisted_fingerprint = proposal_fingerprint(canonical_pending)
+                pending_store.save(canonical_pending, persisted_fingerprint)
+                self._pending_own_code_fingerprint = persisted_fingerprint
             except Exception as exc:
                 reject = getattr(self.editor, "reject", None)
                 if callable(reject):
@@ -4524,16 +4537,45 @@ class AssistantEngine:
         supplied_ids = re.findall(r"(?<![0-9a-f])[0-9a-f]{12}(?![0-9a-f])", normalized)
         if supplied_ids:
             if pending is None:
-                return (
-                    f"{supplied_ids[0]} onay kimliğine ait bekleyen taslak bellekte "
-                    "yok. Uygulama yapılmadı; yeni bir taslak ve onay kimliği üretmelisin."
+                restored_pending, restore_error = (
+                    self._restore_pending_own_code_proposal_for_approval(
+                        supplied_ids[0]
+                    )
                 )
+                if restored_pending is None:
+                    return restore_error
+                pending = restored_pending
             expected_id = short_fingerprint(pending)
             if supplied_ids[0] != expected_id:
                 return (
                     "Onay kimliği bekleyen taslakla eşleşmiyor. "
                     f"Beklenen kimlik: {expected_id}. Hiçbir dosya değiştirilmedi."
                 )
+
+            validation_only = (
+                any(
+                    marker in normalized
+                    for marker in (
+                        "ana kaynak",
+                        "henuz uygulama",
+                        "simdilik uygulama",
+                        "yalniz dogrula",
+                        "sadece dogrula",
+                        "worktree dogrulama",
+                        "dogrulama zincirini baslat",
+                    )
+                )
+                and any(
+                    marker in normalized
+                    for marker in (
+                        "dogrula",
+                        "dogrulama",
+                        "worktree",
+                    )
+                )
+            )
+            if validation_only:
+                return self._validate_pending_own_code_proposal_isolated()
         project_runtime = getattr(self, "project_improvements", None)
         project_pending = bool(
             project_runtime is not None
@@ -8428,6 +8470,8 @@ class AssistantEngine:
             return self._engineering_state_report()
         if command.action is OwnCodeAction.REPORT_GIT_STATE:
             return self._authoritative_git_state_report()
+        if command.action is OwnCodeAction.REPORT_PENDING_PROPOSAL:
+            return self._pending_own_code_proposal_report()
         if command.action is OwnCodeAction.CREATE_PLAN:
             return self.prepare_own_code_plan(text)
         if command.action is OwnCodeAction.CREATE_PROPOSAL:
@@ -8471,6 +8515,221 @@ class AssistantEngine:
             result = self._own_code_approval_request(text)
             return result or "Reddedilecek bekleyen bir kod degisikligi onerisi yok."
         return None
+
+    def _restore_pending_own_code_proposal_for_approval(
+        self,
+        approval_id: str,
+    ):
+        """Restore one persisted proposal only when its approval id matches."""
+
+        expected = str(approval_id or "").strip().lower()
+        if not expected:
+            return None, "Onay kimligi eksik; restart-safe proposal restore edilmedi."
+
+        pending = getattr(getattr(self, "editor", None), "pending", None)
+        if pending is not None:
+            try:
+                current = proposal_fingerprint(pending)
+            except Exception:
+                current = ""
+            if current.lower().startswith(expected):
+                self._pending_own_code_fingerprint = current
+                return pending, ""
+            return None, (
+                "Onay kimligi bellekteki pending proposal ile eslesmiyor. "
+                "Uygulama yapilmadi."
+            )
+
+        if not OWN_CODE_PENDING_PROPOSAL_FILE.is_file():
+            return None, (
+                f"{expected} onay kimligine ait restart-safe pending proposal yok. "
+                "Uygulama yapilmadi."
+            )
+
+        try:
+            restored = self._own_code_pending_proposal_store().load(
+                self.own_project_root()
+            )
+        except Exception as exc:
+            return None, (
+                "Restart-safe pending proposal kaynak dogrulamasi basarisiz: "
+                f"{exc}. Uygulama yapilmadi."
+            )
+        if restored is None:
+            return None, "Restart-safe pending proposal bulunamadi. Uygulama yapilmadi."
+
+        actual = proposal_fingerprint(restored.proposal)
+        stored = str(restored.fingerprint or "")
+        if actual != stored:
+            return None, (
+                "Restart-safe pending proposal fingerprint dogrulamasi basarisiz. "
+                "Uygulama yapilmadi."
+            )
+        if not stored.lower().startswith(expected):
+            return None, (
+                f"Onay kimligi eslesmedi. Beklenen: {stored[:12]}, verilen: {expected}. "
+                "Uygulama yapilmadi."
+            )
+
+        self.editor.pending = restored.proposal
+        self._pending_own_code_fingerprint = stored
+        return restored.proposal, ""
+
+    def _validate_pending_own_code_proposal_isolated(self) -> str:
+        """Validate the pending proposal in a temporary worktree without apply."""
+
+        pending = getattr(getattr(self, "editor", None), "pending", None)
+        if pending is None:
+            return (
+                "Dogrulanacak pending proposal bellekte yok. "
+                "Ana kaynaklara hicbir sey uygulanmadi."
+            )
+
+        expected_fingerprint = getattr(
+            self, "_pending_own_code_fingerprint", None
+        )
+        actual_fingerprint = proposal_fingerprint(pending)
+        if (
+            expected_fingerprint is not None
+            and actual_fingerprint != expected_fingerprint
+        ):
+            return (
+                "Pending proposal fingerprint dogrulamasi basarisiz. "
+                "Worktree veya apply baslatilmadi."
+            )
+
+        self.workspace.set_workspace(str(self.own_project_root()))
+
+        baseline_success, baseline_output = self._run_own_tests()
+        baseline_failures = self._test_failure_ids(baseline_output)
+        if not baseline_success and not baseline_output.strip():
+            return (
+                "Baslangic testleri calistirilamadi. "
+                "Ana kaynaklara hicbir sey uygulanmadi."
+            )
+
+        try:
+            isolated = OwnCodeWorktreeValidator(
+                self.own_project_root()
+            ).validate(
+                pending,
+                lambda root: self._validate_own_code_at_root(
+                    root,
+                    baseline_failures=baseline_failures,
+                ),
+            )
+        except Exception as exc:
+            self._save_own_code_cycle(
+                "proposal_ready",
+                f"Isolated validation baslatilamadi: {exc}",
+                failures=sorted(baseline_failures),
+                changed_paths=[
+                    str(change.path)
+                    for change in getattr(pending, "files", ())
+                    if str(getattr(change, "path", "")).strip()
+                ],
+                validation_summary=str(exc),
+            )
+            return (
+                "Restart-safe proposal restore edildi ancak gecici Git worktree "
+                f"dogrulamasi baslatilamadi: {exc}. Ana kaynaklara uygulanmadi."
+            )
+
+        paths = [
+            str(change.path)
+            for change in getattr(pending, "files", ())
+            if str(getattr(change, "path", "")).strip()
+        ]
+        if not isolated.ok:
+            self._save_own_code_cycle(
+                "proposal_ready",
+                "Isolated validation failed; proposal remains pending.",
+                failures=sorted(baseline_failures),
+                changed_paths=paths,
+                validation_summary=isolated.output[-2000:],
+            )
+            return (
+                "Restart-safe proposal restore edildi ancak gecici worktree "
+                "dogrulamasindan gecmedi. Ana kaynaklara uygulanmadi. "
+                + isolated.output[-900:]
+            )
+
+        self._save_own_code_cycle(
+            "proposal_ready",
+            "Restart-safe proposal isolated worktree validation passed; awaiting apply approval.",
+            failures=sorted(baseline_failures),
+            changed_paths=paths,
+            validation_summary="Isolated worktree validation passed.",
+        )
+        return (
+            "Restart-safe pending proposal restore edildi ve gecici Git worktree "
+            "dogrulamasindan gecti. Ana kaynak dosyalara uygulanmadi; proposal "
+            f"hala onay bekliyor. Onay kimligi: {actual_fingerprint[:12]}."
+        )
+
+    def _pending_own_code_proposal_report(self) -> str:
+        """Report the persisted pending proposal without restoring or applying it."""
+
+        pending = getattr(getattr(self, "editor", None), "pending", None)
+        if pending is not None:
+            try:
+                fingerprint = proposal_fingerprint(pending)
+            except Exception:
+                fingerprint = ""
+            paths = tuple(
+                str(getattr(change, "path", "") or "").strip()
+                for change in getattr(pending, "files", ())
+                if str(getattr(change, "path", "") or "").strip()
+            )
+            summary = str(getattr(pending, "summary", "") or "").strip()
+            return (
+                "BEKLEYEN KOD DEGISIKLIGI PROPOSAL'I\n"
+                f"Kaynak: bellek\n"
+                f"Ozet: {summary or '(bos)'}\n"
+                f"Dosyalar: {', '.join(paths) if paths else '(yok)'}\n"
+                f"Onay kimligi: {fingerprint[:12] if fingerprint else '(yok)'}\n"
+                "Durum: ONAY BEKLIYOR\n"
+                "Salt-okunur rapor; worktree, test veya apply baslatilmadi."
+            )
+
+        if not OWN_CODE_PENDING_PROPOSAL_FILE.is_file():
+            return "Bekleyen restart-safe kod degisikligi proposal'i yok."
+
+        try:
+            restored = self._own_code_pending_proposal_store().load(
+                self.own_project_root()
+            )
+        except Exception as exc:
+            return (
+                "Bekleyen restart-safe proposal dosyasi var ancak kaynak "
+                f"dogrulamasi basarisiz: {exc}. Hicbir apply islemi baslatilmadi."
+            )
+        if restored is None:
+            return "Bekleyen restart-safe kod degisikligi proposal'i yok."
+
+        actual = proposal_fingerprint(restored.proposal)
+        if actual != restored.fingerprint:
+            return (
+                "Bekleyen proposal fingerprint dogrulamasi basarisiz. "
+                "Hicbir apply islemi baslatilmadi."
+            )
+
+        paths = tuple(
+            str(change.path or "").strip()
+            for change in restored.proposal.files
+            if str(change.path or "").strip()
+        )
+        return (
+            "BEKLEYEN KOD DEGISIKLIGI PROPOSAL'I\n"
+            "Kaynak: restart-safe disk kaydi\n"
+            f"Ozet: {str(restored.proposal.summary or '').strip() or '(bos)'}\n"
+            f"Dosyalar: {', '.join(paths) if paths else '(yok)'}\n"
+            f"Onay kimligi: {restored.fingerprint[:12]}\n"
+            "Durum: ONAY BEKLIYOR\n"
+            "Kaynak baseline ve fingerprint dogrulandi. "
+            "Salt-okunur rapor; proposal bellekte restore edilmedi, "
+            "worktree, test veya apply baslatilmadi."
+        )
 
     def _engineering_state_report(self) -> str:
         """Report persisted engineering state together with authoritative Git state."""

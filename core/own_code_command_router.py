@@ -15,6 +15,7 @@ class OwnCodeAction(str, Enum):
     REPORT_ENGINEERING_STATE = "report_engineering_state"
     REPORT_ENGINEERING_AND_GIT = "report_engineering_and_git"
     REPORT_GIT_STATE = "report_git_state"
+    REPORT_PENDING_PROPOSAL = "report_pending_proposal"
     CREATE_PLAN = "create_plan"
     CREATE_PROPOSAL = "create_proposal"
     APPROVE_PLAN = "approve_plan"
@@ -170,6 +171,56 @@ def classify_own_code_command(
             True,
             False,
             "authoritative git state",
+        )
+
+    pending_surface = normalized
+    for old, new in (
+        ("taslagi", "taslak"),
+        ("taslagini", "taslak"),
+        ("proposali", "proposal"),
+        ("proposalini", "proposal"),
+        ("patchi", "patch"),
+        ("patchini", "patch"),
+    ):
+        pending_surface = pending_surface.replace(old, new)
+
+    pending_report = (
+        _has_any(
+            pending_surface,
+            (
+                "bekleyen proposal",
+                "bekleyen proposali",
+                "bekleyen taslak",
+                "bekleyen patch",
+                "pending proposal",
+                "pending draft",
+                "pending patch",
+                "pending code change",
+                "kod degisikligi proposal",
+                "kod degisikligi onerisi",
+            ),
+        )
+        and _has_any(
+            pending_surface,
+            (
+                "rapor",
+                "goster",
+                "durum",
+                "nedir",
+                "ne durumda",
+                "listele",
+                "ozetle",
+                "anlat",
+            ),
+        )
+    )
+    if pending_report:
+        return OwnCodeCommand(
+            OwnCodeAction.REPORT_PENDING_PROPOSAL,
+            normalized,
+            True,
+            False,
+            "read-only pending proposal report",
         )
 
     deferred_application = _has_any(
