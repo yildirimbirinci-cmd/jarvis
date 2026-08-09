@@ -27,6 +27,11 @@ def _engine(tmp_path: Path, cycle: dict):
 
     engine._load_own_code_cycle = load
     engine._save_own_code_cycle = save
+    engine._compile_own_code = lambda: (True, "compile ok")
+    engine._runtime_health_check = lambda: (True, "runtime ok")
+    engine._run_own_tests = lambda: (True, "tests ok")
+    engine._test_failure_ids = lambda _output: set()
+    engine._save_own_validation = lambda *_args: None
     return engine, state
 
 

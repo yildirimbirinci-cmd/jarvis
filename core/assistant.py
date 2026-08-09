@@ -4142,9 +4142,15 @@ class AssistantEngine:
                 part for part in (str(recovery_notice), str(rollback_notice))
                 if part.strip()
             )
+            source_ok, source_detail = (
+                self._validate_recovered_engineering_source(cycle)
+            )
+            if not source_ok:
+                return False, source_detail
             return True, (
                 "Yarım apply transaction geri alındı ve Git çalışma ağacı "
-                "doğrulanmış baseline durumuna döndü. " + transaction_detail
+                "doğrulanmış baseline durumuna döndü. "
+                + transaction_detail + " " + source_detail
             ).strip()
         missing = [
             item for item in changed_paths
@@ -4155,9 +4161,66 @@ class AssistantEngine:
                 "Recovery hedef dosyaları eksik: "
                 + ", ".join(missing[:20])
             )
+        source_ok, source_detail = self._validate_recovered_engineering_source(
+            cycle
+        )
+        if not source_ok:
+            return False, source_detail
         return True, (
             "Git çalışma ağacı temiz ve yarım engineering oturumunun hedef "
-            "dosyaları mevcut; canlı kaynak doğrulanmış baseline ile uyumlu."
+            "dosyaları mevcut; canlı kaynak doğrulanmış baseline ile uyumlu. "
+            + source_detail
+        )
+
+    def _validate_recovered_engineering_source(
+        self,
+        cycle: dict[str, object],
+    ) -> tuple[bool, str]:
+        """Re-run source health gates before claiming restart recovery."""
+        baseline_failures = {
+            str(item)
+            for item in (cycle.get("failures", []) or [])
+            if str(item).strip()
+        }
+        compile_ok, compile_output = self._compile_own_code()
+        runtime_ok, runtime_output = self._runtime_health_check()
+        test_success, test_output = self._run_own_tests()
+        current_failures = self._test_failure_ids(test_output)
+        new_failures = current_failures.difference(baseline_failures)
+        unverifiable_failure = not test_success and not current_failures
+        validation_output = "\n".join(
+            part
+            for part in (compile_output, runtime_output, test_output)
+            if str(part).strip()
+        )
+        self._save_own_validation(
+            compile_ok
+            and runtime_ok
+            and not new_failures
+            and not unverifiable_failure,
+            validation_output,
+        )
+        if not compile_ok:
+            return False, (
+                "Recovery sonrası derleme doğrulaması başarısız: "
+                + str(compile_output)[-900:]
+            )
+        if not runtime_ok:
+            return False, (
+                "Recovery sonrası temiz süreç doğrulaması başarısız: "
+                + str(runtime_output)[-900:]
+            )
+        if new_failures or unverifiable_failure:
+            failure_summary = ", ".join(sorted(new_failures)[:10])
+            if not failure_summary:
+                failure_summary = str(test_output)[-900:]
+            return False, (
+                "Recovery sonrası regresyon doğrulaması başarısız: "
+                + failure_summary
+            )
+        return True, (
+            "Recovery sonrası derleme, temiz süreç ve regresyon "
+            "karşılaştırması tamamlandı."
         )
 
     def own_code_cycle_report(self) -> str:
@@ -8755,14 +8818,15 @@ class AssistantEngine:
                 "Uygulama yapilmadi."
             )
 
-        if not OWN_CODE_PENDING_PROPOSAL_FILE.is_file():
+        pending_store = self._own_code_pending_proposal_store()
+        if not pending_store.path.is_file():
             return None, (
                 f"{expected} onay kimligine ait restart-safe pending proposal yok. "
                 "Uygulama yapilmadi."
             )
 
         try:
-            restored = self._own_code_pending_proposal_store().load(
+            restored = pending_store.load(
                 self.own_project_root()
             )
         except Exception as exc:

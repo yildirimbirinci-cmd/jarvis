@@ -31,6 +31,14 @@ def _engine(cycle):
     return engine, state
 
 
+def _healthy_recovery(engine):
+    engine._compile_own_code = lambda: (True, "compile ok")
+    engine._runtime_health_check = lambda: (True, "runtime ok")
+    engine._run_own_tests = lambda: (True, "tests ok")
+    engine._test_failure_ids = lambda _output: set()
+    engine._save_own_validation = lambda *_args: None
+
+
 def test_restart_interrupts_isolated_validation_without_claiming_live_apply():
     engine, state = _engine({
         "version": 4,
@@ -141,6 +149,7 @@ def test_recovery_rolls_back_interrupted_apply_before_marking_recovered(
         recover_incomplete=lambda: calls.append("recover") or "checkpoint recovered",
         undo=lambda: calls.append("undo") or "rollback complete",
     )
+    _healthy_recovery(engine)
     statuses = iter([
         SimpleNamespace(returncode=0, stdout=" M core/assistant.py\n", stderr=""),
         SimpleNamespace(returncode=0, stdout="", stderr=""),
@@ -154,6 +163,7 @@ def test_recovery_rolls_back_interrupted_apply_before_marking_recovered(
     assert ok is True
     assert calls == ["recover", "undo"]
     assert "baseline" in detail
+    assert "regresyon" in detail
 
 
 def test_recovery_never_rolls_back_changes_outside_interrupted_scope(
@@ -183,3 +193,75 @@ def test_recovery_never_rolls_back_changes_outside_interrupted_scope(
 
     assert ok is False
     assert "core/unrelated.py" in detail
+
+
+def test_clean_recovery_is_not_completed_without_health_validation(
+    monkeypatch, tmp_path: Path,
+):
+    target = tmp_path / "core" / "assistant.py"
+    target.parent.mkdir(parents=True)
+    target.write_text("baseline", encoding="utf-8")
+    engine = AssistantEngine.__new__(AssistantEngine)
+    engine.own_project_root = lambda: tmp_path
+    engine._compile_own_code = lambda: (True, "compile ok")
+    engine._runtime_health_check = lambda: (True, "runtime ok")
+    engine._run_own_tests = lambda: (
+        False,
+        "FAILED tests/test_new.py::test_regression - failed",
+    )
+    engine._test_failure_ids = lambda _output: {
+        "tests/test_new.py::test_regression"
+    }
+    saved = []
+    engine._save_own_validation = (
+        lambda success, output: saved.append((success, output))
+    )
+    monkeypatch.setattr(
+        "subprocess.run",
+        lambda *args, **kwargs: SimpleNamespace(
+            returncode=0, stdout="", stderr=""
+        ),
+    )
+
+    ok, detail = engine._verify_interrupted_engineering_recovery({
+        "changed_paths": ["core/assistant.py"],
+        "failures": [],
+    })
+
+    assert ok is False
+    assert "regresyon doğrulaması başarısız" in detail
+    assert saved[-1][0] is False
+
+
+def test_clean_recovery_accepts_only_preexisting_test_failures(
+    monkeypatch, tmp_path: Path,
+):
+    target = tmp_path / "core" / "assistant.py"
+    target.parent.mkdir(parents=True)
+    target.write_text("baseline", encoding="utf-8")
+    engine = AssistantEngine.__new__(AssistantEngine)
+    engine.own_project_root = lambda: tmp_path
+    engine._compile_own_code = lambda: (True, "compile ok")
+    engine._runtime_health_check = lambda: (True, "runtime ok")
+    engine._run_own_tests = lambda: (
+        False,
+        "FAILED tests/test_old.py::test_known - failed",
+    )
+    engine._test_failure_ids = lambda _output: {
+        "tests/test_old.py::test_known"
+    }
+    engine._save_own_validation = lambda *_args: None
+    monkeypatch.setattr(
+        "subprocess.run",
+        lambda *args, **kwargs: SimpleNamespace(
+            returncode=0, stdout="", stderr=""
+        ),
+    )
+
+    ok, detail = engine._verify_interrupted_engineering_recovery({
+        "changed_paths": ["core/assistant.py"],
+        "failures": ["tests/test_old.py::test_known"],
+    })
+
+    assert ok is True
+    assert "regresyon karşılaştırması tamamlandı" in detail
