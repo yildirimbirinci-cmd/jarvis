@@ -152,6 +152,7 @@ def test_recovery_rolls_back_interrupted_apply_before_marking_recovered(
     _healthy_recovery(engine)
     statuses = iter([
         SimpleNamespace(returncode=0, stdout=" M core/assistant.py\n", stderr=""),
+        SimpleNamespace(returncode=0, stdout=" M core/assistant.py\n", stderr=""),
         SimpleNamespace(returncode=0, stdout="", stderr=""),
     ])
     monkeypatch.setattr("subprocess.run", lambda *args, **kwargs: next(statuses))
@@ -163,6 +164,41 @@ def test_recovery_rolls_back_interrupted_apply_before_marking_recovered(
     assert ok is True
     assert calls == ["recover", "undo"]
     assert "baseline" in detail
+    assert "regresyon" in detail
+
+
+def test_recovery_does_not_undo_again_when_incomplete_recovery_is_clean(
+    monkeypatch, tmp_path: Path,
+):
+    target = tmp_path / "core" / "assistant.py"
+    target.parent.mkdir(parents=True)
+    target.write_text("baseline", encoding="utf-8")
+    engine = AssistantEngine.__new__(AssistantEngine)
+    engine.own_project_root = lambda: tmp_path
+    calls = []
+    engine.own_code_transactions = SimpleNamespace(
+        recover_incomplete=lambda: (
+            calls.append("recover") or "partial checkpoint rolled back"
+        ),
+        undo=lambda: (_ for _ in ()).throw(
+            AssertionError("recovery already restored the baseline")
+        ),
+    )
+    _healthy_recovery(engine)
+    statuses = iter([
+        SimpleNamespace(returncode=0, stdout=" M core/assistant.py\n", stderr=""),
+        SimpleNamespace(returncode=0, stdout="", stderr=""),
+        SimpleNamespace(returncode=0, stdout="", stderr=""),
+    ])
+    monkeypatch.setattr("subprocess.run", lambda *args, **kwargs: next(statuses))
+
+    ok, detail = engine._verify_interrupted_engineering_recovery({
+        "changed_paths": ["core/assistant.py"],
+    })
+
+    assert ok is True
+    assert calls == ["recover"]
+    assert "partial checkpoint rolled back" in detail
     assert "regresyon" in detail
 
 

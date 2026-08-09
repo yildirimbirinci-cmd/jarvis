@@ -4115,9 +4115,42 @@ class AssistantEngine:
                 recovery_notice = getattr(
                     transactions, "recover_incomplete", lambda: ""
                 )()
-                rollback_notice = transactions.undo()
             except Exception as exc:
                 return False, f"Yarım apply transaction recovery başarısız oldu: {exc}"
+            try:
+                after_incomplete_recovery = subprocess.run(
+                    ["git", "status", "--porcelain=v1", "--untracked-files=no"],
+                    cwd=str(root),
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=60,
+                )
+            except Exception as exc:
+                return False, (
+                    "Yarım checkpoint recovery sonrası Git doğrulaması "
+                    f"başlatılamadı: {exc}"
+                )
+            if after_incomplete_recovery.returncode != 0:
+                detail = (
+                    after_incomplete_recovery.stderr
+                    or after_incomplete_recovery.stdout
+                    or ""
+                ).strip()
+                return False, (
+                    "Yarım checkpoint recovery sonrası Git doğrulaması "
+                    "başarısız oldu: " + detail[-700:]
+                )
+            rollback_notice = ""
+            if after_incomplete_recovery.stdout.strip():
+                try:
+                    rollback_notice = transactions.undo()
+                except Exception as exc:
+                    return False, (
+                        "Yarım apply transaction recovery başarısız oldu: "
+                        f"{exc}"
+                    )
             try:
                 recovered_status = subprocess.run(
                     ["git", "status", "--porcelain=v1", "--untracked-files=no"],
