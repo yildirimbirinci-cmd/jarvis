@@ -428,6 +428,81 @@ def test_spoken_last_change_undo_runs_health_checks() -> None:
     assert "çalışma zamanı kontrolünden geçti" in result
 
 
+def test_spoken_last_change_undo_discovers_checkpoint_in_own_source_root() -> None:
+    engine = _engine()
+    roots = []
+    undo_roots = []
+    own_root = Path("C:/Jarvis/source")
+    engine.own_project_root = lambda: own_root
+    engine.workspace = SimpleNamespace(
+        set_workspace=lambda root: roots.append(root)
+    )
+    engine.own_code_transactions.undo = lambda: (
+        undo_roots.append(roots[-1] if roots else "")
+        or "Refactoring geri alındı: checkpoint"
+    )
+    engine._compile_own_code = lambda: (True, "")
+
+    result = engine._own_code_version_request("Son kod değişikliğini geri al.")
+
+    assert roots == [str(own_root)]
+    assert undo_roots == [str(own_root)]
+    assert "Refactoring geri alındı" in result
+
+
+def test_spoken_last_change_undo_runs_regression_and_persists_closeout() -> None:
+    engine = _engine()
+    engine._compile_own_code = lambda: (True, "compile ok")
+    engine._load_own_code_cycle = lambda: {
+        "stage": "completed",
+        "failures": [],
+        "changed_paths": ["core/assistant.py"],
+    }
+    saved = []
+    engine._save_own_code_cycle = (
+        lambda stage, detail, **kwargs: saved.append((stage, detail, kwargs))
+    )
+    test_calls = []
+    engine._run_own_tests = lambda: test_calls.append(True) or (True, "2498 passed")
+
+    result = engine._own_code_version_request("Son kod değişikliğini geri al.")
+
+    assert test_calls == [True]
+    assert saved[0][0] == "rolling_back"
+    assert saved[-1][0] == "rolled_back"
+    assert saved[-1][2]["changed_paths"] == ["core/assistant.py"]
+    assert "regresyon kontrolünden geçti" in result
+
+
+def test_failed_rollback_validation_restores_verified_applied_version() -> None:
+    engine = _engine()
+    engine._compile_own_code = lambda: (True, "compile ok")
+    engine._runtime_health_check = lambda: (True, "runtime ok")
+    engine._run_own_tests = lambda: (
+        False,
+        "FAILED tests/test_regression.py::test_new - assertion failed",
+    )
+    engine._load_own_code_cycle = lambda: {
+        "stage": "completed",
+        "failures": [],
+        "changed_paths": ["core/assistant.py"],
+    }
+    saved = []
+    engine._save_own_code_cycle = (
+        lambda stage, detail, **kwargs: saved.append((stage, detail, kwargs))
+    )
+    redo_calls = []
+    engine.own_code_transactions.redo = (
+        lambda: redo_calls.append(True) or "Refactoring yeniden uygulandı: checkpoint"
+    )
+
+    result = engine._own_code_version_request("Son kod değişikliğini geri al.")
+
+    assert redo_calls == [True]
+    assert saved[-1][0] == "completed"
+    assert "önceki doğrulanmış uygulanmış sürüm yeniden yüklendi" in result
+
+
 def test_spoken_version_list_is_local() -> None:
     engine = _engine()
 

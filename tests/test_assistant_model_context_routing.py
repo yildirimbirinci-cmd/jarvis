@@ -24,6 +24,12 @@ class _Response:
 def test_own_code_proposal_uses_code_role_not_chat_role(monkeypatch, tmp_path) -> None:
     captured = {}
 
+    monkeypatch.setattr(
+        module,
+        "OWN_CODE_CYCLE_FILE",
+        tmp_path / "own_code_cycle.json",
+    )
+
     def fake_urlopen(request, timeout):
         captured["payload"] = json.loads(request.data.decode("utf-8"))
         captured["timeout"] = timeout

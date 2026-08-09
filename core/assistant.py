@@ -4173,6 +4173,7 @@ class AssistantEngine:
             "interrupted_validation": "restart nedeniyle worktree doğrulaması kesildi",
             "applying": "onaylı değişiklik uygulanıyor",
             "validating": "değişiklik doğrulanıyor",
+            "rolling_back": "kullanıcı onaylı rollback doğrulanıyor",
             "recovery_required": "yarım uygulama için kaynak doğrulaması gerekiyor",
             "recovered": "yarım uygulama sonrası kaynak durumu doğrulandı",
             "completed": "döngü başarıyla tamamlandı",
@@ -4251,7 +4252,9 @@ class AssistantEngine:
             cycle = self._load_own_code_cycle() or cycle
             stage = str(cycle.get("stage", "interrupted_validation"))
             detail = str(cycle.get("detail", "")).strip()
-        elif previous_process_state and stage in {"applying", "validating"}:
+        elif previous_process_state and stage in {
+            "applying", "validating", "rolling_back"
+        }:
             self._save_own_code_cycle(
                 "recovery_required",
                 (
@@ -4498,6 +4501,9 @@ class AssistantEngine:
         has_code = any(word.startswith(("kod", "kaynak")) for word in words)
         if not has_version_subject:
             return None
+        # Own-code checkpoints always live below Jarvis' source root. The
+        # general workspace may still point at a user project after restart.
+        self.workspace.set_workspace(str(self.own_project_root()))
         wants_list = any(
             word.startswith(("listele", "goster", "gecmis", "surumler"))
             for word in words
@@ -4509,23 +4515,106 @@ class AssistantEngine:
             and any(word.startswith(("al", "don", "yukle")) for word in words)
         )
         if wants_undo:
+            previous_cycle = self._load_own_code_cycle() or {}
+            rollback_paths = list(previous_cycle.get("changed_paths", []) or [])
+            baseline_failures = {
+                str(item)
+                for item in (previous_cycle.get("failures", []) or [])
+                if str(item).strip()
+            }
+            self._save_own_code_cycle(
+                "rolling_back",
+                "Kullanici onayli rollback checkpoint uzerinden baslatildi.",
+                failures=sorted(baseline_failures),
+                changed_paths=rollback_paths,
+                validation_summary=(
+                    "Rollback tamamlanmadan yeni apply engellendi; kaynak, runtime "
+                    "ve regresyon testleri yeniden dogrulanacak."
+                ),
+            )
             try:
                 result = self.own_code_transactions.undo()
             except Exception as exc:
+                self._save_own_code_cycle(
+                    "recovery_required",
+                    f"Kullanici onayli rollback tamamlanamadi: {exc}",
+                    failures=sorted(baseline_failures),
+                    changed_paths=rollback_paths,
+                )
                 return f"Son kod değişikliği geri alınamadı: {exc}"
             compile_ok, compile_output = self._compile_own_code()
             runtime_ok, runtime_output = self._runtime_health_check()
-            if not compile_ok or not runtime_ok:
+            test_success, test_output = self._run_own_tests()
+            current_failures = self._test_failure_ids(test_output)
+            new_failures = current_failures.difference(baseline_failures)
+            unverifiable_failure = not test_success and not current_failures
+            validation_output = "\n".join(
+                part
+                for part in (compile_output, runtime_output, test_output)
+                if str(part).strip()
+            )
+            if (
+                not compile_ok
+                or not runtime_ok
+                or new_failures
+                or unverifiable_failure
+            ):
+                try:
+                    restored = self.own_code_transactions.redo()
+                except Exception as redo_error:
+                    self._save_own_validation(False, validation_output)
+                    self._save_own_code_cycle(
+                        "recovery_required",
+                        (
+                            "Rollback dogrulamasi basarisiz oldu ve onceki "
+                            f"uygulanmis surum geri yuklenemedi: {redo_error}"
+                        ),
+                        failures=sorted(current_failures),
+                        changed_paths=rollback_paths,
+                        validation_summary=validation_output[-3000:],
+                    )
+                    return (
+                        f"{result}. Rollback doğrulaması başarısız oldu ve önceki "
+                        f"uygulanmış sürüm geri yüklenemedi: {redo_error}. "
+                        f"Hata: {validation_output[-900:]}"
+                    )
+                self._save_own_validation(False, validation_output)
+                self._save_own_code_cycle(
+                    "completed",
+                    (
+                        "Rollback dogrulamasi basarisiz oldugu icin onceki "
+                        "dogrulanmis uygulanmis surum geri yuklendi."
+                    ),
+                    failures=sorted(baseline_failures),
+                    changed_paths=rollback_paths,
+                    validation_summary=validation_output[-3000:],
+                    version_summary=str(restored)[:3000],
+                )
                 return (
-                    f"{result}. Önceki sürüm geri yüklendi ancak sağlık kontrolü başarısız: "
-                    f"{(compile_output or runtime_output)[-900:]}"
+                    f"{result}. Rollback derleme, çalışma zamanı veya regresyon "
+                    "doğrulamasından geçmedi; önceki doğrulanmış uygulanmış sürüm "
+                    f"yeniden yüklendi. {restored}. Hata: {validation_output[-900:]}"
                 )
             invalidate = getattr(self.workspace, "invalidate_index", None)
             if callable(invalidate):
                 invalidate()
-            self._save_own_code_cycle("rolled_back", result)
+            self._save_own_validation(test_success, validation_output)
+            self._save_own_code_cycle(
+                "rolled_back",
+                result,
+                failures=sorted(current_failures),
+                changed_paths=rollback_paths,
+                validation_summary=(
+                    "Rollback sonrasi derleme, temiz surec ve regresyon "
+                    "karsilastirmasi tamamlandi."
+                ),
+                version_summary=str(result)[:3000],
+            )
             self.own_code_history.record("kullanıcı isteğiyle geri alındı", sonuç=result)
-            return f"{result}. Önceki sürüm derleme ve çalışma zamanı kontrolünden geçti."
+            return (
+                f"{result}. Önceki sürüm derleme ve çalışma zamanı kontrolünden "
+                "geçti; regresyon kontrolünden geçti."
+            )
         wants_redo = (
             any(word.startswith(("yeniden", "tekrar")) for word in words)
             and any(word.startswith(("uygula", "yukle", "getir")) for word in words)

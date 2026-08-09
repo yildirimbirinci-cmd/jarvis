@@ -83,6 +83,24 @@ def test_restart_marks_validating_as_recovery_required():
     assert state["cycle"]["stage"] == "recovery_required"
 
 
+def test_restart_marks_user_rollback_as_recovery_required():
+    engine, state = _engine({
+        "version": 4,
+        "stage": "rolling_back",
+        "detail": "rollback validation running",
+        "failures": [],
+        "attempt": 0,
+        "changed_paths": ["core/assistant.py"],
+        "owner_pid": os.getpid() + 10000,
+    })
+
+    result = engine.own_code_cycle_report()
+
+    assert state["cycle"]["stage"] == "recovery_required"
+    assert state["cycle"]["changed_paths"] == ["core/assistant.py"]
+    assert "kaynak doğrulaması gerekiyor" in result
+
+
 def test_same_process_active_state_is_not_reclassified():
     engine, state = _engine({
         "version": 4,
