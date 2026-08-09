@@ -1,13 +1,30 @@
 from __future__ import annotations
 
-from artmach_assistant.core.own_code_approval import proposal_fingerprint
-from tests.test_restart_safe_approval_restore_v2 import _engine, _proposal
+from pathlib import Path
+
+import pytest
+
+from artmach_assistant.core import assistant as assistant_module
+from artmach_assistant.core.own_code_pending_proposal_store import (
+    OwnCodePendingProposalStore,
+)
+from tests.test_restart_safe_approval_restore_v2 import _engine, _persist
 
 
-def _prepare_engine(tmp_path):
+def _prepare_engine(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    store_path, fingerprint = _persist(tmp_path)
+    monkeypatch.setattr(
+        assistant_module,
+        "OWN_CODE_PENDING_PROPOSAL_FILE",
+        store_path,
+    )
     engine = _engine(tmp_path)
-    proposal = _proposal()
-    engine.editor.pending = proposal
+    engine._own_code_pending_proposal_store = lambda: OwnCodePendingProposalStore(
+        store_path
+    )
     engine.command_key = lambda value: (
         value.lower()
         .replace("ı", "i")
@@ -18,13 +35,14 @@ def _prepare_engine(tmp_path):
         .replace("ü", "u")
         .replace("'", "")
     )
-    return engine, proposal_fingerprint(proposal)[:12]
+    return engine, fingerprint[:12]
 
 
 def test_explicit_apply_to_main_source_does_not_route_to_validation_only(
-    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
-    engine, approval_id = _prepare_engine(tmp_path)
+    engine, approval_id = _prepare_engine(monkeypatch, tmp_path)
     engine._validate_pending_own_code_proposal_isolated = lambda: (_ for _ in ()).throw(
         AssertionError("explicit apply must not use validation-only branch")
     )
@@ -39,9 +57,10 @@ def test_explicit_apply_to_main_source_does_not_route_to_validation_only(
 
 
 def test_dogrulanmis_does_not_match_dogrula_deferral(
-    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
-    engine, approval_id = _prepare_engine(tmp_path)
+    engine, approval_id = _prepare_engine(monkeypatch, tmp_path)
     engine._validate_pending_own_code_proposal_isolated = lambda: (_ for _ in ()).throw(
         AssertionError("dogrulanmis must not match bounded dogrula")
     )
@@ -55,9 +74,10 @@ def test_dogrulanmis_does_not_match_dogrula_deferral(
 
 
 def test_explicit_deferral_still_uses_validation_only(
-    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
-    engine, approval_id = _prepare_engine(tmp_path)
+    engine, approval_id = _prepare_engine(monkeypatch, tmp_path)
     engine._validate_pending_own_code_proposal_isolated = lambda: "VALIDATED_ONLY"
     engine.apply_pending_own_code_proposal = lambda: (_ for _ in ()).throw(
         AssertionError("explicit deferral must not apply")
