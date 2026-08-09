@@ -4552,30 +4552,58 @@ class AssistantEngine:
                     f"Beklenen kimlik: {expected_id}. Hiçbir dosya değiştirilmedi."
                 )
 
-            validation_only = (
+            def has_bounded_phrase(phrase: str) -> bool:
+                return re.search(
+                    rf"(?<![a-z0-9]){re.escape(phrase)}(?![a-z0-9])",
+                    normalized,
+                ) is not None
+
+            explicit_deferral = any(
+                has_bounded_phrase(marker)
+                for marker in (
+                    "henuz uygulama",
+                    "simdilik uygulama",
+                    "ana kaynak dosyalara uygulama",
+                    "ana kaynak dosyaya uygulama",
+                    "yalniz dogrula",
+                    "yalnizca dogrula",
+                    "sadece dogrula",
+                )
+            )
+            explicit_validation = any(
+                has_bounded_phrase(marker)
+                for marker in (
+                    "worktree dogrulama",
+                    "dogrulama zincirini baslat",
+                )
+            )
+            explicit_main_source_apply = (
                 any(
-                    marker in normalized
+                    has_bounded_phrase(marker)
                     for marker in (
                         "ana kaynak",
-                        "henuz uygulama",
-                        "simdilik uygulama",
-                        "yalniz dogrula",
-                        "sadece dogrula",
-                        "worktree dogrulama",
-                        "dogrulama zincirini baslat",
+                        "ana kaynak dosya",
+                        "ana kaynak dosyaya",
+                        "ana kaynak dosyalara",
                     )
                 )
                 and any(
-                    marker in normalized
+                    has_bounded_phrase(marker)
                     for marker in (
-                        "dogrula",
-                        "dogrulama",
-                        "worktree",
+                        "uygula",
+                        "uygulayin",
+                        "gecir",
                     )
                 )
+                and not explicit_deferral
+            )
+            validation_only = explicit_deferral or (
+                explicit_validation and not explicit_main_source_apply
             )
             if validation_only:
                 return self._validate_pending_own_code_proposal_isolated()
+            if explicit_main_source_apply:
+                return self.apply_pending_own_code_proposal()
         project_runtime = getattr(self, "project_improvements", None)
         project_pending = bool(
             project_runtime is not None

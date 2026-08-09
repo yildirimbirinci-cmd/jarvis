@@ -29,6 +29,12 @@ from artmach_assistant.core.own_code_approval import proposal_fingerprint
         "Bekleyen proposali anlat, uygulama.",
         "Bekleyen patchi ozetle, uygulama.",
         "Pending patch durumunu goster, do not apply.",
+        (
+            "Yeni bir gelistirme istemiyorum; yalnizca restart-safe bekleyen "
+            "kendi-kod proposal kaydi bulunup bulunmadigini raporla, hicbir "
+            "proposal uretme, dogrulama veya uygulama yapma."
+        ),
+        "Bekleyen kendi kod proposal kaydi var mi? Hicbir islem yapma.",
     ],
 )
 def test_pending_proposal_report_is_read_only_action(text: str) -> None:

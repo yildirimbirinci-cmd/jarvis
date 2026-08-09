@@ -196,6 +196,11 @@ def classify_own_code_command(
                 "pending draft",
                 "pending patch",
                 "pending code change",
+                "restart-safe bekleyen proposal",
+                "restart safe bekleyen proposal",
+                "bekleyen kendi kod proposal",
+                "bekleyen kendi-kod proposal",
+                "bekleyen own code proposal",
                 "kod degisikligi proposal",
                 "kod degisikligi onerisi",
             ),
@@ -211,6 +216,9 @@ def classify_own_code_command(
                 "listele",
                 "ozetle",
                 "anlat",
+                "var mi",
+                "bulunup bulunmadig",
+                "kaydi bulun",
             ),
         )
     )
