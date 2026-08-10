@@ -1261,6 +1261,7 @@ class AssistantEngine:
         prompt: str,
         *,
         max_attempts: int = 3,
+        strict_attempt_limit: bool = False,
     ) -> EditProposal:
         """Generate a syntactically valid, bounded proposal with feedback retries.
 
@@ -1327,7 +1328,7 @@ class AssistantEngine:
             return ""
 
         base_attempts = max(1, min(int(max_attempts), 3))
-        attempts = base_attempts + 1
+        attempts = base_attempts if strict_attempt_limit else base_attempts + 1
         previous_response = ""
         previous_error = ""
         seen_responses: set[str] = set()
@@ -3036,7 +3037,9 @@ class AssistantEngine:
         if proposal is None:
             try:
                 proposal = self._generate_validated_own_code_proposal(
-                    prompt, max_attempts=repair_max_attempts
+                    prompt,
+                    max_attempts=repair_max_attempts,
+                    strict_attempt_limit=production_repair,
                 )
             except (urllib.error.URLError, TimeoutError, ValueError, json.JSONDecodeError) as exc:
                 return f"Yerel kod öneri motoru yanıt veremedi: {exc}"
@@ -9322,6 +9325,7 @@ class AssistantEngine:
             marker in normalized
             for marker in (
                 "muhendislik durum", "engineering state",
+                "engineering durum", "kayitli engineering durum",
                 "kendi-kod gelistirme durum", "kendi kod gelistirme durum",
                 "self-development oturum", "self development oturum",
                 "self-development", "self development",
@@ -9350,7 +9354,8 @@ class AssistantEngine:
                 "baslatma",
             )
         )
-        return state_subject and state_request and no_change
+        explicit_state_report = state_subject and state_request
+        return explicit_state_report or (state_subject and no_change)
     def _own_code_read_only_request(self, text: str) -> str | None:
         """Handle source inspection before stale plans or language models."""
 
