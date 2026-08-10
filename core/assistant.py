@@ -8663,36 +8663,68 @@ class AssistantEngine:
         )
 
     def _persisted_engineering_state_report(self) -> str:
-        """Report the persisted own-code cycle without mutating recovery state."""
+        "Report persisted engineering state without mutating recovery state."
         cycle = self._load_own_code_cycle()
-        if not cycle:
-            return "KAYITLI ENGINEERING DURUMU\nKayitli bir own-code engineering cycle yok."
-        stage = str(cycle.get("stage", "bilinmiyor") or "bilinmiyor")
-        attempt = self._cycle_attempt(cycle)
-        detail = str(cycle.get("detail", "") or "").strip() or "(bos)"
-        changed = [
-            str(item).strip()
-            for item in (cycle.get("changed_paths", []) or [])
-            if str(item).strip()
-        ]
-        validation = str(cycle.get("validation_summary", "") or "").strip() or "(bos)"
-        recovery = (
-            "Gerekli"
-            if stage in {"interrupted_validation", "recovery_required"}
-            else "Gerekli degil"
-        )
-        paths = ", ".join(changed) if changed else "(yok)"
-        return (
-            "KAYITLI ENGINEERING DURUMU\n"
-            f"Stage: {stage}\n"
-            f"Attempt: {attempt}/3\n"
-            f"Detail: {detail}\n"
-            f"Changed paths: {paths}\n"
-            f"Validation: {validation}\n"
-            f"Recovery: {recovery}\n"
-            "Kaynak: diskteki own-code cycle kaydi; raporlama yeni plan, proposal veya recovery islemi baslatmaz."
-        )
+        lines = ["KAYITLI ENGINEERING DURUMU"]
 
+        if not cycle:
+            lines.append("Own-code cycle: MISSING")
+        else:
+            stage = str(cycle.get("stage", "bilinmiyor") or "bilinmiyor")
+            attempt = self._cycle_attempt(cycle)
+            detail = str(cycle.get("detail", "") or "").strip() or "(bos)"
+            changed = [
+                str(item).strip()
+                for item in (cycle.get("changed_paths", []) or [])
+                if str(item).strip()
+            ]
+            validation = (
+                str(cycle.get("validation_summary", "") or "").strip()
+                or "(bos)"
+            )
+            recovery = (
+                "RECOVERABLE"
+                if stage in {"interrupted_validation", "recovery_required"}
+                else "TERMINAL"
+                if stage in {"completed", "failed", "stale", "rolled_back"}
+                else "ACTIVE"
+            )
+            paths = ", ".join(changed) if changed else "(yok)"
+            lines.extend(
+                (
+                    f"Own-code cycle: {recovery}",
+                    f"Stage: {stage}",
+                    f"Attempt: {attempt}/3",
+                    f"Detail: {detail}",
+                    f"Changed paths: {paths}",
+                    f"Validation: {validation}",
+                )
+            )
+
+        try:
+            patch_session = self._evidence_patch_session_store().load()
+        except Exception as exc:
+            lines.append(f"Patch session: ERROR ({exc})")
+        else:
+            if patch_session is None:
+                lines.append("Patch session: MISSING")
+            else:
+                classification = (
+                    "TERMINAL" if patch_session.terminal else "ACTIVE"
+                )
+                lines.extend(
+                    (
+                        f"Patch session: {classification}",
+                        f"Patch session id: {patch_session.session_id}",
+                        f"Patch session status: {patch_session.status}",
+                    )
+                )
+
+        lines.append(
+            "Kaynak: diskteki kalici engineering kayitlari; "
+            "raporlama yeni plan, proposal, apply veya recovery islemi baslatmaz."
+        )
+        return "\n".join(lines)
     def _own_code_language_learning_request(self, text: str) -> str | None:
         """Learn an explicitly taught user phrase without executing an engineering action."""
 
@@ -9072,6 +9104,8 @@ class AssistantEngine:
                 "self-development oturum", "self development oturum",
                 "self-development", "self development",
                 "own-code engineering", "own code engineering",
+                "persistent engineering", "kalici engineering",
+                "engineering kayit", "engineering record",
                 "engineering cycle", "own-code cycle", "own code cycle",
             )
         )
@@ -9080,18 +9114,21 @@ class AssistantEngine:
             for marker in (
                 "incele", "rapor", "goster", "devam eden",
                 "yarim kal", "yeniden dogrulama", "mevcut kayitli durum",
+                "durum denetim", "envanter", "recovery denetim",
             )
         )
         no_change = any(
             marker in normalized
             for marker in (
+                "salt-okunur", "salt okunur",
                 "hicbir kodu degistirme", "hicbir kod degistirme",
+                "hicbir kaydi degistirme", "degistirme veya temizleme",
                 "degisiklik yapma", "yeni plan", "yeni proposal",
-                "yeni patch", "yalnizca mevcut",
+                "yeni patch", "yalnizca mevcut", "yalnizca envanter",
+                "baslatma",
             )
         )
         return state_subject and state_request and no_change
-
     def _own_code_read_only_request(self, text: str) -> str | None:
         """Handle source inspection before stale plans or language models."""
 
@@ -12913,6 +12950,9 @@ class AssistantEngine:
             "kendi kod islem durumu",
         }:
             return self.own_code_cycle_report()
+        own_code_read_only = self._own_code_read_only_request(text)
+        if own_code_read_only is not None:
+            return own_code_read_only
         patch_session_command = self._patch_session_command_request(text)
         if patch_session_command is not None:
             return patch_session_command
@@ -12971,9 +13011,6 @@ class AssistantEngine:
         research_command = self._research_command_request(text)
         if research_command is not None:
             return research_command
-        own_code_read_only = self._own_code_read_only_request(text)
-        if own_code_read_only is not None:
-            return own_code_read_only
         if normalized in {
             "ses donanimi kabul testi",
             "ses aygiti kabul testi",
