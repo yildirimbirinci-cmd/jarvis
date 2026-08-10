@@ -6647,20 +6647,39 @@ class AssistantEngine:
             self._last_maintenance_review = review
             if not review.new_alerts:
                 return ""
+
             alert = review.new_alerts[0]
             finding = runtime_report.finding(alert.finding_id)
+            for candidate_alert in review.new_alerts:
+                candidate = runtime_report.finding(candidate_alert.finding_id)
+                if candidate is None:
+                    continue
+                if str(getattr(candidate, "category", "") or "") != "repeated_runtime_failure":
+                    continue
+                if str(getattr(candidate, "error_type", "") or "") not in {
+                    "TypeError",
+                    "AttributeError",
+                    "NameError",
+                    "ImportError",
+                    "ModuleNotFoundError",
+                }:
+                    continue
+                alert = candidate_alert
+                finding = candidate
+                break
+
             session = self._prepare_automatic_runtime_failure_entry(finding)
             if session is not None:
                 return (
-                    f"Bakım uyarısı [{alert.finding_id}]: {alert.title}. "
-                    f"Kanıt: {alert.evidence_summary}. Güvenli engineering state otomatik "
-                    f"hazırlandı: {session.plan_id}. Patch üretilmedi, kaynak kod "
-                    "değiştirilmedi ve apply başlatılmadı."
+                    f"Bak\u0131m uyar\u0131s\u0131 [{alert.finding_id}]: {alert.title}. "
+                    f"Kan\u0131t: {alert.evidence_summary}. G\u00fcvenli engineering state otomatik "
+                    f"haz\u0131rland\u0131: {session.plan_id}. Patch \u00fcretilmedi, kaynak kod "
+                    "de\u011fi\u015ftirilmedi ve apply ba\u015flat\u0131lmad\u0131."
                 )
             return (
-                f"Bakım uyarısı [{alert.finding_id}]: {alert.title}. "
-                f"Kanıt: {alert.evidence_summary}. Düzeltme otomatik uygulanmadı; "
-                f"'{alert.finding_id} bulgusunu düzelt' diyerek taslak isteyebilirsin."
+                f"Bak\u0131m uyar\u0131s\u0131 [{alert.finding_id}]: {alert.title}. "
+                f"Kan\u0131t: {alert.evidence_summary}. D\u00fczeltme otomatik uygulanmad\u0131; "
+                f"'{alert.finding_id} bulgusunu d\u00fczelt' diyerek taslak isteyebilirsin."
             )
         except Exception:
             return ""
