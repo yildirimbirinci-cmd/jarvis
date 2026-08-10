@@ -684,9 +684,9 @@ class EndToEndAcceptanceService:
         command = [
             sys.executable,
             "-m",
-            "artmach_assistant",
-            "--self-test",
-            "--quiet-tests",
+            "pytest",
+            "-q",
+            str(self.package_root / "tests"),
         ]
         completed = self._run_command(
             command,
@@ -698,7 +698,10 @@ class EndToEndAcceptanceService:
         return (
             AcceptanceState.PASSED if completed.returncode == 0 else AcceptanceState.FAILED,
             "Depo testleri basarili." if completed.returncode == 0 else output,
-            {"returncode": completed.returncode},
+            {
+                "returncode": completed.returncode,
+                "runner": "direct_pytest",
+            },
         )
 
     def _check_gui_smoke(
