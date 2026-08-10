@@ -8698,6 +8698,7 @@ class AssistantEngine:
                     f"Detail: {detail}",
                     f"Changed paths: {paths}",
                     f"Validation: {validation}",
+                    f"Recovery: {'Gerekli' if recovery == 'RECOVERABLE' else 'Gerekli degil'}",
                 )
             )
 
@@ -12950,9 +12951,13 @@ class AssistantEngine:
             "kendi kod islem durumu",
         }:
             return self.own_code_cycle_report()
-        own_code_read_only = self._own_code_read_only_request(text)
-        if own_code_read_only is not None:
-            return own_code_read_only
+        # Engineering-state inspection is a narrow read-only exception:
+        # it must outrank patch-session lookup without moving the generic
+        # read-only router ahead of retest/research routing.
+        if self._asks_for_engineering_state_only(text):
+            engineering_state = self._own_code_read_only_request(text)
+            if engineering_state is not None:
+                return engineering_state
         patch_session_command = self._patch_session_command_request(text)
         if patch_session_command is not None:
             return patch_session_command
@@ -13011,6 +13016,13 @@ class AssistantEngine:
         research_command = self._research_command_request(text)
         if research_command is not None:
             return research_command
+
+        # Read-only own-code reporting is intentionally below retest/research.
+        # Broad words such as "dogrula" can occur in evidence commands and must
+        # not steal those commands from their authoritative coordinators.
+        own_code_read_only = self._own_code_read_only_request(text)
+        if own_code_read_only is not None:
+            return own_code_read_only
         if normalized in {
             "ses donanimi kabul testi",
             "ses aygiti kabul testi",
