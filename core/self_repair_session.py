@@ -89,6 +89,11 @@ class SelfRepairSession:
     proposal_fingerprint: str = ""
     attempts: int = 0
     last_error: str = ""
+    policy_status: str = "AUTO_ALLOWED"
+    risk: str = "LOW"
+    max_attempts: int = 3
+    approval_required: bool = False
+    approval_granted: bool = False
 
     @property
     def active(self) -> bool:
@@ -150,6 +155,11 @@ class SelfRepairSessionStore:
                 proposal_fingerprint=str(row.get("proposal_fingerprint", ""))[:128],
                 attempts=max(0, min(int(row.get("attempts", 0) or 0), 3)),
                 last_error=str(row.get("last_error", ""))[-12000:],
+                policy_status=str(row.get("policy_status", "AUTO_ALLOWED"))[:64],
+                risk=str(row.get("risk", "LOW"))[:32],
+                max_attempts=max(0, min(int(row.get("max_attempts", 3) or 0), 3)),
+                approval_required=bool(row.get("approval_required", False)),
+                approval_granted=bool(row.get("approval_granted", False)),
             )
         except (OSError, TypeError, ValueError, UnicodeError):
             return None
@@ -173,6 +183,11 @@ class SelfRepairSessionStore:
         evidence: str = "",
         acceptance: Iterable[object] = (),
         source_fingerprint: str = "",
+        policy_status: str = "AUTO_ALLOWED",
+        risk: str = "LOW",
+        max_attempts: int = 3,
+        approval_required: bool = False,
+        approval_granted: bool = False,
     ) -> SelfRepairSession:
         run_id = extract_run_id(finding_id)
         if run_id is None:
@@ -198,6 +213,11 @@ class SelfRepairSessionStore:
             )[:16],
             source_fingerprint=str(source_fingerprint or "")[:128],
             created_at=now,
+            policy_status=str(policy_status or "AUTO_ALLOWED")[:64],
+            risk=str(risk or "LOW")[:32],
+            max_attempts=max(0, min(int(max_attempts), 3)),
+            approval_required=bool(approval_required),
+            approval_granted=bool(approval_granted),
             updated_at=now,
         )
         return self.save(session)
@@ -235,6 +255,14 @@ class SelfRepairSessionStore:
             ),
         )
         return self.save(updated)
+
+    def grant_approval(self) -> SelfRepairSession:
+        current = self.load()
+        if current is None:
+            raise ValueError("No active targeted repair session.")
+        if not current.active:
+            raise ValueError("Targeted repair session is not active.")
+        return self.save(replace(current, approval_granted=True))
 
     def cancel(self, reason: str = "Kullanıcı iptal etti.") -> SelfRepairSession | None:
         current = self.load()

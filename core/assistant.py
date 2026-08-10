@@ -4,6 +4,7 @@ from enum import Enum
 from contextlib import nullcontext
 
 import hashlib
+import inspect
 import ast
 import json
 import os
@@ -57,6 +58,7 @@ from artmach_assistant.core.evidence_patch_closeout import run_patch_closeout
 from artmach_assistant.core.safe_release import SafeReleaseManager
 from artmach_assistant.core.autonomous_repair_policy import (
     assess_autonomous_runtime_repair,
+    validate_runtime_repair_enforcement,
 )
 from artmach_assistant.core.autonomous_maintenance_session import (
     MaintenanceRepairRecord,
@@ -2781,6 +2783,7 @@ class AssistantEngine:
         approved_paths: tuple[str, ...] | list[str] = (),
         approved_symbols: tuple[str, ...] | list[str] = (),
         plan_id: str = "",
+        repair_max_attempts: int = 3,
     ) -> str:
         """Prepare, but never apply, a change proposal for Jarvis' own source.
 
@@ -3033,7 +3036,7 @@ class AssistantEngine:
         if proposal is None:
             try:
                 proposal = self._generate_validated_own_code_proposal(
-                    prompt, max_attempts=3
+                    prompt, max_attempts=repair_max_attempts
                 )
             except (urllib.error.URLError, TimeoutError, ValueError, json.JSONDecodeError) as exc:
                 return f"Yerel kod öneri motoru yanıt veremedi: {exc}"
@@ -5512,6 +5515,19 @@ class AssistantEngine:
         )
 
     @staticmethod
+    def _self_repair_explicit_plan_approval_intent(normalized: str) -> bool:
+        exact = {
+            "plani onayla", "plan onayla", "onarim planini onayla",
+        }
+        if normalized in exact:
+            return True
+        words = normalized.split()
+        return (
+            any(word.startswith("onay") for word in words)
+            and any(word.startswith(("plan", "onarim", "rpr")) for word in words)
+        )
+
+    @staticmethod
     def _self_repair_apply_intent(normalized: str) -> bool:
         exact = {
             "taslagi onayla", "taslagi uygula", "degisikligi uygula",
@@ -5541,7 +5557,8 @@ class AssistantEngine:
         detail = (
             f"{session.plan_id} durumu: {state_names.get(session.state, session.state)}. "
             f"Bulgu: {session.finding_id}. Dosyalar: {files}. Semboller: {symbols}. "
-            f"Deneme: {session.attempts}/3."
+            f"Deneme: {session.attempts}/{session.max_attempts}. "
+            f"Policy: {session.policy_status} ({session.risk})."
         )
         if session.last_error:
             detail += f" Son hata: {session.last_error[-900:]}"
@@ -5550,7 +5567,11 @@ class AssistantEngine:
     def _prepare_active_self_repair_proposal(
         self, session: SelfRepairSession
     ) -> str:
-        if session.attempts >= 3:
+        if session.approval_required and not session.approval_granted:
+            return (
+                f"{session.plan_id} requires explicit plan approval before proposal generation."
+            )
+        if session.max_attempts <= 0 or session.attempts >= session.max_attempts:
             return (
                 f"{session.plan_id} için üç güvenli taslak denemesi tamamlandı. "
                 "Aynı isteği tekrar üretmeyeceğim; yeni çalışma zamanı kanıtı veya "
@@ -5579,6 +5600,7 @@ class AssistantEngine:
                 approved_paths=generating.approved_paths,
                 approved_symbols=generating.approved_symbols,
                 plan_id=generating.plan_id,
+                repair_max_attempts=generating.max_attempts,
             )
         except Exception as exc:
             result = f"Hedefli taslak hazırlanırken beklenmeyen hata oluştu: {exc}"
@@ -5633,6 +5655,55 @@ class AssistantEngine:
             return (
                 "Onaylanan hedefli taslak artık bellekte bulunmuyor. Güvenlik için "
                 "hiçbir dosya değiştirilmedi; RUN bulgusunu yeniden ölçmelisin."
+            )
+        finding = self._find_runtime_finding(session.finding_id)
+        if finding is None:
+            self.editor.reject()
+            try:
+                self._self_repair_store().transition(
+                    "proposal_failed",
+                    expected={"proposal_ready"},
+                    last_error="Active runtime finding disappeared before policy revalidation.",
+                )
+            except Exception:
+                pass
+            return (
+                "Policy enforcement blocked targeted repair apply: active runtime finding "
+                "is no longer available. No source file was changed."
+            )
+        finding, current_decision, _target_validation = (
+            self._assess_runtime_repair_with_target_refresh(finding)
+        )
+        proposal_paths = tuple(
+            str(getattr(change, "path", "") or "").strip().replace("\\", "/")
+            for change in getattr(pending, "files", ())
+            if str(getattr(change, "path", "") or "").strip()
+        )
+        enforcement = validate_runtime_repair_enforcement(
+            current_decision,
+            stored_status=session.policy_status,
+            stored_risk=session.risk,
+            stored_max_attempts=session.max_attempts,
+            approval_granted=session.approval_granted,
+            attempts=session.attempts,
+            session_paths=session.approved_paths,
+            session_symbols=session.approved_symbols,
+            proposal_paths=proposal_paths,
+        )
+        if not enforcement.allowed:
+            self.editor.reject()
+            try:
+                self._self_repair_store().transition(
+                    "proposal_failed",
+                    expected={"proposal_ready"},
+                    last_error="Policy enforcement rejected apply: " + enforcement.reason,
+                )
+            except Exception:
+                pass
+            return (
+                "Policy enforcement blocked targeted repair apply: "
+                + enforcement.reason
+                + " No source file was changed."
             )
         actual = proposal_fingerprint(pending)
         if session.proposal_fingerprint and actual != session.proposal_fingerprint:
@@ -5991,10 +6062,33 @@ class AssistantEngine:
                 return self.prepare_runtime_improvement_implementation(run_id)
 
             if fix_intent:
-                severity = str(getattr(finding, "severity", "") or "").casefold()
-                if research_intent or severity in {"high", "critical"}:
+                if research_intent:
                     return self.prepare_runtime_improvement_implementation(run_id)
-                return self.run_autonomous_runtime_repair(run_id)
+                autonomous_intent = any(
+                    marker in normalized
+                    for marker in (
+                        "otonom",
+                        "otomatik",
+                        "autonomous",
+                    )
+                )
+                if autonomous_intent:
+                    return self.run_autonomous_runtime_repair(run_id)
+                finding, decision, target_validation = (
+                    self._assess_runtime_repair_with_target_refresh(finding)
+                )
+                outputs = [decision.report()]
+                if target_validation:
+                    outputs.append(target_validation)
+                if not decision.can_prepare_plan:
+                    outputs.append("No source file was changed.")
+                    return "\n\n".join(outputs)
+                outputs.append(
+                    self._prepare_runtime_improvement_with_policy(
+                        finding.finding_id, decision
+                    )
+                )
+                return "\n\n".join(outputs)
 
             if research_intent:
                 promote_external = any(
@@ -6097,6 +6191,15 @@ class AssistantEngine:
             )
 
         if session.state == "planned" and self._self_repair_start_intent(normalized):
+            if session.approval_required and not session.approval_granted:
+                if not self._self_repair_explicit_plan_approval_intent(normalized):
+                    return (
+                        f"{session.plan_id} requires explicit plan approval; start/continue alone is not approval."
+                    )
+                try:
+                    session = store.grant_approval()
+                except ValueError as exc:
+                    return f"Plan approval could not be recorded: {exc}"
             return self._prepare_active_self_repair_proposal(session)
 
         if session.state == "proposal_ready":
@@ -6119,7 +6222,7 @@ class AssistantEngine:
             and "yeniden" in normalized
             and any(word.startswith(("dene", "hazirla")) for word in normalized.split())
         ):
-            if session.attempts >= 3:
+            if session.attempts >= session.max_attempts:
                 return (
                     f"{session.plan_id} üç denemede güvenli taslak üretemedi. "
                     "Yeni kanıt olmadan tekrar etmeyeceğim."
@@ -6416,6 +6519,31 @@ class AssistantEngine:
         refreshed_decision = assess_autonomous_runtime_repair(refreshed)
         return refreshed, refreshed_decision, validation_output
 
+    def _prepare_runtime_improvement_with_policy(
+        self, finding_id: str, decision
+    ) -> str:
+        """Call the runtime planner with policy metadata when supported.
+
+        Stage 4 tests and third-party adapters may still provide the historical
+        one-argument planner test double. Real AssistantEngine implementations
+        receive the policy object; legacy doubles are called without widening
+        their contract. Introspection avoids swallowing TypeError raised inside
+        the planner itself.
+        """
+        prepare = self.prepare_runtime_improvement_implementation
+        try:
+            parameters = inspect.signature(prepare).parameters.values()
+            accepts_policy = any(
+                parameter.name == "repair_policy"
+                or parameter.kind is inspect.Parameter.VAR_KEYWORD
+                for parameter in parameters
+            )
+        except (TypeError, ValueError):
+            accepts_policy = True
+        if accepts_policy:
+            return prepare(finding_id, repair_policy=decision)
+        return prepare(finding_id)
+
     def run_autonomous_runtime_repair(self, finding_id: str) -> str:
         """Run a bounded policy-controlled repair without approval prompts.
         The existing repair planner, proposal validator, worktree checks,
@@ -6429,7 +6557,7 @@ class AssistantEngine:
         finding, decision, target_validation = (
             self._assess_runtime_repair_with_target_refresh(finding)
         )
-        if not decision.allowed:
+        if not decision.can_prepare_plan:
             outputs = [decision.report()]
             if target_validation:
                 outputs.append(target_validation)
@@ -6439,8 +6567,15 @@ class AssistantEngine:
         outputs = [decision.report()]
         if target_validation:
             outputs.append(target_validation)
-        planned = self.prepare_runtime_improvement_implementation(finding.finding_id)
+        planned = self._prepare_runtime_improvement_with_policy(
+            finding.finding_id, decision
+        )
         outputs.append(planned)
+        if decision.approval_required:
+            outputs.append(
+                "Explicit user approval is required before proposal generation or apply."
+            )
+            return "\n\n".join(outputs)
         session = self._self_repair_store().load()
         if session is None or not session.active or session.state != "planned":
             return "\n\n".join(outputs)
@@ -6456,15 +6591,23 @@ class AssistantEngine:
             outputs.append(self._self_repair_status(final_session))
         return "\n\n".join(outputs)
 
-    def prepare_runtime_improvement_implementation(self, finding_id: str) -> str:
+    def prepare_runtime_improvement_implementation(
+        self, finding_id: str, *, repair_policy=None
+    ) -> str:
         finding = self._find_runtime_finding(finding_id)
         if finding is None:
             return (
                 f"{str(finding_id).strip().upper()} kimlikli çalışma zamanı bulgusu "
                 "bulunamadı. Önce bakım taraması yapmalıyım."
             )
+        decision = repair_policy
         if finding.category == "repeated_slow_operation":
             finding, _repair_decision, _target_validation = (
+                self._assess_runtime_repair_with_target_refresh(finding)
+            )
+            decision = _repair_decision
+        elif decision is None:
+            finding, decision, _target_validation = (
                 self._assess_runtime_repair_with_target_refresh(finding)
             )
         if finding.category == "repeated_runtime_warning":
@@ -6522,6 +6665,8 @@ class AssistantEngine:
             finding_root = Path(finding.workspace or ".").resolve(strict=False)
         own_code = finding.scope == "own_code" or finding_root == own_root
         if own_code:
+            if not decision.can_prepare_plan:
+                return decision.report() + "\n\nNo source file was changed."
             approved_paths = [
                 str(item).strip().replace("\\", "/")
                 for item in finding.affected_paths
@@ -6541,6 +6686,11 @@ class AssistantEngine:
                     evidence=evidence_text,
                     acceptance=finding.acceptance_criteria,
                     source_fingerprint=self._current_source_fingerprint(),
+                    policy_status=decision.status,
+                    risk=decision.risk,
+                    max_attempts=decision.max_attempts,
+                    approval_required=decision.approval_required,
+                    approval_granted=not decision.approval_required,
                 )
             except Exception as exc:
                 return f"{finding.finding_id} onarım planı kaydedilemedi: {exc}"
@@ -6601,7 +6751,7 @@ class AssistantEngine:
         }:
             return None
         decision = assess_autonomous_runtime_repair(finding)
-        if not decision.allowed:
+        if not decision.can_prepare_plan:
             return None
         if self._active_self_repair_session() is not None:
             return None
@@ -6616,7 +6766,9 @@ class AssistantEngine:
         }:
             return None
 
-        self.prepare_runtime_improvement_implementation(finding.finding_id)
+        self._prepare_runtime_improvement_with_policy(
+            finding.finding_id, decision
+        )
         session = self._self_repair_store().load()
         if (
             session is not None

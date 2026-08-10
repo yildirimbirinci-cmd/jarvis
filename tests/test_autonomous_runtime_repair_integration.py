@@ -33,11 +33,12 @@ def test_autonomous_repair_runs_plan_proposal_and_apply() -> None:
     store = SimpleNamespace(load=lambda: states.pop(0))
     engine._find_runtime_finding = lambda finding_id: finding
     engine._self_repair_store = lambda: store
-    engine.prepare_runtime_improvement_implementation = lambda finding_id: "planned"
+    engine.prepare_runtime_improvement_implementation = (
+        lambda finding_id, **_kwargs: "planned"
+    )
     engine._prepare_active_self_repair_proposal = lambda session: "proposal ready"
     engine._apply_active_self_repair_proposal = lambda session: "applied"
     engine._self_repair_status = lambda session: "completed"
-
     rendered = engine.run_autonomous_runtime_repair(finding.finding_id)
 
     assert "AUTO_ALLOWED" in rendered
@@ -47,14 +48,39 @@ def test_autonomous_repair_runs_plan_proposal_and_apply() -> None:
     assert "completed" in rendered
 
 
-def test_run_fix_route_uses_autonomous_repair() -> None:
+def test_run_fix_route_uses_policy_aware_targeted_repair() -> None:
+    engine = AssistantEngine.__new__(AssistantEngine)
+    finding = Finding()
+    decision = SimpleNamespace(
+        can_prepare_plan=True,
+        report=lambda: "policy-result",
+    )
+    engine._find_runtime_finding = lambda finding_id: finding
+    engine._assess_runtime_repair_with_target_refresh = (
+        lambda current: (current, decision, "")
+    )
+    engine._prepare_runtime_improvement_with_policy = (
+        lambda finding_id, repair_policy: "targeted-result"
+    )
+    engine.run_autonomous_runtime_repair = lambda finding_id: "autonomous-result"
+
+    rendered = engine._reserved_self_repair_request(
+        "RUN-06578E9EDE bulgusunu duzelt"
+    )
+
+    assert "policy-result" in rendered
+    assert "targeted-result" in rendered
+    assert "autonomous-result" not in rendered
+
+
+def test_explicit_autonomous_fix_route_uses_autonomous_repair() -> None:
     engine = AssistantEngine.__new__(AssistantEngine)
     finding = Finding()
     engine._find_runtime_finding = lambda finding_id: finding
     engine.run_autonomous_runtime_repair = lambda finding_id: "autonomous-result"
 
     rendered = engine._reserved_self_repair_request(
-        "RUN-06578E9EDE bulgusunu duzelt"
+        "RUN-06578E9EDE bulgusunu otonom olarak duzelt"
     )
 
     assert rendered == "autonomous-result"
