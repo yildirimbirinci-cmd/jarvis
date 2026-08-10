@@ -117,23 +117,49 @@ class SelfRepairSessionStore:
 
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path).expanduser().resolve(strict=False)
+        self.last_recovery_notice = ""
+
+    def _quarantine_invalid_store(self, reason: str) -> None:
+        if not self.path.is_file():
+            return
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+        quarantine = self.path.with_name(
+            f"{self.path.name}.corrupt-{stamp}-{uuid.uuid4().hex[:8]}"
+        )
+        try:
+            self.path.replace(quarantine)
+        except OSError as exc:
+            self.last_recovery_notice = (
+                "Invalid self-repair session detected but quarantine failed: "
+                f"{type(exc).__name__}: {exc}"
+            )
+            return
+        self.last_recovery_notice = (
+            "Invalid self-repair session quarantined: "
+            f"{quarantine.name}. Reason: {str(reason)[:500]}"
+        )
 
     def load(self) -> SelfRepairSession | None:
+        self.last_recovery_notice = ""
         if not self.path.is_file():
             return None
         try:
             payload = read_json_object(self.path, max_bytes=_MAX_BYTES)
             if payload.get("schema_version") != _SCHEMA_VERSION:
+                self._quarantine_invalid_store("unsupported schema version")
                 return None
             row = payload.get("session")
             if not isinstance(row, dict):
+                self._quarantine_invalid_store("session row is not an object")
                 return None
             state = str(row.get("state", "")).strip()
             plan_id = extract_plan_id(row.get("plan_id", ""))
             finding_id = extract_run_id(row.get("finding_id", ""))
             if state not in _ACTIVE_STATES | {"completed", "cancelled", "stale"}:
+                self._quarantine_invalid_store("invalid session state")
                 return None
             if not plan_id or not finding_id:
+                self._quarantine_invalid_store("invalid RUN/RPR identity")
                 return None
             return SelfRepairSession(
                 session_id=str(row.get("session_id", ""))[:64] or uuid.uuid4().hex,
@@ -161,7 +187,8 @@ class SelfRepairSessionStore:
                 approval_required=bool(row.get("approval_required", False)),
                 approval_granted=bool(row.get("approval_granted", False)),
             )
-        except (OSError, TypeError, ValueError, UnicodeError):
+        except (OSError, TypeError, ValueError, UnicodeError) as exc:
+            self._quarantine_invalid_store(f"{type(exc).__name__}: {exc}")
             return None
 
     def save(self, session: SelfRepairSession) -> SelfRepairSession:

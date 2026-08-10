@@ -89,6 +89,56 @@ class OwnCodeWorktreeValidator:
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(change.new_content, encoding="utf-8", newline="")
 
+
+    @staticmethod
+    def _pid_is_running(pid: int) -> bool:
+        if pid <= 0:
+            return False
+        if pid == os.getpid():
+            return True
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            return False
+        return True
+
+    def recover_stale_worktrees(self) -> tuple[Path, ...]:
+        """Remove only Jarvis worktrees whose recorded owner process is gone."""
+        temp_root = Path(tempfile.gettempdir()).resolve(strict=False)
+        registered: set[Path] = set()
+        listed = self._git("worktree", "list", "--porcelain")
+        if listed.returncode == 0:
+            for line in listed.stdout.splitlines():
+                if line.startswith("worktree "):
+                    registered.add(
+                        Path(line.removeprefix("worktree ").strip()).resolve(strict=False)
+                    )
+        recovered: list[Path] = []
+        for parent in temp_root.glob("jarvis-own-code-worktree-*"):
+            if not parent.is_dir():
+                continue
+            marker = parent / ".jarvis-worktree-owner"
+            if not marker.is_file():
+                continue
+            try:
+                owner_pid = int(marker.read_text(encoding="ascii").strip())
+            except (OSError, ValueError):
+                continue
+            if self._pid_is_running(owner_pid):
+                continue
+            worktree = (parent / self.root.name).resolve(strict=False)
+            if worktree in registered:
+                removed = self._git("worktree", "remove", "--force", str(worktree))
+                if removed.returncode != 0:
+                    continue
+                registered.discard(worktree)
+            shutil.rmtree(parent, ignore_errors=True)
+            if not parent.exists():
+                recovered.append(parent)
+        if recovered:
+            self._git("worktree", "prune")
+        return tuple(recovered)
+
     def validate(
         self,
         proposal: EditProposal,
@@ -96,8 +146,12 @@ class OwnCodeWorktreeValidator:
     ) -> WorktreeValidationResult:
         if not isinstance(proposal, EditProposal) or not proposal.files:
             raise WorkspaceError("Worktree doğrulaması için geçerli bir taslak gerekli.")
+        self.recover_stale_worktrees()
         self._require_clean_repository()
         parent = Path(tempfile.mkdtemp(prefix="jarvis-own-code-worktree-"))
+        (parent / ".jarvis-worktree-owner").write_text(
+            str(os.getpid()), encoding="ascii"
+        )
         # The repository root is also the ``artmach_assistant`` Python package.
         # Preserve that directory name so subprocess imports resolve the
         # isolated checkout instead of an editable/live installation.
