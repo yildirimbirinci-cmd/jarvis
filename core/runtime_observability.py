@@ -562,6 +562,53 @@ class RuntimeHealthAnalyzer:
             )
         return tuple(rows)
 
+    _REPAIRABLE_RUNTIME_ERROR_TYPES = frozenset({
+        "TypeError",
+        "AttributeError",
+        "NameError",
+        "ImportError",
+        "ModuleNotFoundError",
+    })
+
+    @classmethod
+    def _repairable_action_target(cls, event: RuntimeEvent) -> tuple[str, str] | None:
+        if event.error_type not in cls._REPAIRABLE_RUNTIME_ERROR_TYPES:
+            return None
+        metadata = event.metadata or {}
+        raw_path = str(metadata.get("action_path", "") or "").strip().replace("\\", "/")
+        raw_symbol = str(metadata.get("action_symbol", "") or "").strip()
+        if not raw_path or not raw_symbol:
+            return None
+        if raw_path.startswith("/") or re.match(r"^[A-Za-z]:/", raw_path):
+            return None
+        parts = tuple(part for part in raw_path.split("/") if part not in {"", "."})
+        if not parts or ".." in parts:
+            return None
+        normalized_path = "/".join(parts)
+        if not normalized_path.endswith(".py"):
+            return None
+        return normalized_path, raw_symbol[:500]
+
+    @classmethod
+    def _failure_group_key(cls, event: RuntimeEvent) -> str:
+        target = cls._repairable_action_target(event)
+        if target is None:
+            return event.fingerprint
+        path, symbol = target
+        return cls._finding_id("failure-event", event.fingerprint, path, symbol)
+
+    @classmethod
+    def _failure_target(
+        cls,
+        rows: list[RuntimeEvent],
+    ) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        sample = rows[-1]
+        target = cls._repairable_action_target(sample)
+        if target is None:
+            return cls._paths(rows), cls._symbols(rows)
+        path, symbol = target
+        return (path,), (symbol,)
+
     def _slow_threshold_for(self, event: RuntimeEvent) -> float:
         raw = (event.metadata or {}).get("slow_threshold_ms", self.slow_threshold_ms)
         threshold = _finite_number(raw, default=self.slow_threshold_ms)
@@ -633,13 +680,13 @@ class RuntimeHealthAnalyzer:
 
         failure_groups: dict[str, list[RuntimeEvent]] = {}
         for event in failed:
-            failure_groups.setdefault(event.fingerprint, []).append(event)
+            group_key = self._failure_group_key(event)
+            failure_groups.setdefault(group_key, []).append(event)
         for fingerprint, rows in failure_groups.items():
             if len(rows) < self.minimum_failure_count:
                 continue
             sample = rows[-1]
-            paths = self._paths(rows)
-            symbols = self._symbols(rows)
+            paths, symbols = self._failure_target(rows)
             severity = "high" if len(rows) >= 5 else "medium"
             error_label = sample.error_type or "calisma zamani hatasi"
             title = f"Tekrarlanan hata: {sample.component}.{sample.action}"
