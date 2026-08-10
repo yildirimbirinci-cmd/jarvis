@@ -159,6 +159,7 @@ class RuntimeFinding:
     recommendation: str
     acceptance_criteria: tuple[str, ...]
     research_query: str
+    error_type: str = ""
 
     def to_improvement_finding(self):
         from artmach_assistant.core.project_improvement_service import (
@@ -721,6 +722,7 @@ class RuntimeHealthAnalyzer:
                         f"{sample.component} {sample.action} {error_label} official documentation "
                         "diagnostics reliability testing"
                     ),
+                    error_type=error_label,
                 )
             )
 

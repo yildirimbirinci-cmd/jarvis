@@ -6584,9 +6584,50 @@ class AssistantEngine:
             "değişmedi. Uygulamak için açıkça 'proje taslağını uygula' demelisin."
         )
 
-    def _automatic_maintenance_note(self) -> str:
-        """Return one deduplicated warning after evidence crosses a threshold."""
+    def _prepare_automatic_runtime_failure_entry(
+        self,
+        finding: RuntimeFinding | None,
+    ) -> SelfRepairSession | None:
+        if finding is None:
+            return None
+        if str(getattr(finding, "category", "") or "") != "repeated_runtime_failure":
+            return None
+        if str(getattr(finding, "error_type", "") or "") not in {
+            "TypeError",
+            "AttributeError",
+            "NameError",
+            "ImportError",
+            "ModuleNotFoundError",
+        }:
+            return None
+        decision = assess_autonomous_runtime_repair(finding)
+        if not decision.allowed:
+            return None
+        if self._active_self_repair_session() is not None:
+            return None
+        try:
+            old_plan = self._load_own_code_plan()
+        except Exception:
+            old_plan = None
+        if old_plan and str(old_plan.get("status", "") or "") not in {
+            "completed",
+            "cancelled",
+            "superseded_by_runtime_repair",
+        }:
+            return None
 
+        self.prepare_runtime_improvement_implementation(finding.finding_id)
+        session = self._self_repair_store().load()
+        if (
+            session is not None
+            and session.active
+            and session.state == "planned"
+            and session.finding_id == finding.finding_id
+        ):
+            return session
+        return None
+
+    def _automatic_maintenance_note(self) -> str:
         try:
             root = self._development_root(own_code=True)
             runtime_report = self._runtime_health_service().analyze(workspace=root)
@@ -6607,6 +6648,15 @@ class AssistantEngine:
             if not review.new_alerts:
                 return ""
             alert = review.new_alerts[0]
+            finding = runtime_report.finding(alert.finding_id)
+            session = self._prepare_automatic_runtime_failure_entry(finding)
+            if session is not None:
+                return (
+                    f"Bakım uyarısı [{alert.finding_id}]: {alert.title}. "
+                    f"Kanıt: {alert.evidence_summary}. Güvenli engineering state otomatik "
+                    f"hazırlandı: {session.plan_id}. Patch üretilmedi, kaynak kod "
+                    "değiştirilmedi ve apply başlatılmadı."
+                )
             return (
                 f"Bakım uyarısı [{alert.finding_id}]: {alert.title}. "
                 f"Kanıt: {alert.evidence_summary}. Düzeltme otomatik uygulanmadı; "
