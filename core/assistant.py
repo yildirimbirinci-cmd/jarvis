@@ -4142,9 +4142,11 @@ class AssistantEngine:
                 OWN_CODE_CYCLE_FILE,
                 max_bytes=OWN_CODE_CYCLE_MAX_BYTES,
             )
-            if not isinstance(data, dict) or data.get("version") not in {3, 4}:
-                raise ValueError("Unsupported own-code cycle schema")
-            return data
+            return (
+                data
+                if isinstance(data, dict) and data.get("version") in {3, 4}
+                else None
+            )
         except FileNotFoundError:
             return None
         except Exception as exc:
@@ -4163,9 +4165,8 @@ class AssistantEngine:
                 "version": 4,
                 "stage": "recovery_required",
                 "detail": (
-                    "Engineering cycle kaydi bozuk veya desteklenmeyen sema "
-                    "nedeniyle karantinaya alindi. Yeni apply engellendi; "
-                    "kaynak dogrulamasi gerekiyor."
+                    "Engineering cycle kaydi bozuk oldugu icin karantinaya alindi. "
+                    "Yeni apply engellendi; kaynak dogrulamasi gerekiyor."
                 ),
                 "failures": [],
                 "attempt": 0,
