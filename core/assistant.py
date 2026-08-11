@@ -125,6 +125,7 @@ from artmach_assistant.core.own_code_anchor_repair import (
     remove_redundant_noop_replaces,
     reorder_insertions_after_exact_edits,
     repair_ambiguous_replace_anchors,
+    repair_high_confidence_missing_anchors,
     repair_unique_whitespace_anchors,
     validate_behavior_preserving_extraction_payload,
 )
@@ -1642,6 +1643,14 @@ class AssistantEngine:
                 # invented-anchor rejection gate and never rewrites executable
                 # code or broadens file scope.
                 payload = ground_requested_docstring_replace_anchors(
+                    payload,
+                    project_root=self.own_project_root(),
+                    instruction=prompt,
+                )
+                # A near-exact zero-match anchor can differ from live source by
+                # a tiny model transcription error. Ground only a unique,
+                # method-local >=98.5% match before the invented-anchor gate.
+                payload = repair_high_confidence_missing_anchors(
                     payload,
                     project_root=self.own_project_root(),
                     instruction=prompt,
@@ -6218,6 +6227,144 @@ class AssistantEngine:
             operation.finish(detail=f"Bakim tamamlanamadi: {exc}")
             raise
 
+    def _targeted_runtime_finding_report_request(self, text: str) -> str | None:
+        """Return only local runtime evidence for an explicitly named symbol."""
+
+        raw_text = str(text or "")
+        normalized = self.command_key(raw_text)
+        words = normalized.split()
+        has_finding_context = any(
+            marker in normalized
+            for marker in (
+                "runtime bulgu",
+                "runtime bulgus",
+                "bulgu",
+                "bulgusunu",
+                "yerel kanit",
+                "mevcut kanit",
+            )
+        )
+        has_read_action = any(
+            word.startswith(("rapor", "arastir", "incele", "ozet", "goster"))
+            for word in words
+        )
+        read_only = has_finding_context and has_read_action
+        negative_write_markers = (
+            "patch veya kod degisikligi baslatma",
+            "plan patch veya kod degisikligi baslatma",
+            "hicbir plan patch veya kod degisikligi baslatma",
+            "kod degisikligi baslatma",
+            "patch baslatma",
+            "patch ekleme",
+            "cozum onerisi plan veya patch ekleme",
+            "cozum onerisi, plan veya patch ekleme",
+        )
+        negative_write_context = any(
+            marker in normalized
+            for marker in negative_write_markers
+        )
+        write_intent = (
+            any(
+                word.startswith(
+                    ("duzelt", "degistir", "uygula", "patch", "taslak")
+                )
+                for word in words
+            )
+            and not negative_write_context
+        )
+        if not read_only or write_intent:
+            return None
+
+        symbol_matches = tuple(
+            re.finditer(
+                r"\b(?P<symbol>[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*)\b",
+                raw_text,
+            )
+        )
+        if not symbol_matches:
+            return None
+        requested_symbol = symbol_matches[0].group("symbol")
+        requested_key = requested_symbol.casefold()
+
+        try:
+            report = self._runtime_health_service().analyze(
+                workspace=self.own_project_root().resolve(strict=False),
+            )
+        except Exception as exc:
+            return (
+                "Neden:\n- Runtime kaniti okunamadi.\n\n"
+                f"Konum:\n- {requested_symbol}\n\n"
+                f"Kanit:\n- {type(exc).__name__}: {exc}"
+            )
+
+        matches = []
+        for finding in tuple(getattr(report, "findings", ()) or ()):
+            affected_symbols = tuple(getattr(finding, "affected_symbols", ()) or ())
+            searchable = " ".join(
+                (
+                    str(getattr(finding, "title", "") or ""),
+                    str(getattr(finding, "explanation", "") or ""),
+                    *[str(value or "") for value in affected_symbols],
+                    *[
+                        str(getattr(item, "symbol", "") or "")
+                        for item in tuple(getattr(finding, "evidence", ()) or ())
+                    ],
+                )
+            ).casefold()
+            if requested_key in searchable:
+                matches.append(finding)
+
+        if not matches:
+            return (
+                "Neden:\n- Bu sembolle eslesen aktif runtime bulgusu bulunamadi.\n\n"
+                f"Konum:\n- {requested_symbol}\n\n"
+                "Kanit:\n- Aktif runtime evidence store icinde eslesen kayit yok."
+            )
+
+        reasons = []
+        locations = []
+        evidence_rows = []
+        for finding in matches:
+            explanation = str(getattr(finding, "explanation", "") or "").strip()
+            title = str(getattr(finding, "title", "") or "").strip()
+            reason = explanation or title
+            if reason and reason not in reasons:
+                reasons.append(reason)
+
+            affected_paths = tuple(getattr(finding, "affected_paths", ()) or ())
+            affected_symbols = tuple(getattr(finding, "affected_symbols", ()) or ())
+            for index in range(max(len(affected_paths), len(affected_symbols), 1)):
+                path = str(affected_paths[index] if index < len(affected_paths) else "").strip()
+                symbol = str(affected_symbols[index] if index < len(affected_symbols) else "").strip()
+                location = f"{path} - {symbol}" if path and symbol else path or symbol
+                if location and location not in locations:
+                    locations.append(location)
+
+            count = int(getattr(finding, "occurrence_count", 0) or 0)
+            confidence = float(getattr(finding, "confidence", 0.0) or 0.0)
+            if title:
+                evidence_rows.append(f"{title} [{count} tekrar; guven={confidence:.2f}]")
+            for item in tuple(getattr(finding, "evidence", ()) or ())[:8]:
+                item_path = str(getattr(item, "source_path", "") or "").strip()
+                item_symbol = str(getattr(item, "symbol", "") or "").strip()
+                detail = str(getattr(item, "detail", "") or "").strip()
+                location = f"{item_path} - {item_symbol}" if item_path and item_symbol else item_path or item_symbol
+                row = f"{location or requested_symbol}: {detail}"
+                if row not in evidence_rows:
+                    evidence_rows.append(row)
+
+        return (
+            "Neden:\n" + "\n".join(f"- {row}" for row in reasons)
+            + "\n\nKonum:\n" + (
+                "\n".join(f"- {row}" for row in locations)
+                if locations else f"- {requested_symbol}"
+            )
+            + "\n\nKanit:\n" + (
+                "\n".join(f"- {row}" for row in evidence_rows)
+                if evidence_rows else "- Eslesen finding kaydi var; ayrintili event kaniti yok."
+            )
+        )
+
     def _reserved_self_repair_request(self, text: str) -> str | None:
         """Route self-repair commands before tools, old plans and any LLM."""
 
@@ -9141,6 +9288,88 @@ class AssistantEngine:
             "Kaynak: proje kokunde dogrudan calistirilan Git komutlari."
         )
 
+    def _failed_engineering_session_reason_request(self, text: str) -> str | None:
+        """Explain the persisted failed patch session without starting engineering work."""
+        normalized = self.command_key(text)
+        asks_failed_session = any(
+            marker in normalized
+            for marker in (
+                "en son basarisiz kod gelistirme oturum",
+                "son basarisiz kod gelistirme oturum",
+                "basarisiz kod gelistirme oturum",
+                "basarisiz engineering oturum",
+                "failed engineering session",
+            )
+        )
+        asks_reason = any(
+            marker in normalized
+            for marker in ("neden", "niye", "sebep", "acikla")
+        )
+        if not (asks_failed_session and asks_reason):
+            return None
+
+        try:
+            session = self._evidence_patch_session_store().load()
+        except Exception as exc:
+            return (
+                "BASARISIZ ENGINEERING OTURUMU\n"
+                "Kayit: okunamadi\n"
+                f"Neden: Kalici patch session kaydi okunamadi: {type(exc).__name__}: {exc}\n"
+                "Kaynak: yalniz diskteki kalici engineering kayitlari okundu; "
+                "plan, proposal, patch veya apply baslatilmadi."
+            )
+
+        if session is None or str(session.status).upper() != SESSION_FAILED:
+            return (
+                "BASARISIZ ENGINEERING OTURUMU\n"
+                "Kayit: bulunamadi\n"
+                "Neden: Kalici patch session kaydinda FAILED durumunda bir oturum yok.\n"
+                "Kaynak: yalniz diskteki kalici engineering kayitlari okundu; "
+                "plan, proposal, patch veya apply baslatilmadi."
+            )
+
+        error = str(getattr(session, "error", "") or "").strip()
+        evidence = []
+        for label, attr in (
+            ("Dogrulama", "validation_summary"),
+            ("Worktree", "worktree_summary"),
+            ("Test", "test_summary"),
+            ("Edit", "edit_summary"),
+            ("Apply", "apply_summary"),
+            ("Rollback", "rollback_summary"),
+        ):
+            value = str(getattr(session, attr, "") or "").strip()
+            if value:
+                evidence.append((label, value))
+
+        reason = error or next(
+            (value for _label, value in evidence if value),
+            "FAILED durumu kayitli ancak ayrintili failure reason bos.",
+        )
+        target_path = str(getattr(session, "target_path", "") or "").strip()
+        target_symbol = str(getattr(session, "target_symbol", "") or "").strip()
+        target = target_path
+        if target_symbol:
+            target = f"{target_path} - {target_symbol}" if target_path else target_symbol
+
+        lines = [
+            "BASARISIZ ENGINEERING OTURUMU",
+            f"Oturum: {session.session_id}",
+            "Durum: FAILED",
+            f"Neden: {reason}",
+        ]
+        if target:
+            lines.append(f"Hedef: {target}")
+        if evidence:
+            lines.append("Kalici kanit:")
+            for label, value in evidence:
+                lines.append(f"- {label}: {value[-1600:]}")
+        lines.append(
+            "Kaynak: yalniz diskteki kalici engineering kayitlari okundu; "
+            "plan, proposal, patch veya apply baslatilmadi."
+        )
+        return "\n".join(lines)
+
     def _persisted_engineering_state_report(self) -> str:
         "Report persisted engineering state without mutating recovery state."
         cycle = self._load_own_code_cycle()
@@ -9611,6 +9840,191 @@ class AssistantEngine:
         )
         explicit_state_report = state_subject and state_request
         return explicit_state_report or (state_subject and no_change)
+
+    def _targeted_own_code_review_request(self, text: str) -> str | None:
+        """Return a deterministic source-grounded review for an explicit path/symbol."""
+
+        normalized = self.command_key(text)
+        read_only = any(
+            word.startswith(("incele", "arastir", "analiz", "ozet", "rapor"))
+            for word in normalized.split()
+        )
+        blocked_write = any(
+            word.startswith(("degistir", "duzelt", "uygula", "patch", "taslak"))
+            for word in normalized.split()
+        ) and not any(
+            marker in normalized
+            for marker in (
+                "degisikligi baslatma",
+                "kod degisikligi baslatma",
+                "patch baslatma",
+                "patch veya kod degisikligi baslatma",
+                "hicbir plan patch veya kod degisikligi baslatma",
+            )
+        )
+        if not read_only or blocked_write:
+            return None
+
+        raw_text = str(text or "")
+        path_match = re.search(
+            r"(?P<path>(?:[A-Za-z0-9_.-]+[\\/])+[A-Za-z0-9_.-]+\.py)",
+            raw_text,
+        )
+        if path_match is None:
+            return None
+
+        symbol_search_text = (
+            raw_text[: path_match.start()]
+            + " "
+            + raw_text[path_match.end() :]
+        )
+        symbol_matches = tuple(
+            re.finditer(
+                r"\b(?P<symbol>[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*)\b",
+                symbol_search_text,
+            )
+        )
+        if not symbol_matches:
+            return None
+
+        relative_path = path_match.group("path").replace("\\", "/")
+        symbol = symbol_matches[0].group("symbol")
+        root = Path(self.own_project_root()).resolve()
+        source_path = (root / relative_path).resolve()
+        try:
+            source_path.relative_to(root)
+        except ValueError:
+            return "Salt-okunur inceleme reddedildi: hedef proje kokunun disinda."
+        if not source_path.is_file():
+            return f"Salt-okunur inceleme hedefi bulunamadi: {relative_path}"
+
+        try:
+            source_text = source_path.read_text(encoding="utf-8")
+            tree = ast.parse(source_text, filename=str(source_path))
+        except (OSError, UnicodeError, SyntaxError) as exc:
+            return (
+                "Salt-okunur kaynak incelemesi tamamlanamadi: "
+                f"{type(exc).__name__}: {exc}"
+            )
+
+        class_name, method_name = symbol.split(".", 1)
+        target = None
+        for node in tree.body:
+            if isinstance(node, ast.ClassDef) and node.name == class_name:
+                target = next(
+                    (
+                        child
+                        for child in node.body
+                        if isinstance(
+                            child,
+                            (ast.FunctionDef, ast.AsyncFunctionDef),
+                        )
+                        and child.name == method_name
+                    ),
+                    None,
+                )
+                break
+        if target is None:
+            return (
+                "Salt-okunur inceleme hedef sembolu bulunamadi: "
+                f"{relative_path} - {symbol}"
+            )
+
+        start = int(getattr(target, "lineno", 0) or 0)
+        end = int(getattr(target, "end_lineno", start) or start)
+        span = max(0, end - start + 1)
+        calls = sorted(
+            {
+                (
+                    f"{node.func.value.id}.{node.func.attr}"
+                    if isinstance(node.func, ast.Attribute)
+                    and isinstance(node.func.value, ast.Name)
+                    else node.func.attr
+                    if isinstance(node.func, ast.Attribute)
+                    else node.func.id
+                    if isinstance(node.func, ast.Name)
+                    else ""
+                )
+                for node in ast.walk(target)
+                if isinstance(node, ast.Call)
+            }
+            - {""}
+        )
+        branches = sum(
+            isinstance(
+                node,
+                (ast.If, ast.For, ast.While, ast.Try, ast.Match),
+            )
+            for node in ast.walk(target)
+        )
+        returns = sum(
+            isinstance(node, ast.Return)
+            for node in ast.walk(target)
+        )
+
+        responsibilities = []
+        call_text = " ".join(calls).casefold()
+        if "runtime" in call_text or "conversation_runtime" in source_text[start - 1:end].casefold():
+            responsibilities.append("konusma turu/runtime yasam dongusunu yonetir")
+        if "handle_local_command" in call_text:
+            responsibilities.append("yerel komut yonlendirmesini cagirir")
+        if "dialogue.remember" in call_text:
+            responsibilities.append("diyalog hafizasini gunceller")
+        if "proactive_advisor" in call_text:
+            responsibilities.append("proaktif oneriyi cevaba ekler")
+        if "spoken_response" in call_text:
+            responsibilities.append("ekran cevabini konusma cevabina donusturur")
+        if not responsibilities:
+            responsibilities.append("metot govdesindeki cagri ve kontrol akislarini koordine eder")
+
+        test_hits = []
+        tests_root = root / "tests"
+        if tests_root.is_dir():
+            needles = (
+                symbol,
+                method_name,
+                "handle(",
+            )
+            for candidate in sorted(tests_root.glob("test_*.py")):
+                try:
+                    body = candidate.read_text(encoding="utf-8")
+                except (OSError, UnicodeError):
+                    continue
+                if any(needle in body for needle in needles):
+                    test_hits.append(candidate.relative_to(root).as_posix())
+                if len(test_hits) >= 8:
+                    break
+
+        risks = []
+        if span > 80:
+            risks.append(f"metot uzunlugu yuksek: {span} satir")
+        if branches >= 8:
+            risks.append(f"kontrol akisi yogun: {branches} branch/try/loop dugumu")
+        if len(calls) >= 12:
+            risks.append(f"cok sayida isbirlikci cagri: {len(calls)} benzersiz cagri")
+        if returns >= 3:
+            risks.append(f"birden fazla cikis noktasi: {returns} return")
+        if not risks:
+            risks.append("AST tabanli dar incelemede belirgin yapisal risk esigi asilmedi")
+
+        return (
+            "SALT-OKUNUR KAYNAK INCELEMESI\n"
+            f"Hedef: {relative_path} - {symbol}\n"
+            f"Gercek kaynak araligi: {start}-{end} ({span} satir)\n"
+            "Temel sorumluluklar:\n- "
+            + "\n- ".join(responsibilities)
+            + "\nKarmasiklik riskleri:\n- "
+            + "\n- ".join(risks)
+            + "\nIlgili test adaylari:\n- "
+            + (
+                "\n- ".join(test_hits)
+                if test_hits
+                else "Kaynak metin eslesmesiyle test adayi bulunamadi."
+            )
+            + "\nKanit: kaynak ve test dosyalari diskten salt-okunur okundu; "
+            "LLM ile kod veya test uretilmedi. Plan, patch veya dosya degisikligi baslatilmadi."
+        )
+
     def _own_code_read_only_request(self, text: str) -> str | None:
         """Handle source inspection before stale plans or language models."""
 
@@ -13434,6 +13848,9 @@ class AssistantEngine:
             "kendi kod islem durumu",
         }:
             return self.own_code_cycle_report()
+        failed_session_reason = self._failed_engineering_session_reason_request(text)
+        if failed_session_reason is not None:
+            return failed_session_reason
         # Engineering-state inspection is a narrow read-only exception:
         # it must outrank patch-session lookup without moving the generic
         # read-only router ahead of retest/research routing.
@@ -13453,10 +13870,27 @@ class AssistantEngine:
             for phrase in (
                 "yeniden test",
                 "yeniden dogrula",
+                "yeniden dogrulama",
                 "tekrar test",
                 "retest",
+                "retest plani",
+                "primary test",
+                "birincil test",
             )
         )
+        if not explicit_retest:
+            retest_words = normalized.split()
+            explicit_retest = (
+                any(
+                    word.startswith(("primary", "birincil"))
+                    for word in retest_words
+                )
+                and any(word.startswith("test") for word in retest_words)
+                and any(
+                    word.startswith(("calistir", "kos", "yurut", "goster"))
+                    for word in retest_words
+                )
+            )
         if explicit_retest:
             retest_command = self._retest_command_request(text)
             if retest_command is not None:
@@ -13488,6 +13922,10 @@ class AssistantEngine:
             if own_code_approval is not None:
                 return own_code_approval
 
+        targeted_runtime_report = self._targeted_runtime_finding_report_request(text)
+        if targeted_runtime_report is not None:
+            return targeted_runtime_report
+
         reserved_self_repair = self._reserved_self_repair_request(text)
         if reserved_self_repair is not None:
             return reserved_self_repair
@@ -13499,6 +13937,10 @@ class AssistantEngine:
         research_command = self._research_command_request(text)
         if research_command is not None:
             return research_command
+
+        targeted_read_only = self._targeted_own_code_review_request(text)
+        if targeted_read_only is not None:
+            return targeted_read_only
 
         # Read-only own-code reporting is intentionally below retest/research.
         # Broad words such as "dogrula" can occur in evidence commands and must

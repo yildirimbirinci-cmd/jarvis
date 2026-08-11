@@ -1728,6 +1728,86 @@ def _closest_unique_source_window(
 
     return best_window, best_score
 
+def repair_high_confidence_missing_anchors(
+    payload: dict[str, Any],
+    *,
+    project_root: Path,
+    instruction: str,
+    minimum_score: float = 0.985,
+) -> dict[str, Any]:
+    """Ground near-exact zero-match anchors to one live method-local block.
+
+    This is intentionally narrower than retry guidance: only explicit
+    Class.method requests are eligible, the proposed anchor must have zero
+    live-source matches, and the closest method-local window must be unique and
+    near-exact. The replacement content is never changed.
+    """
+    requested_symbol = _requested_symbol(instruction)
+    if requested_symbol is None:
+        return payload
+
+    class_name, method_name = requested_symbol
+    root = Path(project_root).resolve(strict=False)
+    repaired = copy.deepcopy(payload)
+    files = repaired.get("files")
+    if not isinstance(files, list):
+        return payload
+
+    changed = False
+    for file_row in files:
+        if not isinstance(file_row, dict):
+            continue
+        raw_path = str(file_row.get("path", "")).strip().replace("\\", "/")
+        if not raw_path:
+            continue
+        candidate = (root / raw_path).resolve(strict=False)
+        try:
+            candidate.relative_to(root)
+        except ValueError:
+            continue
+        if not candidate.is_file():
+            continue
+        try:
+            source = candidate.read_text(encoding="utf-8")
+        except (OSError, UnicodeError):
+            continue
+        scoped_source = _symbol_source(
+            source, class_name=class_name, method_name=method_name
+        )
+        if not scoped_source:
+            continue
+        operations = file_row.get("operations")
+        if not isinstance(operations, list):
+            continue
+        for operation in operations:
+            if not isinstance(operation, dict):
+                continue
+            kind = str(operation.get("op", "")).strip().casefold()
+            field = (
+                "anchor" if kind in {"insert_before", "insert_after"}
+                else "old" if kind in {"replace", "delete"}
+                else ""
+            )
+            if not field:
+                continue
+            requested_anchor = operation.get(field)
+            if not isinstance(requested_anchor, str) or not requested_anchor:
+                continue
+            if source.count(requested_anchor) != 0:
+                continue
+            closest, score = _closest_unique_source_window(
+                scoped_source, requested_anchor
+            )
+            if not closest or score < minimum_score:
+                continue
+            if source.count(closest) != 1 or scoped_source.count(closest) != 1:
+                continue
+            operation[field] = closest
+            changed = True
+
+    return repaired if changed else payload
+
+
 def build_missing_anchor_guidance(
     payload: dict[str, Any],
     *,

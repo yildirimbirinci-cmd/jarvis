@@ -60,14 +60,57 @@ def _requested_finding_id(text: str) -> str:
     return match.group(0).upper() if match else ""
 
 
+def _is_retest_plan_show_request(text: str) -> bool:
+    normalized = _normalized(text)
+    return (
+        any(
+            phrase in normalized
+            for phrase in (
+                "yeniden dogrulama plani",
+                "yeniden test plani",
+                "retest plani",
+            )
+        )
+        and any(
+            word in normalized.split()
+            for word in ("goster", "listele", "raporla")
+        )
+    )
+
+
+def _is_primary_execution_request(text: str) -> bool:
+    normalized = _normalized(text)
+    words = normalized.split()
+    has_primary = any(
+        word.startswith(("primary", "birincil"))
+        for word in words
+    )
+    has_test = any(word.startswith("test") for word in words)
+    has_execute = any(
+        word.startswith(("calistir", "kos", "yurut"))
+        for word in words
+    )
+    return has_primary and has_test and has_execute
+
+
 def is_retest_start_request(text: str) -> bool:
     normalized = _normalized(text)
     if normalized in _START_REQUESTS:
         return True
+    if _is_primary_execution_request(text):
+        return True
     finding_id = _requested_finding_id(text)
     if not finding_id:
         return False
-    return any(phrase in normalized for phrase in ("yeniden test", "yeniden dogrula", "tekrar test", "retest"))
+    return any(
+        phrase in normalized
+        for phrase in (
+            "yeniden test",
+            "yeniden dogrula",
+            "tekrar test",
+            "retest",
+        )
+    )
 
 
 def _item_from_session(
@@ -220,12 +263,81 @@ class RetestCommandCoordinator:
         self,
         plan: RetestPlan,
         finding_id: str,
+        text: str = "",
     ) -> RetestItem | None:
-        if not finding_id:
-            return self._first_automated(plan)
         completed_ids = self._completed_ids()
-        target = finding_id.casefold()
-        return next((item for item in plan.items if (item.status == AUTOMATED and approval_id_for_item(item) not in completed_ids and target in {str(value or "").casefold() for value in item.finding_ids})), None)
+        candidates = tuple(
+            item
+            for item in plan.items
+            if (
+                item.status == AUTOMATED
+                and approval_id_for_item(item)
+                not in completed_ids
+            )
+        )
+
+        if finding_id:
+            target = finding_id.casefold()
+            return next(
+                (
+                    item
+                    for item in candidates
+                    if target
+                    in {
+                        str(value or "").casefold()
+                        for value in item.finding_ids
+                    }
+                ),
+                None,
+            )
+
+        normalized = _normalized(text)
+        if normalized:
+            ranked = []
+            for item in candidates:
+                haystack = _normalized(
+                    " ".join(
+                        (
+                            item.title,
+                            item.path,
+                            item.symbol,
+                            *item.finding_titles,
+                        )
+                    )
+                )
+                tokens = tuple(
+                    token
+                    for token in re.findall(
+                        r"[a-z0-9_]+",
+                        normalized,
+                    )
+                    if len(token) >= 4
+                    and token
+                    not in {
+                        "kayitli",
+                        "yeniden",
+                        "dogrulama",
+                        "planindaki",
+                        "primary",
+                        "testlerini",
+                        "calistir",
+                        "simdi",
+                    }
+                )
+                score = sum(
+                    1 for token in tokens if token in haystack
+                )
+                if score:
+                    ranked.append((score, item))
+
+            if ranked:
+                ranked.sort(
+                    key=lambda pair: pair[0],
+                    reverse=True,
+                )
+                return ranked[0][1]
+
+        return candidates[0] if candidates else None
 
     def handle(
         self,
@@ -334,6 +446,10 @@ class RetestCommandCoordinator:
                 "Test calistirilmadi."
             )
 
+        if _is_retest_plan_show_request(text):
+            plan = self.plan_provider()
+            return plan.report()
+
         if not is_retest_start_request(text):
             return None
 
@@ -342,7 +458,11 @@ class RetestCommandCoordinator:
 
         plan = self.plan_provider()
         finding_id = _requested_finding_id(text)
-        item = self._automated_for_request(plan, finding_id)
+        item = self._automated_for_request(
+            plan,
+            finding_id,
+            text,
+        )
 
         if item is None:
             if finding_id:

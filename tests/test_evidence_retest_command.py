@@ -247,3 +247,53 @@ def test_corrupt_store_is_cleared_safely(
     assert rendered is not None
     assert "bozuk" in rendered
     assert not path.exists()
+
+
+def test_saved_revalidation_plan_is_rendered_without_llm(tmp_path) -> None:
+    coordinator = _coordinator(tmp_path)
+
+    rendered = coordinator.handle(
+        "Kayitli yeniden dogrulama planini goster."
+    )
+
+    assert rendered is not None
+    assert "YENIDEN DOGRULAMA PLANI" in rendered
+    assert "Primary testler:" in rendered
+    assert coordinator.store.load() is None
+
+
+def test_natural_primary_execution_request_creates_real_approval(tmp_path) -> None:
+    coordinator = _coordinator(tmp_path)
+
+    rendered = coordinator.handle(
+        "Kayitli yeniden dogrulama planindaki "
+        "Example.run primary testlerini calistir."
+    )
+
+    assert rendered is not None
+    assert "PRIMARY YENIDEN TEST ONAYI" in rendered
+    assert "Henuz test calistirilmadi" in rendered
+    session = coordinator.store.load()
+    assert session is not None
+    assert session.status == PENDING
+    assert session.symbol == "Example.run"
+
+
+def test_natural_primary_request_never_claims_execution_before_approval(
+    tmp_path,
+) -> None:
+    calls = []
+
+    def executor(item, **kwargs):
+        calls.append((item, kwargs))
+        raise AssertionError("executor must wait for exact approval")
+
+    coordinator = _coordinator(tmp_path, executor=executor)
+
+    rendered = coordinator.handle(
+        "Example.run primary testlerini simdi calistir."
+    )
+
+    assert rendered is not None
+    assert "Henuz test calistirilmadi" in rendered
+    assert calls == []
