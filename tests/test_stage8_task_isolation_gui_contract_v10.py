@@ -26,6 +26,7 @@ def test_cancel_fallback_uses_atomic_latest_pending_operation() -> None:
 
 def test_worker_terminal_paths_still_handoff_to_fifo() -> None:
     source = _method("run_worker")
-    assert "self.worker.finished.connect(self._run_next_queued_worker)" in source
+    assert "self.worker.finished.connect(" in source
+    assert "QTimer.singleShot(0, self._run_next_queued_worker)" in source
     assert "self.task_orchestrator.finish(record.task_id)" in source
     assert "cancelled=cancelled" in source

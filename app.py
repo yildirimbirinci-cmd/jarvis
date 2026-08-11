@@ -2812,7 +2812,9 @@ class MainWindow(QMainWindow):
 
         self.worker.finished_value.connect(complete)
         self.worker.failed.connect(fail)
-        self.worker.finished.connect(self._run_next_queued_worker)
+        self.worker.finished.connect(
+            lambda: QTimer.singleShot(0, self._run_next_queued_worker)
+        )
         start_message = intent.start_message if intent is not None else f"Başlatıldı: {record.name}"
         self.statusBar().showMessage(start_message)
         if source == "voice":
