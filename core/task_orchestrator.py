@@ -392,11 +392,16 @@ class TaskOrchestrator:
             if index is None:
                 return None
             record = self._pending.pop(index)
+            original = TaskRecord(**asdict(record))
             record.state = "cancelled"
             record.finished_at = time.time()
             record.error = clean_reason
             record.status_message = "Pending task was cancelled before execution."
-            self._save_pending()
+            try:
+                self._save_pending()
+            except Exception:
+                self._pending.insert(index, original)
+                raise
             self._history.append(record)
             self._history = self._history[-_MAX_HISTORY:]
             try:
@@ -404,6 +409,13 @@ class TaskOrchestrator:
             except Exception:
                 pass
             return TaskRecord(**asdict(record))
+
+    def cancel_latest_pending(self, reason: str = "user cancellation") -> TaskRecord | None:
+        with self._lock:
+            if not self._pending:
+                return None
+            task_id = self._pending[-1].task_id
+            return self.cancel_pending(task_id, reason)
 
     def link_active_to(self, parent_token: ParentCancellationToken | None) -> bool:
         with self._lock:

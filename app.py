@@ -2671,16 +2671,12 @@ class MainWindow(QMainWindow):
             self.voice_log("AKTİF GÖREV: Kullanıcı iptal isteği gönderdi.")
             return True
 
-        pending = self.task_orchestrator.pending
-        if not pending:
-            return False
-        record = pending[-1]
-        removed = self.task_orchestrator.cancel_pending(record.task_id, "kullanıcı iptali")
+        removed = self.task_orchestrator.cancel_latest_pending("kullanıcı iptali")
         if removed is None:
             return False
-        self._pending_worker_jobs.pop(record.task_id, None)
-        self.statusBar().showMessage(f"Bekleyen görev iptal edildi: {record.name}")
-        self.voice_log(f"BEKLEYEN GÖREV: İptal edildi: {record.name}")
+        self._pending_worker_jobs.pop(removed.task_id, None)
+        self.statusBar().showMessage(f"Bekleyen görev iptal edildi: {removed.name}")
+        self.voice_log(f"BEKLEYEN GÖREV: İptal edildi: {removed.name}")
         return True
 
     def queue_worker(
