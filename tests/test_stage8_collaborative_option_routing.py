@@ -27,3 +27,21 @@ def test_ordinary_second_task_phrase_without_output_instruction_is_not_selection
     assert AssistantEngine._collaborative_option_selection_index(
         "ikinci gorev calisti", 3
     ) is None
+
+
+def test_unrelated_information_request_does_not_belong_to_collaborative_session() -> None:
+    assert AssistantEngine._collaborative_is_general_information_request(
+        "Yapay zekanin tarihini 100 maddede ayrintili anlat."
+    ) is True
+
+
+def test_explicit_collaborative_problem_explanation_is_not_detached() -> None:
+    assert AssistantEngine._collaborative_is_general_information_request(
+        "Bu sorunu ayrintili anlat."
+    ) is False
+
+
+def test_explicit_code_improvement_request_is_not_detached() -> None:
+    assert AssistantEngine._collaborative_is_general_information_request(
+        "Bu kodu nasil gelistirebiliriz, acikla."
+    ) is False

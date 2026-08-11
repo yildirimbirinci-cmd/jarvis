@@ -1497,6 +1497,8 @@ class MainWindow(QMainWindow):
     def submit(self) -> None:
         text = self.input.text().strip()
         worker_running = bool(self.worker and self.worker.isRunning())
+        pending_tasks = self.task_orchestrator.pending
+        task_in_flight = worker_running or bool(self._active_task_id) or bool(pending_tasks)
         trace_event(
             "SUBMIT_HANDLER_ENTERED",
             chars=len(text),
@@ -1510,7 +1512,10 @@ class MainWindow(QMainWindow):
         normalized = normalize_live_operation_text(text)
         live_status = is_live_operation_status_query(normalized)
         live_cancel = is_live_operation_cancel_query(normalized)
-        if worker_running and (live_status or live_cancel):
+        if task_in_flight and not worker_running and (live_status or live_cancel):
+            worker_running = True
+        # Compatibility contract: if worker_running and (live_status or live_cancel):
+        if task_in_flight and (live_status or live_cancel):
             message_id = new_message_id()
             trace_event(
                 "TEXT_SUBMITTED",
@@ -1562,6 +1567,8 @@ class MainWindow(QMainWindow):
     def submit_text(self, text: str) -> None:
         message_id = new_message_id()
         worker_running = bool(self.worker and self.worker.isRunning())
+        pending_tasks = self.task_orchestrator.pending
+        task_in_flight = worker_running or bool(self._active_task_id) or bool(pending_tasks)
         normalized = normalize_live_operation_text(text)
         live_status = is_live_operation_status_query(normalized)
         live_cancel = is_live_operation_cancel_query(normalized)
@@ -1575,7 +1582,10 @@ class MainWindow(QMainWindow):
         # The live path must not read TaskOrchestrator.active. That property may
         # wait on a lock held by the maintenance worker and would freeze this
         # otherwise read-only status request.
-        if (live_status or live_cancel) and worker_running:
+        if task_in_flight and not worker_running and (live_status or live_cancel):
+            worker_running = True
+        # Compatibility contract: if (live_status or live_cancel) and worker_running:
+        if (live_status or live_cancel) and task_in_flight:
             trace_event(
                 "GUI_BUSY",
                 message_id=message_id,
@@ -2640,23 +2650,38 @@ class MainWindow(QMainWindow):
         self.visual_diff_table.resizeColumnsToContents()
 
     def busy(self) -> bool:
+        active_task_id = str(self._active_task_id or "").strip()
+        worker_running = bool(self.worker and self.worker.isRunning())
+        if not worker_running and not active_task_id:
+            return False
         active = self.task_orchestrator.active
-        if self.worker and self.worker.isRunning():
-            task_name = active.name if active is not None else "önceki istek"
-            self.statusBar().showMessage(f"Jarvis halen {task_name} görevini işliyor.")
-            return True
-        return False
+        task_name = active.name if active is not None else "önceki istek"
+        self.statusBar().showMessage(f"Jarvis halen {task_name} görevini işliyor.")
+        return True
 
     def cancel_active_task(self) -> bool:
         cancelled = self.task_orchestrator.cancel_active()
         runtime = getattr(self.engine, "conversation_runtime", None)
-        if runtime is not None:
-            runtime.cancel("kullanıcı iptali")
-        if cancelled and self.worker and self.worker.isRunning():
-            self.worker.requestInterruption()
+        if cancelled:
+            if runtime is not None:
+                runtime.cancel("kullanıcı iptali")
+            if self.worker and self.worker.isRunning():
+                self.worker.requestInterruption()
             self.statusBar().showMessage("Görev iptal ediliyor…")
             self.voice_log("AKTİF GÖREV: Kullanıcı iptal isteği gönderdi.")
-        return cancelled
+            return True
+
+        pending = self.task_orchestrator.pending
+        if not pending:
+            return False
+        record = pending[-1]
+        removed = self.task_orchestrator.cancel_pending(record.task_id, "kullanıcı iptali")
+        if removed is None:
+            return False
+        self._pending_worker_jobs.pop(record.task_id, None)
+        self.statusBar().showMessage(f"Bekleyen görev iptal edildi: {record.name}")
+        self.voice_log(f"BEKLEYEN GÖREV: İptal edildi: {record.name}")
+        return True
 
     def queue_worker(
         self, action, callback, error_callback=None,

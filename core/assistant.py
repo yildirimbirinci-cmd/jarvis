@@ -11621,6 +11621,26 @@ class AssistantEngine:
             return None
         return option_index_from_text(text, option_count)
 
+    @staticmethod
+    def _collaborative_is_general_information_request(text: str) -> bool:
+        """Keep unrelated informational prompts out of a stale engineering session."""
+        normalized = normalize_text(str(text or "")).strip()
+        if not normalized:
+            return False
+        collaborative_markers = (
+            "bu sorun", "bu problem", "bu cozum", "bu secenek",
+            "hangi cozum", "hangi secenek", "hangisi", "teshis",
+            "kanit", "plani", "plani uygula", "kodu", "kodunu",
+            "duzelt", "gelistir", "iyilestir",
+        )
+        if any(marker in normalized for marker in collaborative_markers):
+            return False
+        information_markers = (
+            "anlat", "acikla", "nedir", "ne demek", "nasil calisir",
+            "bilgi ver", "ozetle", "listele",
+        )
+        return any(marker in normalized for marker in information_markers)
+
     def _collaborative_problem_request(self, text: str) -> str | None:
         normalized = normalize_text(str(text or ""))
         words = normalized.split()
@@ -11647,6 +11667,12 @@ class AssistantEngine:
         if store is None:
             return None
         session = store.load()
+        if (
+            session is not None
+            and session.stage not in {"completed", "cancelled"}
+            and self._collaborative_is_general_information_request(text)
+        ):
+            return None
         last_kind = str((self.last_action_context or {}).get("kind", ""))
         focused_review_followup = (
             last_kind == "own_code_review"
