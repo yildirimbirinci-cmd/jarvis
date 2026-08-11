@@ -14,6 +14,7 @@ from artmach_assistant.config import DATA_DIR
 
 TASK_HISTORY_FILE = DATA_DIR / "task_history.json"
 ACTIVE_TASK_FILE = DATA_DIR / "active_task.json"
+PENDING_TASKS_FILE = DATA_DIR / "pending_tasks.json"
 _MAX_HISTORY = 200
 
 
@@ -110,14 +111,30 @@ class CancellationToken:
 class TaskOrchestrator:
     """Tek aktif ağır görev, iptal işareti ve kalıcı görev geçmişi yönetir."""
 
-    def __init__(self, history_file: Path = TASK_HISTORY_FILE, active_file: Path = ACTIVE_TASK_FILE) -> None:
+    def __init__(
+        self,
+        history_file: Path = TASK_HISTORY_FILE,
+        active_file: Path = ACTIVE_TASK_FILE,
+        pending_file: Path | None = None,
+    ) -> None:
         self.history_file = history_file
         self.active_file = active_file
+        self.pending_file = pending_file or history_file.with_name(PENDING_TASKS_FILE.name)
         self._lock = threading.RLock()
         self._active: TaskRecord | None = None
         self._token: CancellationToken | None = None
         self._history: list[TaskRecord] = self._load_history()
+        self._pending: list[TaskRecord] = self._load_pending()
         self._recovered_task: TaskRecord | None = self._recover_interrupted_task()
+        if self._recovered_task is not None:
+            recovered_id = self._recovered_task.task_id
+            before = len(self._pending)
+            self._pending = [row for row in self._pending if row.task_id != recovered_id]
+            if len(self._pending) != before:
+                try:
+                    self._save_pending()
+                except Exception:
+                    pass
 
     @staticmethod
     def _record_from_mapping(row: dict[str, Any]) -> TaskRecord:
@@ -155,6 +172,43 @@ class TaskOrchestrator:
         except (OSError, UnicodeError, json.JSONDecodeError, ValueError):
             self._quarantine_corrupt(self.history_file)
             return []
+
+    def _load_pending(self) -> list[TaskRecord]:
+        if not self.pending_file.exists():
+            return []
+        try:
+            raw = json.loads(self.pending_file.read_text(encoding="utf-8"))
+            if not isinstance(raw, list):
+                raise ValueError("Pending task record is not a list.")
+            records: list[TaskRecord] = []
+            seen: set[str] = set()
+            for row in raw:
+                if not isinstance(row, dict):
+                    continue
+                try:
+                    record = self._record_from_mapping(row)
+                except (TypeError, ValueError):
+                    continue
+                if record.state != "queued" or not record.task_id or record.task_id in seen:
+                    continue
+                record.started_at = None
+                record.finished_at = None
+                record.progress = 0
+                seen.add(record.task_id)
+                records.append(record)
+            return records
+        except (OSError, UnicodeError, json.JSONDecodeError, ValueError):
+            self._quarantine_corrupt(self.pending_file)
+            return []
+
+    def _save_pending(self) -> None:
+        if not self._pending:
+            try:
+                self.pending_file.unlink()
+            except FileNotFoundError:
+                pass
+            return
+        self._write_json_atomic(self.pending_file, [asdict(item) for item in self._pending])
 
     def _write_json_atomic(self, path: Path, payload: Any) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -217,6 +271,11 @@ class TaskOrchestrator:
         self._write_json_atomic(self.history_file, payload)
 
     @property
+    def pending(self) -> list[TaskRecord]:
+        with self._lock:
+            return [TaskRecord(**asdict(row)) for row in self._pending]
+
+    @property
     def active(self) -> TaskRecord | None:
         with self._lock:
             return None if self._active is None else TaskRecord(**asdict(self._active))
@@ -261,6 +320,90 @@ class TaskOrchestrator:
             token.link_parent(parent_token)
             self._save_active()
             return TaskRecord(**asdict(self._active)), token
+
+    def enqueue(
+        self,
+        name: str,
+        source: str = "ui",
+        timeout_seconds: float = 900.0,
+        *,
+        turn_id: str = "",
+    ) -> TaskRecord:
+        clean_name = str(name).strip() or "Jarvis task"
+        with self._lock:
+            record = TaskRecord(
+                task_id=uuid.uuid4().hex,
+                name=clean_name,
+                source=str(source).strip() or "ui",
+                state="queued",
+                created_at=time.time(),
+                timeout_seconds=max(0.0, float(timeout_seconds)),
+                turn_id=str(turn_id).strip(),
+                status_message="Task is waiting in the FIFO queue.",
+            )
+            self._pending.append(record)
+            try:
+                self._save_pending()
+            except Exception:
+                self._pending.pop()
+                raise
+            return TaskRecord(**asdict(record))
+
+    def start_next(
+        self,
+        expected_task_id: str = "",
+        *,
+        parent_token: ParentCancellationToken | None = None,
+    ) -> tuple[TaskRecord, CancellationToken] | None:
+        with self._lock:
+            if self._active is not None and self._active.state in {"running", "cancelling"}:
+                return None
+            if not self._pending:
+                return None
+            record = self._pending[0]
+            expected = str(expected_task_id).strip()
+            if expected and record.task_id != expected:
+                return None
+            now = time.time()
+            record.state = "running"
+            record.started_at = now
+            record.heartbeat_at = now
+            record.status_message = "Task started from FIFO queue."
+            token = CancellationToken()
+            self._active = record
+            self._token = token
+            token.add_cancel_callback(
+                lambda reason, task_id=record.task_id: self._mark_cancelling_from_token(task_id, reason)
+            )
+            token.link_parent(parent_token)
+            self._save_active()
+            self._pending.pop(0)
+            try:
+                self._save_pending()
+            except Exception:
+                pass
+            return TaskRecord(**asdict(record)), token
+
+    def cancel_pending(self, task_id: str, reason: str = "user cancellation") -> TaskRecord | None:
+        clean_id = str(task_id).strip()
+        clean_reason = str(reason).strip() or "user cancellation"
+        with self._lock:
+            index = next((idx for idx, row in enumerate(self._pending) if row.task_id == clean_id), None)
+            if index is None:
+                return None
+            record = self._pending.pop(index)
+            record.state = "cancelled"
+            record.finished_at = time.time()
+            record.error = clean_reason
+            record.status_message = "Pending task was cancelled before execution."
+            self._save_pending()
+            self._history.append(record)
+            self._history = self._history[-_MAX_HISTORY:]
+            try:
+                self._save()
+            except Exception:
+                pass
+            return TaskRecord(**asdict(record))
 
     def link_active_to(self, parent_token: ParentCancellationToken | None) -> bool:
         with self._lock:

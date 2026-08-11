@@ -11594,6 +11594,33 @@ class AssistantEngine:
 
         return None
 
+    @staticmethod
+    def _collaborative_option_selection_index(
+        text: str,
+        option_count: int,
+    ) -> int | None:
+        """Parse an option only when the user is actually selecting one.
+
+        Ordinal words can occur in ordinary dialogue (for example "ikinci
+        gorev").  A stale collaborative session must not consume those
+        messages as engineering option selections.
+        """
+        normalized = normalize_text(str(text or "")).strip()
+        if not normalized:
+            return None
+        words = normalized.split()
+        explicit_subject = any(
+            word.startswith(("cozum", "secenek", "alternatif", "opsiyon"))
+            for word in words
+        )
+        bare_ordinal = normalized in {
+            "birinci", "ikinci", "ucuncu", "dorduncu",
+            "1", "2", "3", "4", "1.", "2.", "3.", "4.",
+        }
+        if not explicit_subject and not bare_ordinal:
+            return None
+        return option_index_from_text(text, option_count)
+
     def _collaborative_problem_request(self, text: str) -> str | None:
         normalized = normalize_text(str(text or ""))
         words = normalized.split()
@@ -11672,7 +11699,9 @@ class AssistantEngine:
         if any(phrase in normalized for phrase in ("sebebi nedir", "neden", "ne buldun", "kanit", "teshis")):
             return render_session(session)
 
-        option_index = option_index_from_text(text, len(session.options))
+        option_index = self._collaborative_option_selection_index(
+            text, len(session.options)
+        )
         if option_index is not None:
             option = session.options[option_index]
             session.selected_option_id = option.option_id

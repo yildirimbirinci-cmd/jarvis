@@ -717,6 +717,7 @@ class MainWindow(QMainWindow):
         self.engine.restart_application_callback = self.request_safe_restart
         self.worker: Worker | None = None
         self.task_orchestrator = TaskOrchestrator()
+        self._pending_worker_jobs: dict[str, tuple] = {}
         self.intent_router = IntentRouter()
         self._active_intent: IntentDecision | None = None
         self._active_task_id = ""
@@ -1642,6 +1643,14 @@ class MainWindow(QMainWindow):
                 self.chat.appendPlainText(f"SEN: {text}\n")
                 self.cancel_active_task()
                 self.on_answer(APP_EXIT_SIGNAL)
+                return
+            self.save_settings()
+            self.chat.appendPlainText(f"SEN: {text}\n")
+            intent = self._intent_for_text(text)
+            self.queue_worker(
+                lambda: self.engine.handle(text), self.on_answer,
+                task_name=intent.task_name, source="keyboard", intent=intent,
+            )
             return
         self.save_settings()
         self.chat.appendPlainText(f"SEN: {text}\n")
@@ -2649,14 +2658,63 @@ class MainWindow(QMainWindow):
             self.voice_log("AKTİF GÖREV: Kullanıcı iptal isteği gönderdi.")
         return cancelled
 
-    def run_worker(self, action, callback, error_callback=None, task_name: str = "Jarvis görevi", source: str = "ui", intent: IntentDecision | None = None) -> None:
+    def queue_worker(
+        self, action, callback, error_callback=None,
+        task_name: str = "Jarvis görevi", source: str = "keyboard",
+        intent: IntentDecision | None = None,
+    ) -> str:
+        record = self.task_orchestrator.enqueue(task_name, source)
+        self._pending_worker_jobs[record.task_id] = (action, callback, error_callback, task_name, source, intent)
+        trace_event(
+            "WORKER_QUEUED", task_id=record.task_id, task_name=record.name,
+            source=source, queue_depth=len(self.task_orchestrator.pending),
+        )
+        self.statusBar().showMessage(
+            f"Siraya alindi: {record.name} ({len(self.task_orchestrator.pending)} bekleyen)"
+        )
+        self.chat.appendPlainText(f"JARVIS: Istek siraya alindi: {record.name}\n")
+        return record.task_id
+
+    def _run_next_queued_worker(self) -> None:
         if self.worker and self.worker.isRunning():
             return
+        pending = self.task_orchestrator.pending
+        if not pending:
+            return
+        next_record = pending[0]
+        job = self._pending_worker_jobs.get(next_record.task_id)
+        if job is None:
+            self.statusBar().showMessage(
+                "Bekleyen gorev metadata olarak geri yuklendi; yeniden olusturma bekleniyor."
+            )
+            return
+        action, callback, error_callback, task_name, source, intent = job
+        started = self.run_worker(
+            action, callback, error_callback, task_name=task_name, source=source, intent=intent,
+            _queued_task_id=next_record.task_id,
+        )
+        if started:
+            self._pending_worker_jobs.pop(next_record.task_id, None)
+
+    def run_worker(
+        self, action, callback, error_callback=None,
+        task_name: str = "Jarvis görevi", source: str = "ui",
+        intent: IntentDecision | None = None, *, _queued_task_id: str = "",
+    ) -> bool:
+        if self.worker and self.worker.isRunning():
+            return False
         try:
-            record, token = self.task_orchestrator.start(task_name, source)
+            if _queued_task_id:
+                started = self.task_orchestrator.start_next(_queued_task_id)
+                if started is None:
+                    return False
+                record, token = started
+            else:
+                record, token = self.task_orchestrator.start(task_name, source)
         except RuntimeError as exc:
             self.statusBar().showMessage(str(exc))
-            return
+            return False
+        self._active_intent = intent
         self._active_task_id = record.task_id
         trace_event(
             "WORKER_STARTED",
@@ -2733,6 +2791,7 @@ class MainWindow(QMainWindow):
 
         self.worker.finished_value.connect(complete)
         self.worker.failed.connect(fail)
+        self.worker.finished.connect(self._run_next_queued_worker)
         start_message = intent.start_message if intent is not None else f"Başlatıldı: {record.name}"
         self.statusBar().showMessage(start_message)
         if source == "voice":
@@ -2745,7 +2804,7 @@ class MainWindow(QMainWindow):
                 250,
                 lambda: self._resume_live_operation_listening(record.task_id),
             )
-
+        return True
     def _resume_live_operation_listening(self, task_id: str) -> None:
         active = self.task_orchestrator.active
         worker_running = bool(self.worker and self.worker.isRunning())
