@@ -100,3 +100,15 @@ def test_model_report_names_both_independent_roles() -> None:
     assert "careful-code:14b" in report
     assert "Konuşma modelim" in report
     assert "Kod modelim" in report
+
+
+def test_explicit_read_only_own_code_review_never_enters_self_repair() -> None:
+    engine = AssistantEngine.__new__(AssistantEngine)
+    engine.last_action_context = None
+
+    result = engine._reserved_self_repair_request(
+        "Kendi kaynak kodunu incele ve mevcut geliştirme önceliklerini söyle. "
+        "Hiçbir kodu değiştirme."
+    )
+
+    assert result is None

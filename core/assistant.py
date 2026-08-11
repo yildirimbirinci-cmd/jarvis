@@ -4902,7 +4902,7 @@ class AssistantEngine:
         )
         asks_rejected = any(
             marker in normalized
-            for marker in ("reddedilmis son", "reddedilmis", "rejected")
+            for marker in ("reddedilmis son", "reddedilmis", "reddedilen", "rejected")
         )
         rejected_is_exclusion = any(
             marker in normalized
@@ -4985,11 +4985,11 @@ class AssistantEngine:
         )
         asks_accepted = any(
             marker in normalized
-            for marker in ("kabul edilmis son", "kabul edilmis", "accepted", "onayli")
+            for marker in ("kabul edilmis son", "kabul edilmis", "kabul edilen", "accepted", "onayli")
         )
         asks_rejected_primary = any(
             marker in normalized
-            for marker in ("reddedilmis son", "reddedilmis", "rejected")
+            for marker in ("reddedilmis son", "reddedilmis", "reddedilen", "rejected")
         )
         rejected_is_exclusion = any(
             marker in normalized
@@ -6657,6 +6657,111 @@ class AssistantEngine:
             operation.finish(detail=f"Bakim tamamlanamadi: {exc}")
             raise
 
+    def _runtime_visibility_request(self, text: str) -> str | None:
+        """Render broad runtime/health visibility from the authoritative evidence pipeline."""
+
+        normalized = self.command_key(text)
+        no_change = any(
+            marker in normalized
+            for marker in (
+                "hicbir kodu degistirme",
+                "hicbir kod degistirme",
+                "kod degisikligi yapma",
+                "degisiklik yapma",
+                "salt okunur",
+                "salt-okunur",
+            )
+        )
+        health_request = (
+            "sistem" in normalized
+            and any(marker in normalized for marker in ("saglik rapor", "health report"))
+            and any(word.startswith(("goster", "rapor", "incele")) for word in normalized.split())
+        )
+        if health_request:
+            return self.own_code_review_report()
+
+        runtime_subject = "runtime" in normalized and any(
+            marker in normalized for marker in ("bulgu", "finding")
+        )
+        show_request = any(
+            word.startswith(("goster", "listele", "rapor"))
+            for word in normalized.split()
+        )
+        if not runtime_subject or not show_request:
+            return None
+
+        wants_retest = any(
+            marker in normalized
+            for marker in (
+                "yeniden test",
+                "yeniden dogrula",
+                "retest",
+                "test edilmesi gereken",
+                "test edilmeli",
+            )
+        )
+        wants_active = "aktif" in normalized and not wants_retest
+        if not wants_active and not wants_retest:
+            return None
+
+        own_root = Path(self.own_project_root()).resolve(strict=False)
+        try:
+            runtime_report = self._runtime_health_service().analyze(
+                workspace=own_root,
+            )
+        except Exception as exc:
+            return (
+                "RUNTIME BULGU RAPORU\n"
+                f"Runtime kaniti okunamadi: {type(exc).__name__}: {exc}"
+            )
+
+        evidence_report = build_evidence_maintenance_report(
+            (),
+            tuple(getattr(runtime_report, "findings", ()) or ()),
+            source_root=own_root,
+        )
+        evidence_report = self._apply_completed_retest_closeout(
+            evidence_report,
+            source_root=own_root,
+        )
+        wanted_lifecycle = "NEEDS_RETEST" if wants_retest else "ACTIVE"
+        rows = tuple(
+            finding
+            for finding in evidence_report.findings
+            if finding.source == "runtime"
+            and finding.lifecycle == wanted_lifecycle
+        )
+
+        title = (
+            "YENIDEN TEST EDILMESI GEREKEN RUNTIME BULGULARI"
+            if wants_retest
+            else "AKTIF RUNTIME BULGULARI"
+        )
+        if not rows:
+            return (
+                f"{title}\n"
+                "Bulunamadi. Kaynak: kanita dayali runtime evidence ve "
+                "ayni lifecycle/closeout siniflandirma zinciri."
+            )
+
+        rendered = [title]
+        for index, finding in enumerate(rows, start=1):
+            location = finding.path or "dosya baglantisi yok"
+            if finding.symbol:
+                location += f" - {finding.symbol}"
+            rendered.append(
+                f"{index}. {finding.finding_id or '(kimlik yok)'} - {finding.title}\n"
+                f"Durum: {finding.lifecycle}\n"
+                f"Konum: {location}\n"
+                f"Kanit: {finding.evidence or finding.source}"
+            )
+        rendered.append(
+            "Kaynak: kanita dayali runtime evidence ve ayni "
+            "lifecycle/closeout siniflandirma zinciri; plan, patch veya "
+            "kod degisikligi baslatilmadi."
+        )
+        return "\n\n".join(rendered)
+
     def _targeted_runtime_finding_report_request(self, text: str) -> str | None:
         """Return only local runtime evidence for an explicitly named symbol."""
 
@@ -6799,6 +6904,25 @@ class AssistantEngine:
         """Route self-repair commands before tools, old plans and any LLM."""
 
         normalized = self.command_key(text)
+
+        # Explicit own-code read-only requests must never be promoted into the
+        # self-repair workflow merely because nouns such as "gelistirme" share
+        # a prefix with change verbs. The generic read-only router later in
+        # handle_local_command remains responsible for rendering the report.
+        context_kind = str(
+            (getattr(self, "last_action_context", None) or {}).get("kind", "")
+        )
+        own_intent = classify_own_code_intent(
+            text,
+            active_own_editor=context_kind in {
+                "editor_opened",
+                "own_code_review",
+                "own_code_summary",
+            },
+        )
+        if own_intent.read_only:
+            return None
+
         if self._asks_for_one_shot_maintenance(text):
             return self.run_one_shot_autonomous_maintenance()
         run_id = extract_self_repair_run_id(text)
@@ -14368,6 +14492,10 @@ class AssistantEngine:
             own_code_approval = self._own_code_approval_request(text)
             if own_code_approval is not None:
                 return own_code_approval
+
+        runtime_visibility = self._runtime_visibility_request(text)
+        if runtime_visibility is not None:
+            return runtime_visibility
 
         targeted_runtime_report = self._targeted_runtime_finding_report_request(text)
         if targeted_runtime_report is not None:

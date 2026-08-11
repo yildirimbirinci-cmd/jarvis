@@ -63,3 +63,22 @@ def test_real_acceptance_test_request_is_not_stolen() -> None:
     )
 
     assert result is None
+
+
+def test_runtime_phrase_son_kabul_edilen_engineering_degisikliklerini_goster() -> None:
+    engine = _engine()
+    engine.own_code_history = SimpleNamespace(
+        recent_rows=lambda limit: (
+            {"time": "1", "event": "onaylı değişiklik uygulandı", "path": "core/a.py"},
+            {"time": "2", "event": "kod modeli taslağı doğrulamada reddedildi", "path": "core/b.py"},
+        )
+    )
+
+    result = engine._accepted_engineering_history_request(
+        "Son kabul edilen engineering değişikliklerini göster."
+    )
+
+    assert result is not None
+    assert result.startswith("KABUL EDILMIS ENGINEERING DEGISIKLIKLERI")
+    assert "core/a.py" in result
+    assert "core/b.py" not in result

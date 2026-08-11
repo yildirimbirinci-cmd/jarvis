@@ -70,3 +70,22 @@ def test_rejected_history_route_precedes_accepted_history_route() -> None:
         "self._accepted_engineering_history_request(text)"
     )
     assert rejected < accepted
+
+
+def test_runtime_phrase_son_reddedilen_engineering_degisikliklerini_goster() -> None:
+    engine = _engine()
+    engine.own_code_history = SimpleNamespace(
+        recent_rows=lambda limit: (
+            {"time": "1", "event": "onaylı değişiklik uygulandı", "path": "core/a.py"},
+            {"time": "2", "event": "kod modeli taslağı doğrulamada reddedildi", "path": "core/b.py"},
+        )
+    )
+
+    result = engine._rejected_engineering_history_request(
+        "Son reddedilen engineering değişikliklerini göster."
+    )
+
+    assert result is not None
+    assert result.startswith("REDDEDILMIS ENGINEERING DEGISIKLIKLERI")
+    assert "core/a.py" not in result
+    assert "core/b.py" in result

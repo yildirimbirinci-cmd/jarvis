@@ -83,3 +83,36 @@ def test_handle_routes_scoped_runtime_report_before_generic_repair(monkeypatch):
     monkeypatch.setattr(engine, "_reserved_self_repair_request", lambda text: (_ for _ in ()).throw(AssertionError("generic self-repair must not run first")))
     result = engine.handle_local_command("TaskOrchestrator.execute_task runtime bulgusunu raporla.")
     assert result == "SCOPED-RUNTIME-REPORT"
+
+
+def test_handle_routes_broad_runtime_visibility_before_generic_repair(monkeypatch):
+    engine = object.__new__(AssistantEngine)
+    monkeypatch.setattr(engine, "normalize_address", lambda text: text)
+    monkeypatch.setattr(engine, "command_key", lambda text: text.casefold())
+    monkeypatch.setattr(engine, "_asks_for_engineering_state_only", lambda text: False)
+    monkeypatch.setattr(engine, "_patch_session_command_request", lambda text: None)
+    monkeypatch.setattr(engine, "_retest_command_request", lambda text: None)
+    monkeypatch.setattr(engine, "_runtime_visibility_request", lambda text: "RUNTIME-VISIBILITY")
+    monkeypatch.setattr(
+        engine,
+        "_reserved_self_repair_request",
+        lambda text: (_ for _ in ()).throw(
+            AssertionError("generic self-repair must not run first")
+        ),
+    )
+
+    result = engine.handle_local_command("Aktif runtime bulgularini goster.")
+
+    assert result == "RUNTIME-VISIBILITY"
+
+
+def test_health_report_routes_to_deterministic_read_only_review(monkeypatch):
+    engine = object.__new__(AssistantEngine)
+    monkeypatch.setattr(engine, "command_key", lambda text: text.casefold())
+    monkeypatch.setattr(engine, "own_code_review_report", lambda: "HEALTH-REPORT")
+
+    result = engine._runtime_visibility_request(
+        "Kanita dayali sistem saglik raporunu goster. Hicbir kodu degistirme."
+    )
+
+    assert result == "HEALTH-REPORT"
