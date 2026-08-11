@@ -188,9 +188,22 @@ def install_main_window_voice_integration(
         self._active_intent = intent
         self.statusBar().showMessage(intent.start_message)
         normalized = self.engine.command_key(clean)
-        if "kabul" in normalized and any(
-            word in normalized for word in ("kod", "kaynak", "gelistirme")
-        ):
+        acceptance_test_notice = (
+            any(
+                marker in normalized
+                for marker in (
+                    "kabul testi",
+                    "kabul testini",
+                    "kabul testlerini",
+                    "kabul testlerini",
+                )
+            )
+            and any(
+                word in normalized
+                for word in ("kod", "kaynak", "gelistirme")
+            )
+        )
+        if acceptance_test_notice:
             self.chat.appendPlainText(
                 "JARVIS: Kabul testi başladı. Tam pytest çalıştığı için bu işlem "
                 "birkaç dakika sürebilir; program donmadı.\n"

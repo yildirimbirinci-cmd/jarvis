@@ -499,3 +499,30 @@ def test_tts_worker_starts_before_answer_barge_in_is_armed(tmp_path) -> None:
 
     assert window._barge_source == "answer"
     assert window._barge_turn_id == turn_id
+
+
+def test_accepted_engineering_history_does_not_show_acceptance_test_notice(tmp_path) -> None:
+    window, _cls = _window(tmp_path)
+
+    window._submit_conversation_turn(
+        "Daha önce kabul edilmiş son üç engineering değişikliğini kalıcı "
+        "kayıtlardan göster. Reddedilenleri dahil etme.",
+        source="text",
+    )
+
+    chat = " ".join(window.chat.rows)
+    assert "Kabul testi başladı" not in chat
+    assert window.worker is not None and window.worker.isRunning()
+
+
+def test_explicit_own_code_acceptance_test_shows_long_running_notice(tmp_path) -> None:
+    window, _cls = _window(tmp_path)
+
+    window._submit_conversation_turn(
+        "Kendi kod kabul testini çalıştır.",
+        source="text",
+    )
+
+    chat = " ".join(window.chat.rows)
+    assert "Kabul testi başladı" in chat
+    assert window.worker is not None and window.worker.isRunning()

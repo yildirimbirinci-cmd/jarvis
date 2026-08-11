@@ -4979,6 +4979,135 @@ class AssistantEngine:
             "runtime saglik raporu, yeni arastirma, plan veya patch baslatilmadi."
         )
 
+
+    def _accepted_engineering_history_request(
+        self,
+        text: str,
+    ) -> str | None:
+        normalized = self.command_key(text)
+        words = normalized.split()
+
+        asks_history = any(
+            word.startswith(("son", "goster", "listele", "gecmis", "kayit"))
+            for word in words
+        )
+        asks_accepted = any(
+            marker in normalized
+            for marker in (
+                "kabul edilmis",
+                "kabul edilmiş",
+                "onayli degisiklik",
+                "onaylı değişiklik",
+                "accepted engineering",
+                "accepted change",
+            )
+        )
+        asks_engineering = any(
+            word.startswith(
+                (
+                    "engineering",
+                    "gelistirme",
+                    "degisiklik",
+                    "kod",
+                    "kaynak",
+                )
+            )
+            for word in words
+        )
+
+        if not (asks_history and asks_accepted and asks_engineering):
+            return None
+
+        requested_limit = 3
+        number_match = re.search(r"\b(\d{1,2})\b", normalized)
+        if number_match is not None:
+            requested_limit = max(
+                1,
+                min(10, int(number_match.group(1))),
+            )
+
+        accepted_markers = (
+            "onayli degisiklik uygulandi",
+            "onaylı değişiklik uygulandı",
+            "degisiklik uygulandi",
+            "değişiklik uygulandı",
+            "uygulama basarili",
+            "uygulama başarılı",
+            "patch kabul edildi",
+            "accepted",
+        )
+        rejected_markers = (
+            "redded",
+            "basarisiz",
+            "başarısız",
+            "geri al",
+            "rollback",
+            "iptal",
+        )
+
+        rows = []
+        for row in self.own_code_history.recent_rows(200):
+            event = self.command_key(
+                str(row.get("event", "") or "")
+            )
+            details = self.command_key(
+                " ".join(
+                    str(value or "")
+                    for key, value in row.items()
+                    if key not in {"hash", "prev_hash"}
+                )
+            )
+
+            accepted = any(
+                marker in event or marker in details
+                for marker in accepted_markers
+            )
+            rejected = any(
+                marker in event or marker in details
+                for marker in rejected_markers
+            )
+            if accepted and not rejected:
+                rows.append(row)
+
+        selected = tuple(rows[-requested_limit:])
+
+        if not selected:
+            return (
+                "KABUL EDILMIS ENGINEERING DEGISIKLIKLERI\n"
+                "Kayit bulunamadi. Kalici own-code history icinde "
+                "kabul edilmis/uygulanmis bir engineering degisikligi yok.\n"
+                "Kaynak: yalniz kalici history kayitlari okundu; "
+                "kabul testi, yeni arastirma, plan, patch veya kod "
+                "degisikligi baslatilmadi."
+            )
+
+        lines = ["KABUL EDILMIS ENGINEERING DEGISIKLIKLERI"]
+        for index, row in enumerate(selected, start=1):
+            event = str(row.get("event", "") or "").strip()
+            details = "; ".join(
+                f"{key}={value}"
+                for key, value in row.items()
+                if key not in {
+                    "time",
+                    "event",
+                    "hash",
+                    "prev_hash",
+                }
+                and str(value).strip()
+            )
+            summary = event + (f" — {details}" if details else "")
+            lines.append(
+                f"{index}. {summary[:1400]} "
+                f"[zaman={row.get('time', '')}]"
+            )
+
+        lines.append(
+            "Kaynak: yalniz kalici history kayitlari okundu; "
+            "reddedilen kayitlar dahil edilmedi; kabul testi, "
+            "yeni arastirma, plan, patch veya kod degisikligi baslatilmadi."
+        )
+        return "\n".join(lines)
+
     def _own_code_history_request(self, text: str) -> str | None:
         normalized = self.command_key(text)
         words = normalized.split()
@@ -14102,6 +14231,9 @@ class AssistantEngine:
         own_code_read_only = self._own_code_read_only_request(text)
         if own_code_read_only is not None:
             return own_code_read_only
+        accepted_engineering_history = self._accepted_engineering_history_request(text)
+        if accepted_engineering_history is not None:
+            return accepted_engineering_history
         if normalized in {
             "ses donanimi kabul testi",
             "ses aygiti kabul testi",
