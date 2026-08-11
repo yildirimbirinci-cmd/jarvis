@@ -4842,6 +4842,143 @@ class AssistantEngine:
             return self.analyze_own_code_failure()
         return None
 
+    def _persistent_engineering_learning_request(
+        self,
+        text: str,
+    ) -> str | None:
+        normalized = self.command_key(text)
+        words = normalized.split()
+
+        asks_learning_history = (
+            any(
+                marker in normalized
+                for marker in (
+                    "engineering ogren",
+                    "engineering öğren",
+                    "muhendislik ogren",
+                    "muhendislik öğren",
+                    "engineering learning",
+                    "learning history",
+                    "learning gecmis",
+                    "learning geçmiş",
+                )
+            )
+            and any(
+                word.startswith(("son", "goster", "listele", "kayit", "kalici"))
+                for word in words
+            )
+        )
+        if not asks_learning_history:
+            return None
+
+        requested_limit = 3
+        number_match = re.search(r"\b(\d{1,2})\b", normalized)
+        if number_match is not None:
+            requested_limit = max(1, min(10, int(number_match.group(1))))
+
+        engineering_sources = (
+            "engineering",
+            "own_code",
+            "own-code",
+            "patch",
+            "evidence",
+            "closeout",
+            "retest",
+            "research",
+            "runtime",
+        )
+        learning_rows = []
+        for row in tuple(getattr(self.learning_memory, "records", ()) or ()):
+            source = str(getattr(row, "source", "") or "").casefold()
+            kind = str(getattr(row, "kind", "") or "").casefold()
+            if not (
+                any(marker in source for marker in engineering_sources)
+                or kind in {"engineering", "own_code", "own-code", "patch_outcome"}
+            ):
+                continue
+            created = str(getattr(row, "created_at", "") or "")
+            trigger = str(getattr(row, "trigger", "") or "").strip()
+            response = str(getattr(row, "response", "") or "").strip()
+            action = str(getattr(row, "action", "") or "").strip()
+            target = str(getattr(row, "target", "") or "").strip()
+            summary = response or action or target or trigger
+            if not summary:
+                continue
+            learning_rows.append((created, source or kind, summary))
+
+        learning_rows.sort(key=lambda item: item[0])
+        selected_learning = learning_rows[-requested_limit:]
+        if selected_learning:
+            lines = ["KALICI ENGINEERING OGRENMELERI"]
+            for index, (created, source, summary) in enumerate(
+                selected_learning, start=1
+            ):
+                lines.append(
+                    f"{index}. {summary[:1200]} "
+                    f"[kaynak={source}; zaman={created or 'bilinmiyor'}]"
+                )
+            lines.append(
+                "Kaynak: yalniz kalici learning/history kayitlari okundu; "
+                "runtime saglik raporu, yeni arastirma, plan veya patch baslatilmadi."
+            )
+            return "\n".join(lines)
+
+        engineering_event_markers = (
+            "patch",
+            "taslak",
+            "öner",
+            "oner",
+            "uygula",
+            "doğrula",
+            "dogrula",
+            "test",
+            "rollback",
+            "geri al",
+            "araştır",
+            "arastir",
+            "kurtar",
+            "redded",
+            "başar",
+            "basar",
+        )
+        history_rows = tuple(
+            row
+            for row in self.own_code_history.recent_rows(50)
+            if any(
+                marker in str(row.get("event", "") or "").casefold()
+                for marker in engineering_event_markers
+            )
+        )
+        selected_history = history_rows[-requested_limit:]
+        if selected_history:
+            lines = ["KALICI ENGINEERING OGRENMELERI"]
+            for index, row in enumerate(selected_history, start=1):
+                event = str(row.get("event", "") or "").strip()
+                details = "; ".join(
+                    f"{key}={value}"
+                    for key, value in row.items()
+                    if key not in {"time", "event", "hash", "prev_hash"}
+                    and str(value).strip()
+                )
+                summary = event + (f" — {details}" if details else "")
+                lines.append(
+                    f"{index}. {summary[:1200]} "
+                    f"[kaynak=own_code_history; zaman={row.get('time', '')}]"
+                )
+            lines.append(
+                "Kaynak: yalniz kalici learning/history kayitlari okundu; "
+                "runtime saglik raporu, yeni arastirma, plan veya patch baslatilmadi."
+            )
+            return "\n".join(lines)
+
+        return (
+            "KALICI ENGINEERING OGRENMELERI\n"
+            "Kayit bulunamadi. Kalici learning/history depolarinda "
+            "engineering olarak siniflanabilen bir kayit yok.\n"
+            "Kaynak: yalniz kalici learning/history kayitlari okundu; "
+            "runtime saglik raporu, yeni arastirma, plan veya patch baslatilmadi."
+        )
+
     def _own_code_history_request(self, text: str) -> str | None:
         normalized = self.command_key(text)
         words = normalized.split()
@@ -8032,6 +8169,19 @@ class AssistantEngine:
                 return "Düzeltilecek etkin bir çalışma zamanı bulgusu yok."
             return self.prepare_runtime_improvement_implementation(finding.finding_id)
 
+        negative_maintenance_markers = (
+            "runtime saglik raporu uretme",
+            "runtime saglik raporu olusturma",
+            "runtime saglik raporu baslatma",
+            "bakim raporu uretme",
+            "bakim degerlendirmesi uretme",
+            "bakim taramasi yapma",
+            "bakim taramasi baslatma",
+        )
+        negative_maintenance_context = any(
+            marker in normalized
+            for marker in negative_maintenance_markers
+        )
         maintenance_subject = any(
             marker in normalized
             for marker in (
@@ -8043,7 +8193,11 @@ class AssistantEngine:
             word.startswith(("tara", "incele", "rapor", "durum", "goster", "kontrol", "bul"))
             for word in normalized.split()
         )
-        if maintenance_subject and report_intent:
+        if (
+            maintenance_subject
+            and report_intent
+            and not negative_maintenance_context
+        ):
             selected_project = any(
                 marker in normalized
                 for marker in ("secili proje", "bu proje", "calisma alani", "bu program")
@@ -14054,6 +14208,15 @@ class AssistantEngine:
         if action_follow_up is not None:
             self.dialogue.remember(text, action_follow_up)
             return action_follow_up
+
+        # Explicit persistent engineering-learning/history queries are
+        # read-only and must outrank maintenance. Negative phrases such as
+        # "runtime saglik raporu uretme" must never trigger a maintenance scan.
+        persistent_engineering_learning = (
+            self._persistent_engineering_learning_request(text)
+        )
+        if persistent_engineering_learning is not None:
+            return persistent_engineering_learning
 
         # Explicit RUN identifiers take precedence over every older plan and
         # over the general dialogue model.

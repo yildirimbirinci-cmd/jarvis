@@ -177,6 +177,22 @@ class OwnCodeHistory:
             return HistoryIntegrityResult(False, checked, f"günlük okunamadı: {exc}")
         return HistoryIntegrityResult(True, checked)
 
+    def recent_rows(self, limit: int = 3) -> tuple[dict[str, Any], ...]:
+        if type(limit) is not int:
+            raise TypeError("limit must be an integer")
+        if limit <= 0:
+            return ()
+        rows: list[dict[str, Any]] = []
+        try:
+            for raw in _iter_bounded_rows(self.path):
+                try:
+                    rows.append(_load_history_row(raw))
+                except (UnicodeError, json.JSONDecodeError, TypeError, ValueError):
+                    continue
+        except OSError:
+            return ()
+        return tuple(rows[-limit:])
+
     def report(self, limit: int = 8) -> str:
         if type(limit) is not int:
             raise TypeError("limit must be an integer")
