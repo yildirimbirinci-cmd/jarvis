@@ -18,6 +18,7 @@ _CANCEL_EXACT = {
     "dur",
     "sus",
     "iptal",
+    "iptal et",
     "islemi durdur",
     "gorevi iptal et",
     "bu islemi durdur",
