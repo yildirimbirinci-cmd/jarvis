@@ -311,6 +311,44 @@ class LearningMemory:
             return None
         return row
 
+    def recent_audit_rows(
+        self,
+        limit: int = 20,
+        *,
+        event: str | None = None,
+    ) -> tuple[dict[str, object], ...]:
+        """Return recent persisted audit rows without mutating learning state."""
+
+        bounded = self._validated_limit(limit)
+        if bounded == 0 or not AUDIT_FILE.exists():
+            return ()
+
+        wanted = str(event or "").strip().casefold()
+        rows: list[dict[str, object]] = []
+        try:
+            with AUDIT_FILE.open("rb") as handle:
+                while True:
+                    raw_line = handle.readline(MAX_AUDIT_LINE_BYTES + 1)
+                    if not raw_line:
+                        break
+                    if len(raw_line) > MAX_AUDIT_LINE_BYTES:
+                        if not raw_line.endswith(b"\n"):
+                            while True:
+                                chunk = handle.readline(MAX_AUDIT_LINE_BYTES + 1)
+                                if not chunk or chunk.endswith(b"\n"):
+                                    break
+                        continue
+                    row = self._parse_audit_line(raw_line)
+                    if row is None:
+                        continue
+                    if wanted and str(row.get("event", "") or "").casefold() != wanted:
+                        continue
+                    rows.append(row)
+        except OSError:
+            return ()
+
+        return tuple(rows[-bounded:])
+
     def audit_report(self, limit: int = 20) -> str:
         bounded = self._validated_limit(limit)
         if bounded == 0 or not AUDIT_FILE.exists():

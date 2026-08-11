@@ -2302,6 +2302,11 @@ class AssistantEngine:
         )
         if not handoff.ready:
             session = session.transition(SESSION_FAILED, error=handoff.reason)
+            session = self._record_evidence_patch_outcome(
+                session,
+                successful=False,
+                note=(session.error or handoff.reason),
+            )
             store.save(session)
             return session.report() + "\n\n" + handoff.report()
 
@@ -2337,6 +2342,11 @@ class AssistantEngine:
         )
         if not handoff.ready:
             failed = session.transition(SESSION_FAILED, error=handoff.reason)
+            failed = self._record_evidence_patch_outcome(
+                failed,
+                successful=False,
+                note=(failed.error or handoff.reason),
+            )
             self._evidence_patch_session_store().save(failed)
             return failed.report() + "\n\n" + handoff.report()
 
@@ -2410,6 +2420,11 @@ class AssistantEngine:
                 SESSION_FAILED,
                 error="Bekleyen gecerli EditProposal bulunamadi.",
             )
+            session = self._record_evidence_patch_outcome(
+                session,
+                successful=False,
+                note=session.error,
+            )
             store.save(session)
             return session.report()
 
@@ -2439,6 +2454,11 @@ class AssistantEngine:
                 ),
                 error=str(exc)[:2000],
             )
+            session = self._record_evidence_patch_outcome(
+                session,
+                successful=False,
+                note=(session.error or session.validation_summary),
+            )
             store.save(session)
             return session.report()
 
@@ -2453,6 +2473,11 @@ class AssistantEngine:
                     else "Baseline testlerinde mevcut hatalar var."
                 ),
                 error="Taslak worktree dogrulamasindan gecmedi.",
+            )
+            session = self._record_evidence_patch_outcome(
+                session,
+                successful=False,
+                note=(session.error or session.validation_summary),
             )
             store.save(session)
             return session.report()
@@ -2494,6 +2519,11 @@ class AssistantEngine:
         if session.terminal:
             return session.report()
         session = session.transition(SESSION_REJECTED)
+        session = self._record_evidence_patch_outcome(
+            session,
+            successful=False,
+            note="Kullanici patch oturumunu reddetti.",
+        )
         store.save(session)
         editor = getattr(self, "editor", None)
         reject = getattr(editor, "reject", None)
@@ -4842,6 +4872,185 @@ class AssistantEngine:
             return self.analyze_own_code_failure()
         return None
 
+    def _rejected_engineering_history_request(self, text: str) -> str | None:
+        def _history_key(value: str) -> str:
+            return (
+                str(value or "")
+                .casefold()
+                .translate(
+                    str.maketrans(
+                        {
+                            "ı": "i",
+                            "ş": "s",
+                            "ğ": "g",
+                            "ü": "u",
+                            "ö": "o",
+                            "ç": "c",
+                        }
+                    )
+                )
+            )
+
+        normalized = _history_key(text)
+        asks_history = any(
+            marker in normalized
+            for marker in ("gecmis", "history", "kayit", "kalici", "goster")
+        )
+        asks_engineering = any(
+            marker in normalized
+            for marker in ("engineering", "muhendis", "gelistirme", "degisiklik", "patch")
+        )
+        asks_rejected = any(
+            marker in normalized
+            for marker in ("reddedilmis son", "reddedilmis", "rejected")
+        )
+        rejected_is_exclusion = any(
+            marker in normalized
+            for marker in (
+                "reddedilenleri dahil etme",
+                "reddedilmis olanlari dahil etme",
+                "reddedilenleri alma",
+            )
+        )
+        if (
+            not asks_history
+            or not asks_engineering
+            or not asks_rejected
+            or rejected_is_exclusion
+        ):
+            return None
+
+        recent = getattr(self.own_code_history, "recent_rows", None)
+        rows = tuple(recent(100) if callable(recent) else ())
+        selected = []
+        for row in rows:
+            event_key = _history_key(str(row.get("event", "") or ""))
+            if any(
+                marker in event_key
+                for marker in ("reddedildi", "rejected", "basarisiz")
+            ):
+                selected.append(row)
+
+        selected = selected[-3:]
+        if not selected:
+            return "REDDEDILMIS ENGINEERING DEGISIKLIKLERI\nKayit bulunamadi."
+
+        lines = ["REDDEDILMIS ENGINEERING DEGISIKLIKLERI"]
+        for index, row in enumerate(selected, start=1):
+            event = str(row.get("event", "") or "").strip()
+            details = "; ".join(
+                f"{key}={value}"
+                for key, value in row.items()
+                if key not in {"time", "event", "hash", "prev_hash"}
+                and str(value).strip()
+            )
+            lines.append(
+                f"{index}. {event}"
+                + (f" - {details}" if details else "")
+                + f" [zaman={row.get('time', '')}]"
+            )
+        lines.append(
+            "Kaynak: yalniz kalici own-code history; "
+            "siniflandirma yalniz event alanina gore yapildi."
+        )
+        return "\n".join(lines)
+
+    def _accepted_engineering_history_request(self, text: str) -> str | None:
+        def _history_key(value: str) -> str:
+            return (
+                str(value or "")
+                .casefold()
+                .translate(
+                    str.maketrans(
+                        {
+                            "ı": "i",
+                            "ş": "s",
+                            "ğ": "g",
+                            "ü": "u",
+                            "ö": "o",
+                            "ç": "c",
+                        }
+                    )
+                )
+            )
+
+        normalized = _history_key(text)
+        asks_history = any(
+            marker in normalized
+            for marker in ("gecmis", "history", "kayit", "kalici", "goster")
+        )
+        asks_engineering = any(
+            marker in normalized
+            for marker in ("engineering", "muhendis", "gelistirme", "degisiklik", "patch")
+        )
+        asks_accepted = any(
+            marker in normalized
+            for marker in ("kabul edilmis son", "kabul edilmis", "accepted", "onayli")
+        )
+        asks_rejected_primary = any(
+            marker in normalized
+            for marker in ("reddedilmis son", "reddedilmis", "rejected")
+        )
+        rejected_is_exclusion = any(
+            marker in normalized
+            for marker in (
+                "reddedilenleri dahil etme",
+                "reddedilmis olanlari dahil etme",
+                "reddedilenleri alma",
+            )
+        )
+        if (
+            not asks_history
+            or not asks_engineering
+            or not asks_accepted
+            or (asks_rejected_primary and not rejected_is_exclusion)
+        ):
+            return None
+
+        recent = getattr(self.own_code_history, "recent_rows", None)
+        rows = tuple(recent(100) if callable(recent) else ())
+        selected = []
+        for row in rows:
+            event_key = _history_key(str(row.get("event", "") or ""))
+            accepted_event = any(
+                marker in event_key
+                for marker in (
+                    "onayli degisiklik uygulandi",
+                    "kabul edildi",
+                    "accepted",
+                )
+            )
+            rejected_event = any(
+                marker in event_key
+                for marker in ("reddedildi", "rejected", "basarisiz")
+            )
+            if accepted_event and not rejected_event:
+                selected.append(row)
+
+        selected = selected[-3:]
+        if not selected:
+            return "KABUL EDILMIS ENGINEERING DEGISIKLIKLERI\nKayit bulunamadi."
+
+        lines = ["KABUL EDILMIS ENGINEERING DEGISIKLIKLERI"]
+        for index, row in enumerate(selected, start=1):
+            event = str(row.get("event", "") or "").strip()
+            details = "; ".join(
+                f"{key}={value}"
+                for key, value in row.items()
+                if key not in {"time", "event", "hash", "prev_hash"}
+                and str(value).strip()
+            )
+            lines.append(
+                f"{index}. {event}"
+                + (f" - {details}" if details else "")
+                + f" [zaman={row.get('time', '')}]"
+            )
+        lines.append(
+            "Kaynak: yalniz kalici own-code history; "
+            "siniflandirma yalniz event alanina gore yapildi."
+        )
+        return "\n".join(lines)
+
     def _persistent_engineering_learning_request(
         self,
         text: str,
@@ -4849,18 +5058,85 @@ class AssistantEngine:
         normalized = self.command_key(text)
         words = normalized.split()
 
+        asks_latest_outcome = (
+            "engineering" in normalized
+            and "outcome" in normalized
+            and any(marker in normalized for marker in ("ogren", "learn"))
+            and any(word.startswith(("son", "latest", "tamamlan")) for word in words)
+        )
+        if asks_latest_outcome:
+            recent = getattr(self.own_code_history, "recent_rows", None)
+            history_rows = tuple(recent(200) if callable(recent) else ())
+            outcomes = tuple(
+                row for row in history_rows
+                if str(row.get("event", "") or "").casefold() == "evidence_patch_outcome"
+            )
+            if not outcomes:
+                return (
+                    "SON ENGINEERING OUTCOME OGRENMESI\n"
+                    "Kayit bulunamadi. Kalici own-code history icinde evidence_patch_outcome kaydi yok.\n"
+                    "Kaynak: salt-okunur kalici outcome/history sorgusu; "
+                    "LLM, maintenance, research, plan veya patch baslatilmadi."
+                )
+
+            row = outcomes[-1]
+            session_id = str(row.get("session_id", "") or "")
+            audit_reader = getattr(self.learning_memory, "recent_audit_rows", None)
+            audit_rows = tuple(
+                audit_reader(200, event="evidence_patch_outcome")
+                if callable(audit_reader) else ()
+            )
+            matching_audit = next(
+                (
+                    audit for audit in reversed(audit_rows)
+                    if str(audit.get("session_id", "") or "") == session_id
+                ),
+                None,
+            )
+            outcome = str(row.get("outcome", "") or "")
+            note = str(row.get("note", "") or "")
+            if outcome.casefold() == "failed":
+                lesson = (
+                    "Bu outcome, ayni yaklasimi yeni kanit olmadan tekrar etmemem; "
+                    "once kayitli basarisizlik notunu ve hedefi yeniden dogrulamam "
+                    "gerektigini gosteriyor."
+                )
+            else:
+                lesson = (
+                    "Bu outcome, dogrulanmis sonucu ve hedef baglamini sonraki "
+                    "engineering kararlarinda kalici kanit olarak kullanmam "
+                    "gerektigini gosteriyor."
+                )
+
+            return "\n".join(
+                (
+                    "SON ENGINEERING OUTCOME OGRENMESI",
+                    f"Session: {session_id}",
+                    f"Proposal: {row.get('proposal_id', '')}",
+                    f"Outcome: {outcome}",
+                    f"Hedef: {row.get('target_path', '')}",
+                    f"Sembol: {row.get('target_symbol', '')}",
+                    f"Zaman: {row.get('time', '')}",
+                    "Learning audit: " + ("ESLESTI" if matching_audit is not None else "BULUNAMADI"),
+                    f"Ogrendigim: {lesson}",
+                    f"Kayitli not: {note}",
+                    "Kaynak: yalniz kalici evidence_patch_outcome history ve eslesen "
+                    "learning audit kaydi okundu; LLM, maintenance, research, plan "
+                    "veya patch baslatilmadi.",
+                )
+            )
+
         asks_learning_history = (
             any(
                 marker in normalized
                 for marker in (
                     "engineering ogren",
-                    "engineering öğren",
                     "muhendislik ogren",
-                    "muhendislik öğren",
                     "engineering learning",
                     "learning history",
                     "learning gecmis",
-                    "learning geçmiş",
+                    "ogrenme gecmis",
+                    "ogrenme gunlug",
                 )
             )
             and any(
@@ -4878,6 +5154,7 @@ class AssistantEngine:
 
         engineering_sources = (
             "engineering",
+            "muhendis",
             "own_code",
             "own-code",
             "patch",
@@ -4887,31 +5164,45 @@ class AssistantEngine:
             "research",
             "runtime",
         )
+
+        def field(row, name: str) -> str:
+            if isinstance(row, dict):
+                value = row.get(name, "")
+            else:
+                value = getattr(row, name, "")
+            return str(value or "")
+
         learning_rows = []
         for row in tuple(getattr(self.learning_memory, "records", ()) or ()):
-            source = str(getattr(row, "source", "") or "").casefold()
-            kind = str(getattr(row, "kind", "") or "").casefold()
+            source = self.command_key(field(row, "source"))
+            kind = self.command_key(field(row, "kind"))
+            trigger = field(row, "trigger").strip()
+            trigger_key = self.command_key(trigger)
+            haystack = " ".join((source, kind, trigger_key))
             if not (
-                any(marker in source for marker in engineering_sources)
+                any(marker in haystack for marker in engineering_sources)
                 or kind in {"engineering", "own_code", "own-code", "patch_outcome"}
             ):
                 continue
-            created = str(getattr(row, "created_at", "") or "")
-            trigger = str(getattr(row, "trigger", "") or "").strip()
-            response = str(getattr(row, "response", "") or "").strip()
-            action = str(getattr(row, "action", "") or "").strip()
-            target = str(getattr(row, "target", "") or "").strip()
+
+            created = field(row, "created_at")
+            response = field(row, "response").strip()
+            action = field(row, "action").strip()
+            target = field(row, "target").strip()
             summary = response or action or target or trigger
             if not summary:
                 continue
-            learning_rows.append((created, source or kind, summary))
+            learning_rows.append(
+                (created, source or kind or "learning_memory", summary)
+            )
 
         learning_rows.sort(key=lambda item: item[0])
         selected_learning = learning_rows[-requested_limit:]
         if selected_learning:
             lines = ["KALICI ENGINEERING OGRENMELERI"]
             for index, (created, source, summary) in enumerate(
-                selected_learning, start=1
+                selected_learning,
+                start=1,
             ):
                 lines.append(
                     f"{index}. {summary[:1200]} "
@@ -4924,28 +5215,31 @@ class AssistantEngine:
             return "\n".join(lines)
 
         engineering_event_markers = (
+            "engineering",
+            "muhendis",
             "patch",
             "taslak",
-            "öner",
             "oner",
             "uygula",
-            "doğrula",
             "dogrula",
             "test",
             "rollback",
             "geri al",
-            "araştır",
             "arastir",
             "kurtar",
             "redded",
-            "başar",
             "basar",
+            "closeout",
+            "retest",
+            "runtime",
         )
+        recent = getattr(self.own_code_history, "recent_rows", None)
+        rows = tuple(recent(50) if callable(recent) else ())
         history_rows = tuple(
             row
-            for row in self.own_code_history.recent_rows(50)
+            for row in rows
             if any(
-                marker in str(row.get("event", "") or "").casefold()
+                marker in self.command_key(str(row.get("event", "") or ""))
                 for marker in engineering_event_markers
             )
         )
@@ -4960,7 +5254,7 @@ class AssistantEngine:
                     if key not in {"time", "event", "hash", "prev_hash"}
                     and str(value).strip()
                 )
-                summary = event + (f" — {details}" if details else "")
+                summary = event + (f" - {details}" if details else "")
                 lines.append(
                     f"{index}. {summary[:1200]} "
                     f"[kaynak=own_code_history; zaman={row.get('time', '')}]"
@@ -4978,279 +5272,6 @@ class AssistantEngine:
             "Kaynak: yalniz kalici learning/history kayitlari okundu; "
             "runtime saglik raporu, yeni arastirma, plan veya patch baslatilmadi."
         )
-
-
-
-    def _rejected_engineering_history_request(
-        self,
-        text: str,
-    ) -> str | None:
-        normalized = self.command_key(text)
-        words = normalized.split()
-
-        rejected_subject = any(
-            marker in normalized
-            for marker in (
-                "reddedilmis",
-                "reddedilen",
-                "rejected engineering",
-                "rejected change",
-            )
-        )
-        rejected_is_negated = any(
-            marker in normalized
-            for marker in (
-                "reddedilenleri dahil etme",
-                "reddedilmis olanlari dahil etme",
-                "rejected olanlari dahil etme",
-                "rejected changes dahil etme",
-            )
-        )
-        asks_history = any(
-            word.startswith(("son", "goster", "listele", "gecmis", "kayit"))
-            for word in words
-        )
-        asks_engineering = any(
-            word.startswith(
-                ("engineering", "gelistirme", "degisiklik", "kod", "kaynak")
-            )
-            for word in words
-        )
-
-        if (
-            rejected_is_negated
-            or not (rejected_subject and asks_history and asks_engineering)
-        ):
-            return None
-
-        requested_limit = 3
-        number_match = re.search(r"\b(\d{1,2})\b", normalized)
-        if number_match is not None:
-            requested_limit = max(1, min(10, int(number_match.group(1))))
-
-        rejected_markers = (
-            "redded",
-            "basarisiz",
-            "rollback",
-            "geri al",
-            "iptal",
-            "anchor reddi",
-            "dogrulamada reddedildi",
-        )
-        accepted_markers = (
-            "onayli degisiklik uygulandi",
-            "uygulama basarili",
-            "patch kabul edildi",
-            "accepted",
-        )
-
-        rows = []
-        for row in self.own_code_history.recent_rows(200):
-            event = self.command_key(str(row.get("event", "") or ""))
-            details = self.command_key(
-                " ".join(
-                    str(value or "")
-                    for key, value in row.items()
-                    if key not in {"hash", "prev_hash"}
-                )
-            )
-            rejected = any(
-                marker in event or marker in details
-                for marker in rejected_markers
-            )
-            accepted = any(
-                marker in event or marker in details
-                for marker in accepted_markers
-            )
-            if rejected and not accepted:
-                rows.append(row)
-
-        selected = tuple(rows[-requested_limit:])
-        if not selected:
-            return (
-                "REDDEDILMIS ENGINEERING DEGISIKLIKLERI\n"
-                "Kayit bulunamadi. Kalici own-code history icinde "
-                "reddedilmis bir engineering degisikligi yok.\n"
-                "Kaynak: yalniz kalici history kayitlari okundu; "
-                "kabul edilmis kayitlar dahil edilmedi; yeni arastirma, "
-                "plan, patch veya kod degisikligi baslatilmadi."
-            )
-
-        lines = ["REDDEDILMIS ENGINEERING DEGISIKLIKLERI"]
-        for index, row in enumerate(selected, start=1):
-            event = str(row.get("event", "") or "").strip()
-            details = "; ".join(
-                f"{key}={value}"
-                for key, value in row.items()
-                if key not in {"time", "event", "hash", "prev_hash"}
-                and str(value).strip()
-            )
-            summary = event + (f" — {details}" if details else "")
-            lines.append(
-                f"{index}. {summary[:1400]} "
-                f"[zaman={row.get('time', '')}]"
-            )
-
-        lines.append(
-            "Kaynak: yalniz kalici history kayitlari okundu; "
-            "kabul edilmis kayitlar dahil edilmedi; yeni arastirma, "
-            "plan, patch veya kod degisikligi baslatilmadi."
-        )
-        return "\n".join(lines)
-
-
-
-    def _accepted_engineering_history_request(
-        self,
-        text: str,
-    ) -> str | None:
-        normalized = self.command_key(text)
-        words = normalized.split()
-
-        rejected_is_negated = any(
-            marker in normalized
-            for marker in (
-                "reddedilenleri dahil etme",
-                "reddedilmis olanlari dahil etme",
-                "rejected olanlari dahil etme",
-                "rejected changes dahil etme",
-            )
-        )
-        rejected_subject = (
-            any(
-                marker in normalized
-                for marker in (
-                    "reddedilmis",
-                    "reddedilen",
-                    "rejected engineering",
-                    "rejected change",
-                )
-            )
-            and not rejected_is_negated
-        )
-        accepted_subject = any(
-            marker in normalized
-            for marker in (
-                "kabul edilmis",
-                "onayli degisiklik",
-                "accepted engineering",
-                "accepted change",
-            )
-        )
-        accepted_is_negated = any(
-            marker in normalized
-            for marker in (
-                "kabul edilmis olanlari dahil etme",
-                "kabul edilenleri dahil etme",
-                "accepted olanlari dahil etme",
-                "accepted changes dahil etme",
-            )
-        )
-        asks_history = any(
-            word.startswith(("son", "goster", "listele", "gecmis", "kayit"))
-            for word in words
-        )
-        asks_engineering = any(
-            word.startswith(
-                ("engineering", "gelistirme", "degisiklik", "kod", "kaynak")
-            )
-            for word in words
-        )
-
-        if (
-            rejected_subject
-            or accepted_is_negated
-            or not (accepted_subject and asks_history and asks_engineering)
-        ):
-            return None
-
-        requested_limit = 3
-        number_match = re.search(r"\b(\d{1,2})\b", normalized)
-        if number_match is not None:
-            requested_limit = max(1, min(10, int(number_match.group(1))))
-
-        accepted_event_markers = (
-            "onayli degisiklik uygulandi",
-            "degisiklik uygulandi",
-            "uygulama basarili",
-            "patch kabul edildi",
-            "accepted",
-        )
-        rejected_event_markers = (
-            "redded",
-            "basarisiz",
-            "rollback",
-            "geri al",
-            "iptal",
-        )
-
-        rows = []
-        for row in self.own_code_history.recent_rows(200):
-            event_text = str(row.get("event", "") or "")
-            event_key = self.command_key(
-                event_text.translate(
-                    str.maketrans(
-                        {
-                            "ı": "i",
-                            "İ": "i",
-                            "ş": "s",
-                            "Ş": "s",
-                            "ç": "c",
-                            "Ç": "c",
-                            "ğ": "g",
-                            "Ğ": "g",
-                            "ü": "u",
-                            "Ü": "u",
-                            "ö": "o",
-                            "Ö": "o",
-                        }
-                    )
-                )
-            )
-            accepted = any(
-                marker in event_key
-                for marker in accepted_event_markers
-            )
-            rejected = any(
-                marker in event_key
-                for marker in rejected_event_markers
-            )
-            if accepted and not rejected:
-                rows.append(row)
-
-        selected = tuple(rows[-requested_limit:])
-        if not selected:
-            return (
-                "KABUL EDILMIS ENGINEERING DEGISIKLIKLERI\n"
-                "Kayit bulunamadi. Kalici own-code history icinde "
-                "kabul edilmis/uygulanmis bir engineering degisikligi yok.\n"
-                "Kaynak: yalniz kalici history kayitlari okundu; "
-                "kabul testi, yeni arastirma, plan, patch veya kod "
-                "degisikligi baslatilmadi."
-            )
-
-        lines = ["KABUL EDILMIS ENGINEERING DEGISIKLIKLERI"]
-        for index, row in enumerate(selected, start=1):
-            event = str(row.get("event", "") or "").strip()
-            details = "; ".join(
-                f"{key}={value}"
-                for key, value in row.items()
-                if key not in {"time", "event", "hash", "prev_hash"}
-                and str(value).strip()
-            )
-            summary = event + (f" — {details}" if details else "")
-            lines.append(
-                f"{index}. {summary[:1400]} "
-                f"[zaman={row.get('time', '')}]"
-            )
-
-        lines.append(
-            "Kaynak: yalniz kalici history kayitlari okundu; "
-            "reddedilen kayitlar dahil edilmedi; kabul testi, "
-            "yeni arastirma, plan, patch veya kod degisikligi baslatilmadi."
-        )
-        return "\n".join(lines)
-
     def _own_code_history_request(self, text: str) -> str | None:
         normalized = self.command_key(text)
         words = normalized.split()
