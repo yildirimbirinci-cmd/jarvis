@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -44,6 +45,57 @@ class OwnCodeWorktreeValidator:
             raise WorkspaceError("Git bulunamadığı için geçici doğrulama alanı oluşturulamadı.") from exc
         except subprocess.TimeoutExpired as exc:
             raise WorkspaceError("Git worktree işlemi zaman aşımına uğradı.") from exc
+
+    @staticmethod
+    def _pid_alive(pid: int) -> bool:
+        if pid <= 0:
+            return False
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        except OSError:
+            return False
+        return True
+
+    def _write_owner_marker(self, parent: Path) -> None:
+        marker = parent / ".jarvis-worktree-owner.json"
+        payload = {
+            "pid": os.getpid(),
+            "root": str(self.root),
+        }
+        marker.write_text(
+            json.dumps(payload, ensure_ascii=True, sort_keys=True),
+            encoding="utf-8",
+            newline="",
+        )
+
+    def cleanup_stale_managed_worktrees(self) -> None:
+        temp_root = Path(tempfile.gettempdir()).resolve(strict=False)
+        for parent in temp_root.glob("jarvis-own-code-worktree-*"):
+            if not parent.is_dir():
+                continue
+            marker = parent / ".jarvis-worktree-owner.json"
+            try:
+                payload = json.loads(marker.read_text(encoding="utf-8"))
+            except (OSError, ValueError, TypeError):
+                continue
+            if not isinstance(payload, dict):
+                continue
+            try:
+                marker_root = Path(str(payload.get("root", ""))).resolve(strict=False)
+                owner_pid = int(payload.get("pid", 0) or 0)
+            except (TypeError, ValueError, OSError):
+                continue
+            if marker_root != self.root or self._pid_alive(owner_pid):
+                continue
+            worktree = parent / self.root.name
+            if worktree.exists():
+                self._git("worktree", "remove", "--force", str(worktree))
+            self._git("worktree", "prune")
+            shutil.rmtree(parent, ignore_errors=True)
 
     def _require_clean_repository(self) -> None:
         probe = self._git("rev-parse", "--show-toplevel")
@@ -148,7 +200,9 @@ class OwnCodeWorktreeValidator:
             raise WorkspaceError("Worktree doğrulaması için geçerli bir taslak gerekli.")
         self.recover_stale_worktrees()
         self._require_clean_repository()
+        self.cleanup_stale_managed_worktrees()
         parent = Path(tempfile.mkdtemp(prefix="jarvis-own-code-worktree-"))
+        self._write_owner_marker(parent)
         (parent / ".jarvis-worktree-owner").write_text(
             str(os.getpid()), encoding="ascii"
         )

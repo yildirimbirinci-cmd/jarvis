@@ -4054,6 +4054,26 @@ class AssistantEngine:
         )
 
     @staticmethod
+    def _current_own_code_revision(root: Path | None = None) -> str:
+        """Return the committed source revision for restart-safe recovery."""
+        source_root = Path(root or Path(__file__).resolve().parents[1])
+        try:
+            completed = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=str(source_root),
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=30,
+            )
+        except Exception:
+            return ""
+        if completed.returncode != 0:
+            return ""
+        return str(completed.stdout or "").strip()
+
+    @staticmethod
     def _save_own_code_cycle(
         stage: str,
         detail: str,
@@ -4063,6 +4083,7 @@ class AssistantEngine:
         changed_paths: tuple[str, ...] | list[str] | None = None,
         validation_summary: str = "",
         version_summary: str = "",
+        source_revision: str | None = None,
     ) -> None:
         try:
             previous = AssistantEngine._load_own_code_cycle() or {}
@@ -4083,6 +4104,10 @@ class AssistantEngine:
                 version_summary = str(
                     previous.get("version_summary", "") or ""
                 )
+            if source_revision is None:
+                source_revision = str(previous.get("source_revision", "") or "")
+            if not source_revision and str(stage) == "baseline":
+                source_revision = AssistantEngine._current_own_code_revision()
             atomic_write_json(
                 OWN_CODE_CYCLE_FILE,
                 {
@@ -4098,6 +4123,7 @@ class AssistantEngine:
                     ][:32],
                     "validation_summary": str(validation_summary)[-4000:],
                     "version_summary": str(version_summary)[-4000:],
+                    "source_revision": str(source_revision or "")[:128],
                     "updated_at": datetime.now(timezone.utc).isoformat(),
                     "owner_pid": os.getpid(),
                 },
@@ -4108,18 +4134,61 @@ class AssistantEngine:
 
     @staticmethod
     def _load_own_code_cycle() -> dict[str, object] | None:
+        if not OWN_CODE_CYCLE_FILE.exists():
+            return None
         try:
             data = read_json_object(
                 OWN_CODE_CYCLE_FILE,
                 max_bytes=OWN_CODE_CYCLE_MAX_BYTES,
             )
-            return (
-                data
-                if isinstance(data, dict) and data.get("version") in {3, 4}
-                else None
-            )
-        except Exception:
+            if not isinstance(data, dict) or data.get("version") not in {3, 4}:
+                raise ValueError("Unsupported own-code cycle schema")
+            return data
+        except FileNotFoundError:
             return None
+        except Exception as exc:
+            quarantine = OWN_CODE_CYCLE_FILE.with_name(
+                OWN_CODE_CYCLE_FILE.name
+                + ".corrupt-"
+                + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+                + "-"
+                + uuid.uuid4().hex[:8]
+            )
+            try:
+                OWN_CODE_CYCLE_FILE.replace(quarantine)
+            except OSError:
+                quarantine = None
+            recovered = {
+                "version": 4,
+                "stage": "recovery_required",
+                "detail": (
+                    "Engineering cycle kaydi bozuk veya desteklenmeyen sema "
+                    "nedeniyle karantinaya alindi. Yeni apply engellendi; "
+                    "kaynak dogrulamasi gerekiyor."
+                ),
+                "failures": [],
+                "attempt": 0,
+                "changed_paths": [],
+                "validation_summary": (
+                    "Corrupt engineering cycle quarantined: "
+                    + type(exc).__name__
+                ),
+                "version_summary": (
+                    str(quarantine.name) if quarantine is not None else ""
+                ),
+                "source_revision": AssistantEngine._current_own_code_revision(),
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+                "owner_pid": os.getpid(),
+            }
+            try:
+                atomic_write_json(
+                    OWN_CODE_CYCLE_FILE,
+                    recovered,
+                    max_bytes=OWN_CODE_CYCLE_MAX_BYTES,
+                )
+            except Exception:
+                pass
+            return recovered
 
     @staticmethod
     def _cycle_attempt(cycle: dict[str, object] | None) -> int:
@@ -4133,6 +4202,33 @@ class AssistantEngine:
         cycle: dict[str, object],
     ) -> tuple[bool, str]:
         root = Path(self.own_project_root())
+        expected_revision = str(cycle.get("source_revision", "") or "").strip()
+        current_revision = (
+            self._current_own_code_revision(root) if expected_revision else ""
+        )
+        if (
+            expected_revision
+            and current_revision
+            and current_revision != expected_revision
+        ):
+            stale_detail = (
+                "Recovery source revision changed after the interrupted engineering "
+                "checkpoint; stale recovery evidence was rejected."
+            )
+            self._save_own_code_cycle(
+                "stale",
+                (
+                    "Recovery checkpoint kaynak revizyonu mevcut kaynakla "
+                    "eslesmedigi icin eski recovery kaydi gecersizlestirildi."
+                ),
+                failures=list(cycle.get("failures", []) or []),
+                attempt=self._cycle_attempt(cycle),
+                changed_paths=list(cycle.get("changed_paths", []) or []),
+                validation_summary=stale_detail,
+                version_summary=str(cycle.get("version_summary", "") or ""),
+                source_revision=expected_revision,
+            )
+            return False, stale_detail
         changed_paths = tuple(
             str(item).strip()
             for item in (cycle.get("changed_paths", []) or [])
@@ -4278,6 +4374,19 @@ class AssistantEngine:
         cycle: dict[str, object],
     ) -> tuple[bool, str]:
         """Re-run source health gates before claiming restart recovery."""
+        expected_revision = str(cycle.get("source_revision", "") or "").strip()
+        starting_revision = (
+            self._current_own_code_revision() if expected_revision else ""
+        )
+        if (
+            expected_revision
+            and starting_revision
+            and starting_revision != expected_revision
+        ):
+            return False, (
+                "Recovery source revision changed before verification started; "
+                "stale recovery evidence was rejected."
+            )
         baseline_failures = {
             str(item)
             for item in (cycle.get("failures", []) or [])
@@ -4335,6 +4444,32 @@ class AssistantEngine:
                 "final recovery decision is pending."
             ),
         )
+        final_revision = (
+            self._current_own_code_revision() if expected_revision else ""
+        )
+        if (
+            expected_revision
+            and final_revision
+            and final_revision != expected_revision
+        ):
+            stale_detail = (
+                "Recovery source revision changed while verification was running; "
+                "the completed checks were invalidated."
+            )
+            self._save_own_code_cycle(
+                "stale",
+                (
+                    "Recovery verification sirasinda kaynak revizyonu degisti; "
+                    "eski recovery kaydi gecersizlestirildi."
+                ),
+                failures=list(cycle.get("failures", []) or []),
+                attempt=self._cycle_attempt(cycle),
+                changed_paths=list(cycle.get("changed_paths", []) or []),
+                validation_summary=stale_detail,
+                version_summary=str(cycle.get("version_summary", "") or ""),
+                source_revision=expected_revision,
+            )
+            return False, stale_detail
         current_failures = self._test_failure_ids(test_output)
         new_failures = current_failures.difference(baseline_failures)
         unverifiable_failure = not test_success and not current_failures
@@ -4511,8 +4646,15 @@ class AssistantEngine:
                 stage = str(cycle.get("stage", "recovered"))
                 detail = str(cycle.get("detail", "")).strip()
             else:
-                cycle = dict(cycle)
-                cycle["validation_summary"] = recovery_detail
+                persisted_cycle = self._load_own_code_cycle()
+                if persisted_cycle:
+                    cycle = persisted_cycle
+                    stage = str(cycle.get("stage", stage))
+                    detail = str(cycle.get("detail", detail)).strip()
+                else:
+                    cycle = dict(cycle)
+                if stage == "recovery_required":
+                    cycle["validation_summary"] = recovery_detail
 
         failures = cycle.get("failures", [])
         count = len(failures) if isinstance(failures, list) else 0
@@ -13284,6 +13426,8 @@ class AssistantEngine:
         if normalized in {
             "kendi kod gelistirme durumu",
             "kendi kod gelistirme raporu",
+            "kendi kod gelistirme dongusu durumu",
+            "kendi kod gelistirme dongusu durumunu goster",
             "kendi kod dongu durumu",
             "kendi kod islem durumu",
         }:
