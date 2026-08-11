@@ -4300,6 +4300,22 @@ class AssistantEngine:
             ),
         )
         test_success, test_output = self._run_own_tests()
+        # The regression subprocess executes the repository test suite. Some
+        # tests intentionally exercise persistent engineering-state files and
+        # may remove or replace the live cycle record. Reassert the recovery
+        # checkpoint immediately after pytest so a process exit/restart cannot
+        # lose the interrupted engineering session.
+        self._save_own_code_cycle(
+            "recovery_required",
+            str(cycle.get("detail", "") or "Recovery verification is running."),
+            failures=list(cycle.get("failures", []) or []),
+            attempt=self._cycle_attempt(cycle),
+            changed_paths=list(cycle.get("changed_paths", []) or []),
+            validation_summary=(
+                "Recovery verification progress: regression tests completed; "
+                "final recovery decision is pending."
+            ),
+        )
         current_failures = self._test_failure_ids(test_output)
         new_failures = current_failures.difference(baseline_failures)
         unverifiable_failure = not test_success and not current_failures
