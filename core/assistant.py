@@ -4105,9 +4105,10 @@ class AssistantEngine:
                     previous.get("version_summary", "") or ""
                 )
             if source_revision is None:
-                source_revision = str(previous.get("source_revision", "") or "")
-            if not source_revision and str(stage) == "baseline":
-                source_revision = AssistantEngine._current_own_code_revision()
+                if str(stage) == "baseline":
+                    source_revision = AssistantEngine._current_own_code_revision()
+                else:
+                    source_revision = str(previous.get("source_revision", "") or "")
             atomic_write_json(
                 OWN_CODE_CYCLE_FILE,
                 {

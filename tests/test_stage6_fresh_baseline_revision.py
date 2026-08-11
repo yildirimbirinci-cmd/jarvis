@@ -10,7 +10,7 @@ def _save_cycle_method() -> str:
     return source[start:end]
 
 
-def test_legacy_recovery_transition_does_not_invent_source_revision() -> None:
+def test_baseline_refreshes_revision_before_previous_revision_inheritance() -> None:
     method = _save_cycle_method()
 
     expected = (
@@ -23,22 +23,12 @@ def test_legacy_recovery_transition_does_not_invent_source_revision() -> None:
     assert expected in method
 
 
-def test_new_baseline_always_refreshes_source_revision() -> None:
+def test_non_baseline_states_still_inherit_existing_revision() -> None:
     method = _save_cycle_method()
 
-    capture = (
-        'if str(stage) == "baseline":\n'
-        '                    source_revision = AssistantEngine._current_own_code_revision()'
-    )
-    assert capture in method
-
-
-def test_non_baseline_states_preserve_existing_revision() -> None:
-    method = _save_cycle_method()
-
-    preserve = (
+    assert (
         'else:\n'
         '                    source_revision = str(previous.get("source_revision", "") or "")'
+        in method
     )
-    assert preserve in method
     assert '"source_revision": str(source_revision or "")[:128]' in method
