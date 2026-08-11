@@ -12,6 +12,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import uuid
 import urllib.error
@@ -3813,10 +3814,28 @@ class AssistantEngine:
             return True, "Test klasörü bulunamadı; yalnızca derleme doğrulaması kullanılacak."
         command = [sys.executable, "-m", "pytest", "-q", str(tests)]
         try:
-            completed = subprocess.run(
-                command, cwd=str(root), capture_output=True, text=True,
-                encoding="utf-8", errors="replace", timeout=1800,
-            )
+            with tempfile.TemporaryDirectory(
+                prefix="jarvis-regression-data-"
+            ) as isolated_root:
+                isolated_root_path = Path(isolated_root)
+                isolated_local = isolated_root_path / "LocalAppData"
+                isolated_roaming = isolated_root_path / "AppData"
+                isolated_local.mkdir(parents=True, exist_ok=True)
+                isolated_roaming.mkdir(parents=True, exist_ok=True)
+                test_env = os.environ.copy()
+                test_env["LOCALAPPDATA"] = str(isolated_local)
+                test_env["APPDATA"] = str(isolated_roaming)
+                test_env["JARVIS_REGRESSION_ISOLATED_DATA"] = "1"
+                completed = subprocess.run(
+                    command,
+                    cwd=str(root),
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=1800,
+                    env=test_env,
+                )
             output = (completed.stdout + "\n" + completed.stderr).strip()
             return completed.returncode == 0, output
         except subprocess.TimeoutExpired as exc:
