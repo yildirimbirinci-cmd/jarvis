@@ -3620,36 +3620,79 @@ class AssistantEngine:
         new_failures = current_failures.difference(baseline_failures)
         unverifiable_failure = not test_success and not current_failures
         if new_failures or unverifiable_failure:
-            try:
-                rollback = self.own_code_transactions.undo()
-            except Exception as rollback_error:
-                self._save_own_validation(False, test_output)
-                return (
-                    "Değişiklik yeni test hatası oluşturdu ancak otomatik geri alma "
-                    f"tamamlanamadı: {rollback_error}. Hata özeti: {test_output[-900:]}"
-                )
-            self._save_own_validation(False, test_output)
             failure_summary = ", ".join(sorted(new_failures)[:5])
             if len(new_failures) > 5:
                 failure_summary += f" ve {len(new_failures) - 5} hata daha"
             if not failure_summary:
                 failure_summary = test_output[-700:]
+            self._save_own_code_cycle(
+                "rolling_back",
+                "Yeni regresyon algılandı; doğrulanmış baseline geri yükleniyor.",
+                failures=sorted(baseline_failures),
+                changed_paths=rollback_paths,
+                validation_summary=(
+                    "Test-failure rollback başladı. Rollback tamamlanıp kaynak, "
+                    "runtime ve regresyon yeniden doğrulanmadan recovered veya "
+                    "rolled_back durumu yazılmayacak."
+                ),
+            )
+            try:
+                rollback = self.own_code_transactions.undo()
+            except Exception as rollback_error:
+                self._save_own_validation(False, test_output)
+                self._save_own_code_cycle(
+                    "recovery_required",
+                    f"Test-failure rollback tamamlanamadı: {rollback_error}",
+                    failures=sorted(baseline_failures),
+                    changed_paths=rollback_paths,
+                    validation_summary=test_output[-3000:],
+                )
+                return (
+                    "Değişiklik yeni test hatası oluşturdu ancak otomatik geri alma "
+                    f"tamamlanamadı: {rollback_error}. Hata özeti: {test_output[-900:]}"
+                )
+            rollback_cycle = {
+                "detail": "Test-failure rollback sonrası baseline doğrulanıyor.",
+                "failures": sorted(baseline_failures),
+                "attempt": self._cycle_attempt(self._load_own_code_cycle() or {}),
+                "changed_paths": list(rollback_paths),
+            }
+            rollback_ok, rollback_detail = (
+                self._validate_recovered_engineering_source(rollback_cycle)
+            )
+            if not rollback_ok:
+                self._save_own_code_cycle(
+                    "recovery_required",
+                    "Test-failure rollback uygulandı ancak baseline doğrulanamadı.",
+                    failures=sorted(baseline_failures),
+                    changed_paths=rollback_paths,
+                    validation_summary=str(rollback_detail)[-3000:],
+                    version_summary=str(rollback)[:3000],
+                )
+                return (
+                    "Değişiklik yeni test hatası oluşturduğu için geri alındı ancak "
+                    "rollback sonrası baseline doğrulaması tamamlanamadı. "
+                    f"{rollback_detail}"
+                )
+            self._save_own_validation(False, test_output)
             self.own_code_history.record(
                 "yeni test hatası; değişiklik geri alındı",
                 hatalar=failure_summary[:700],
             )
             self._save_own_code_cycle(
                 "rolled_back", failure_summary,
-                failures=sorted(current_failures),
+                failures=sorted(baseline_failures),
                 changed_paths=rollback_paths,
                 validation_summary=(
-                    "Yeni regresyon algılandı; değişiklik otomatik geri alındı "
-                    "ve önceki doğrulanmış kaynak geri yüklendi."
+                    "Yeni regresyon algılandı; değişiklik otomatik geri alındı. "
+                    "Rollback sonrası derleme, temiz süreç ve regresyon "
+                    "karşılaştırması doğrulandı."
                 ),
                 version_summary=str(rollback)[:3000],
             )
             return (
-                "Değişiklik yeni bir test hatası oluşturduğu için otomatik olarak geri alındı. "
+                "Değişiklik yeni bir test hatası oluşturduğu için otomatik olarak "
+                "geri alındı ve doğrulanmış baseline yeniden test edildi. "
                 f"{rollback}. Yeni hata: {failure_summary}"
             )
         version_report = self.own_code_transactions.report(limit=1)
@@ -4221,8 +4264,41 @@ class AssistantEngine:
             for item in (cycle.get("failures", []) or [])
             if str(item).strip()
         }
+        self._save_own_code_cycle(
+            "recovery_required",
+            str(cycle.get("detail", "") or "Recovery verification is running."),
+            failures=list(cycle.get("failures", []) or []),
+            attempt=self._cycle_attempt(cycle),
+            changed_paths=list(cycle.get("changed_paths", []) or []),
+            validation_summary=(
+                "Recovery verification started: compile check is running. "
+                "No new apply is allowed until recovery completes."
+            ),
+        )
         compile_ok, compile_output = self._compile_own_code()
+        self._save_own_code_cycle(
+            "recovery_required",
+            str(cycle.get("detail", "") or "Recovery verification is running."),
+            failures=list(cycle.get("failures", []) or []),
+            attempt=self._cycle_attempt(cycle),
+            changed_paths=list(cycle.get("changed_paths", []) or []),
+            validation_summary=(
+                "Recovery verification progress: compile check completed; "
+                "clean runtime check is running."
+            ),
+        )
         runtime_ok, runtime_output = self._runtime_health_check()
+        self._save_own_code_cycle(
+            "recovery_required",
+            str(cycle.get("detail", "") or "Recovery verification is running."),
+            failures=list(cycle.get("failures", []) or []),
+            attempt=self._cycle_attempt(cycle),
+            changed_paths=list(cycle.get("changed_paths", []) or []),
+            validation_summary=(
+                "Recovery verification progress: compile and clean runtime checks "
+                "completed; regression tests are running."
+            ),
+        )
         test_success, test_output = self._run_own_tests()
         current_failures = self._test_failure_ids(test_output)
         new_failures = current_failures.difference(baseline_failures)

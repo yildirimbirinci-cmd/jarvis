@@ -14,12 +14,21 @@ def test_rollback_paths_are_captured_from_approved_proposal():
 
 def test_regression_rollback_persists_restart_safe_details():
     source = _source()
-    marker = '"Yeni regresyon algılandı; değişiklik otomatik geri alındı "'
-    pos = source.index(marker)
-    block = source[pos - 500:pos + 900]
+    rolling_marker = (
+        '"rolling_back",\n'
+        '                "Yeni regresyon algılandı; doğrulanmış baseline geri yükleniyor."'
+    )
+    rolled_back_marker = (
+        '"rolled_back", failure_summary,'
+    )
+
+    rolling_pos = source.index(rolling_marker)
+    rolled_back_pos = source.index(rolled_back_marker, rolling_pos)
+    block = source[rolling_pos:rolled_back_pos + 1200]
 
     assert "changed_paths=rollback_paths" in block
-    assert "validation_summary=(" in block
+    assert "_validate_recovered_engineering_source(rollback_cycle)" in block
+    assert '"recovery_required"' in block
     assert "version_summary=str(rollback)[:3000]" in block
     assert '"rolled_back"' in block
 

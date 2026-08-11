@@ -185,6 +185,7 @@ def test_new_test_failure_rolls_change_back() -> None:
             "FAILED tests/test_old.py::test_old - old\n"
             "FAILED tests/test_new.py::test_new - new",
         ),
+        (False, "FAILED tests/test_old.py::test_old - old"),
     ))
     engine._run_own_tests = lambda: next(results)
 
