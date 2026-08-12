@@ -1540,7 +1540,10 @@ class AssistantEngine:
                     )
             return ""
 
-        base_attempts = max(1, min(int(max_attempts), 3))
+        # In production-repair mode max_attempts is the policy retry budget,
+        # not a request to multiply model calls. One initial proposal plus one
+        # validator-guided recovery is the hard bound for the current policy.
+        base_attempts = 1 if strict_attempt_limit else max(1, min(int(max_attempts), 3))
         # A production repair policy limits independent repair attempts, but a
         # validator-proven source-grounding rejection is not a second repair
         # hypothesis. Reserve one bounded recovery slot so the exact live-source
@@ -1918,6 +1921,15 @@ class AssistantEngine:
                     project_root=self.own_project_root(),
                     instruction=prompt,
                 )
+                # Whitespace-only transcription drift is deterministic: resolve
+                # it against the one approved method before the source-grounding
+                # gate. Previously this safe repair ran after the gate, so valid
+                # live-source anchors were rejected before they could be grounded.
+                payload = repair_unique_whitespace_anchors(
+                    payload,
+                    project_root=self.own_project_root(),
+                    instruction=prompt,
+                )
 
                 # Reject invented replace-style anchors before later repair
                 # stages. This gate never guesses or rewrites an anchor.
@@ -2088,11 +2100,6 @@ class AssistantEngine:
                 )
                 validate_behavior_preserving_extraction_payload(
                     payload,
-                    instruction=prompt,
-                )
-                payload = repair_unique_whitespace_anchors(
-                    payload,
-                    project_root=self.own_project_root(),
                     instruction=prompt,
                 )
                 payload = repair_ambiguous_replace_anchors(
