@@ -1631,6 +1631,27 @@ class AssistantEngine:
                     "aynı dosya ve sembol kapsamında küçük operations kullanarak düzelt."
                 )
 
+                scope_match = re.search(
+                    r"(?im)^İzinli dosyalar:\s*(.+?)\s*$",
+                    prompt,
+                )
+                if scope_match:
+                    approved_rows = [
+                        row.strip().replace("\\", "/")
+                        for row in scope_match.group(1).split(",")
+                        if row.strip()
+                    ]
+                    if approved_rows:
+                        current_prompt += (
+                            "\n\nRECOVERY SCOPE LOCK (MANDATORY): files dizisinde yalnız "
+                            + ", ".join(approved_rows)
+                            + " kullanılabilir. Bu dosyaların dışındaki hiçbir path için "
+                            "operation üretme. Runtime bulgusunun ilk wrapper konumuna, "
+                            "önceki hedefe veya başka bir dosyaya geri dönme. Doğrulayıcının "
+                            "CANDIDATE/ADAY blokları varsa yalnız izinli hedef dosya içindeki "
+                            "tek gerçek aday bloğunu kullan; uygun aday yoksa boş files döndür."
+                        )
+
                 structural_guidance = build_structural_method_block_guidance(
                     project_root=self.own_project_root(),
                     instruction=prompt,
@@ -1842,12 +1863,25 @@ class AssistantEngine:
                         }
                         unexpected_paths = sorted(produced_paths - allowed_paths)
                         if unexpected_paths:
-                            raise WorkspaceError(
-                                "KANITA BAGLI KAPSAM REDDI: hedef disi dosya: "
-                                + ", ".join(unexpected_paths)
-                                + ". Yalniz izinli dosyalari kullan: "
-                                + ", ".join(sorted(allowed_paths))
-                            )
+                            in_scope_rows = [
+                                row
+                                for row in payload_files
+                                if isinstance(row, dict)
+                                and str(row.get("path", "")).strip().replace("\\", "/")
+                                in allowed_paths
+                            ]
+                            if in_scope_rows:
+                                # Deterministically clamp a mixed response to the
+                                # evidence-approved files. This cannot broaden scope:
+                                # it only discards model-authored out-of-scope rows.
+                                payload["files"] = in_scope_rows
+                            else:
+                                raise WorkspaceError(
+                                    "KANITA BAGLI KAPSAM REDDI: hedef disi dosya: "
+                                    + ", ".join(unexpected_paths)
+                                    + ". Yalniz izinli dosyalari kullan: "
+                                    + ", ".join(sorted(allowed_paths))
+                                )
 
                 if (
                     isinstance(payload, dict)

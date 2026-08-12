@@ -653,3 +653,130 @@ def test_single_attempt_gets_one_structural_contract_recovery_pass(monkeypatch, 
     assert len(prompts) == 2
     assert "STRUCTURAL CONTRACT RECOVERY (MANDATORY)" in prompts[1]
     assert "self.<yardımcı_metot>" in prompts[1]
+
+
+def test_bounded_recovery_scope_lock_clamps_mixed_out_of_scope_file(
+    monkeypatch, tmp_path
+) -> None:
+    engine = object.__new__(AssistantEngine)
+    engine.own_code_history = SimpleNamespace(record=lambda *_args, **_kwargs: None)
+    engine.own_project_root = lambda: tmp_path
+    engine._validate_own_code_payload_shape = lambda raw: json.loads(raw)
+
+    responses = iter((
+        json.dumps({
+            "summary": "first",
+            "files": [{
+                "path": "core/assistant.py",
+                "reason": "repair",
+                "operations": [{
+                    "op": "replace_method_block",
+                    "class_name": "AssistantEngine",
+                    "method_name": "handle",
+                    "block_test": "if runtime is not None:",
+                    "replacement": "return None",
+                }],
+            }],
+        }),
+        json.dumps({
+            "summary": "second",
+            "files": [
+                {
+                    "path": "core/assistant.py",
+                    "reason": "repair",
+                    "operations": [{
+                        "op": "replace",
+                        "old": "unique approved source",
+                        "new": "unique repaired source",
+                    }],
+                },
+                {
+                    "path": "core/task_orchestrator.py",
+                    "reason": "wrong wrapper target",
+                    "operations": [{
+                        "op": "replace",
+                        "old": "wrapper old",
+                        "new": "wrapper new",
+                    }],
+                },
+            ],
+        }),
+    ))
+    prompts: list[str] = []
+
+    def request(prompt, **_kwargs):
+        prompts.append(prompt)
+        return next(responses)
+
+    engine._request_code_model_json = request
+    captured: dict[str, object] = {}
+
+    def create_proposal(raw):
+        captured.update(json.loads(raw))
+        return SimpleNamespace(
+            summary="repair",
+            files=(SimpleNamespace(path="core/assistant.py"),),
+        )
+
+    engine.editor = SimpleNamespace(create_proposal=create_proposal, reject=lambda: None)
+
+    globals_map = AssistantEngine._generate_validated_own_code_proposal.__globals__
+    workspace_error = globals_map["WorkspaceError"]
+    structural_calls = {"count": 0}
+
+    def structural(payload, **_kwargs):
+        structural_calls["count"] += 1
+        if structural_calls["count"] == 1:
+            raise workspace_error(
+                "Yapısal blok koşulu hedef metot ağacında tam olarak bir kez bulunmalı: "
+                "core/assistant.py işlem 1; bulunan=8"
+            )
+        return payload
+
+    for name in (
+        "merge_duplicate_operation_rows",
+        "ground_requested_docstring_replace_anchors",
+        "repair_high_confidence_missing_anchors",
+        "remove_redundant_noop_replaces",
+        "qualify_inserted_private_helper_calls",
+        "normalize_structural_class_method_insertions",
+        "repair_unique_whitespace_anchors",
+        "repair_ambiguous_replace_anchors",
+        "reorder_insertions_after_exact_edits",
+    ):
+        monkeypatch.setitem(globals_map, name, lambda payload, **_kwargs: payload)
+
+    monkeypatch.setitem(
+        globals_map,
+        "normalize_structural_method_block_replacements",
+        structural,
+    )
+    monkeypatch.setitem(
+        globals_map,
+        "validate_behavior_preserving_extraction_payload",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setitem(
+        globals_map,
+        "build_structural_method_block_guidance",
+        lambda **_kwargs: "",
+    )
+    monkeypatch.setitem(
+        globals_map,
+        "build_ambiguous_anchor_guidance",
+        lambda *_args, **_kwargs: "CANDIDATE 1:\nunique approved source",
+    )
+
+    proposal = engine._generate_validated_own_code_proposal(
+        "repair approved target\n"
+        "İzinli dosyalar: core/assistant.py\n"
+        "Hedef semboller: AssistantEngine.handle",
+        max_attempts=1,
+        strict_attempt_limit=True,
+    )
+
+    assert proposal.summary == "repair"
+    assert len(prompts) == 2
+    assert "RECOVERY SCOPE LOCK (MANDATORY)" in prompts[1]
+    assert "core/assistant.py" in prompts[1]
+    assert [row["path"] for row in captured["files"]] == ["core/assistant.py"]
