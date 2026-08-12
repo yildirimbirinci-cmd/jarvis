@@ -371,6 +371,54 @@ def _normalize_if_test_selector(value: str) -> str:
     return ast.unparse(statement.test)
 
 
+
+
+def _unique_direct_method_if_block(
+    source: str,
+    *,
+    class_name: str,
+    method_name: str,
+    block_test: str,
+) -> str:
+    """Return one exact direct method-body ``if`` block for a selector.
+
+    This is a structural disambiguation, not a heuristic.  It is accepted only
+    when the requested Class.method exists exactly once and exactly one *direct*
+    statement in that method is an ``if`` whose test matches ``block_test``.
+    Nested matches are intentionally ignored.
+    """
+    selector = _normalize_if_test_selector(block_test)
+    wanted = _expression_fingerprint(selector)
+    if not wanted:
+        return ""
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return ""
+    lines = source.splitlines(keepends=True)
+    methods: list[ast.FunctionDef | ast.AsyncFunctionDef] = []
+    for owner in tree.body:
+        if not isinstance(owner, ast.ClassDef) or owner.name != class_name:
+            continue
+        methods.extend(
+            row for row in owner.body
+            if isinstance(row, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and row.name == method_name
+        )
+    if len(methods) != 1:
+        return ""
+    matches = [
+        row for row in methods[0].body
+        if isinstance(row, ast.If)
+        and ast.dump(row.test, annotate_fields=True, include_attributes=False) == wanted
+    ]
+    if len(matches) != 1:
+        return ""
+    target = matches[0]
+    start = int(target.lineno) - 1
+    end = int(getattr(target, "end_lineno", target.lineno))
+    return "".join(lines[start:end])
+
 def normalize_structural_method_block_replacements(
     payload: dict[str, Any],
     *,
@@ -533,10 +581,39 @@ def normalize_structural_method_block_replacements(
                 and ast.dump(row.test, annotate_fields=True, include_attributes=False) == wanted
             ]
             if len(matches) != 1:
-                raise WorkspaceError(
-                    "Yapısal blok koşulu hedef metot ağacında tam olarak "
-                    f"bir kez bulunmalı: {raw_path} işlem {operation_index}; bulunan={len(matches)}"
+                direct_block = _unique_direct_method_if_block(
+                    source,
+                    class_name=class_name,
+                    method_name=method_name,
+                    block_test=str(block_test or ""),
                 )
+                if not direct_block:
+                    raise WorkspaceError(
+                        "Yapısal blok koşulu hedef metot ağacında tam olarak "
+                        f"bir kez bulunmalı: {raw_path} işlem {operation_index}; bulunan={len(matches)}"
+                    )
+                direct_start = source.find(direct_block)
+                direct_end = direct_start + len(direct_block)
+                direct_tree = ast.parse(textwrap.dedent(direct_block))
+                direct_if = next(
+                    (row for row in direct_tree.body if isinstance(row, ast.If)),
+                    None,
+                )
+                if direct_start < 0 or direct_if is None:
+                    raise WorkspaceError(
+                        "Yapısal blok koşulu hedef metot ağacında tam olarak "
+                        f"bir kez bulunmalı: {raw_path} işlem {operation_index}; bulunan={len(matches)}"
+                    )
+                replacement_text = textwrap.dedent(str(replacement or "")).strip("\r\n") + "\n"
+                indent = re.match(r"[ \t]*", direct_block).group(0)
+                operation.clear()
+                operation.update({
+                    "op": "replace",
+                    "old": direct_block,
+                    "new": textwrap.indent(replacement_text, indent),
+                    "_structural_block": f"{class_name}.{method_name}:{block_test}",
+                })
+                continue
             if active_dialogue_request:
                 selector_attrs = {row.attr for row in ast.walk(matches[0].test) if isinstance(row, ast.Attribute)}
                 selector_constants = {row.value for row in ast.walk(matches[0].test) if isinstance(row, ast.Constant)}
@@ -1049,6 +1126,20 @@ def repair_ambiguous_replace_anchors(
                     old,
                     new,
                 )
+                if expanded is None:
+                    direct_block = _unique_direct_method_if_block(
+                        source,
+                        class_name=class_name,
+                        method_name=method_name,
+                        block_test=old,
+                    )
+                    if direct_block:
+                        indent = re.match(r"[ \t]*", direct_block).group(0)
+                        rendered_new = textwrap.indent(
+                            textwrap.dedent(new).strip("\r\n") + "\n",
+                            indent,
+                        )
+                        expanded = (direct_block, rendered_new)
                 if expanded is not None:
                     operation["old"], operation["new"] = expanded
                     operation_index += 1
