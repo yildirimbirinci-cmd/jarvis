@@ -1504,6 +1504,15 @@ class AssistantEngine:
                 or "class method already exists" in folded
             )
 
+        def is_structural_contract_error(value: object) -> bool:
+            folded = str(value or "").casefold()
+            return (
+                "replacement alanında `self.<yardımcı_metot>(...)` çağrısı zorunlu"
+                in folded
+                or "replacement alaninda `self.<yardimci_metot>(...)` cagrisi zorunlu"
+                in folded
+            )
+
         def rejected_operation_detail(
             payload: object,
             error: object,
@@ -1546,6 +1555,7 @@ class AssistantEngine:
         anchor_retry_guidance = ""
         helper_shape_retry_guidance = ""
         existing_helper_retry_guidance = ""
+        structural_contract_retry_guidance = ""
         diagnostic_run_id = (
             datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
             + "-"
@@ -1607,6 +1617,7 @@ class AssistantEngine:
                     anchor_retry_guidance
                     or helper_shape_retry_guidance
                     or existing_helper_retry_guidance
+                    or structural_contract_retry_guidance
                 ):
                     break
             current_prompt = prompt
@@ -1693,6 +1704,16 @@ class AssistantEngine:
                     "konumda zaten bulunmamalı. İstenen refaktörü üreten en küçük "
                     "gerçek değişikliği, çalışan kaynaktan alınmış benzersiz bir "
                     "anchor ile gönder."
+                )
+
+            if is_structural_contract_error(previous_error):
+                current_prompt += (
+                    "\n\nSTRUCTURAL CONTRACT RECOVERY (MANDATORY): "
+                    "The rejected replace_method_block extraction did not call the "
+                    "extracted helper from replacement. Keep the same approved file, "
+                    "class, method, and source block. The replacement must call the "
+                    "inserted private helper as self.<helper>(...). Do not widen scope, "
+                    "invent sibling APIs, or repeat the rejected operation unchanged."
                 )
 
             if is_existing_helper_error(previous_error):
@@ -2095,6 +2116,7 @@ class AssistantEngine:
                     anchor_retry_guidance = ""
                     helper_shape_retry_guidance = ""
                     existing_helper_retry_guidance = ""
+                    structural_contract_retry_guidance = ""
                     previous_response = ""
                 else:
                     if not is_anchor_error(previous_error):
@@ -2103,6 +2125,8 @@ class AssistantEngine:
                         helper_shape_retry_guidance = ""
                     if not is_existing_helper_error(previous_error):
                         existing_helper_retry_guidance = ""
+                    if not is_structural_contract_error(previous_error):
+                        structural_contract_retry_guidance = ""
 
                 if is_helper_shape_error(previous_error):
                     previous_response = ""
@@ -2122,6 +2146,15 @@ class AssistantEngine:
                         "method with an exact live-source replace operation."
                     )
                     previous_error += "\n\n" + existing_helper_retry_guidance
+
+                if is_structural_contract_error(previous_error):
+                    previous_response = ""
+                    structural_contract_retry_guidance = (
+                        "STRUCTURAL CONTRACT RECOVERY (MANDATORY): preserve the "
+                        "approved extraction target and make replacement call the "
+                        "inserted private helper via self.<helper>(...)."
+                    )
+                    previous_error += "\n\n" + structural_contract_retry_guidance
 
                 if is_anchor_error(previous_error):
                     previous_response = ""

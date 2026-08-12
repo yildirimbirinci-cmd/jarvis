@@ -564,3 +564,92 @@ def test_symbol_scope_retry_forbids_new_helper_without_explicit_extraction() -> 
     assert "insert_class_method, yeni sinif, yeni fonksiyon" in prompt
     assert "Yalniz HEDEF SEMBOLLER" in prompt
     assert "yardimciyi dogrudan self.<yardimci>" not in prompt
+
+
+def test_single_attempt_gets_one_structural_contract_recovery_pass(monkeypatch, tmp_path) -> None:
+    engine = object.__new__(AssistantEngine)
+    engine.own_code_history = SimpleNamespace(record=lambda *_args, **_kwargs: None)
+    engine.own_project_root = lambda: tmp_path
+    engine._validate_own_code_payload_shape = lambda raw: json.loads(raw)
+
+    responses = iter((
+        json.dumps({
+            "summary": "first",
+            "files": [{
+                "path": "core/research_manager.py",
+                "reason": "repair",
+                "operations": [{"op": "insert_after", "anchor": "x", "content": "y"}],
+            }],
+        }),
+        json.dumps({
+            "summary": "second",
+            "files": [{
+                "path": "core/research_manager.py",
+                "reason": "repair",
+                "operations": [{"op": "insert_after", "anchor": "x", "content": "z"}],
+            }],
+        }),
+    ))
+    prompts: list[str] = []
+
+    def request(prompt, **_kwargs):
+        prompts.append(prompt)
+        return next(responses)
+
+    engine._request_code_model_json = request
+    engine.editor = SimpleNamespace(
+        create_proposal=lambda _raw: SimpleNamespace(
+            summary="repair",
+            files=(SimpleNamespace(path="core/research_manager.py"),),
+        ),
+        reject=lambda: None,
+    )
+
+    globals_map = AssistantEngine._generate_validated_own_code_proposal.__globals__
+    workspace_error = globals_map["WorkspaceError"]
+    structural_calls = {"count": 0}
+
+    def structural(payload, **_kwargs):
+        structural_calls["count"] += 1
+        if structural_calls["count"] == 1:
+            raise workspace_error(
+                "Çıkarılan blok replacement alanında `self.<yardımcı_metot>(...)` "
+                "çağrısı zorunlu: core/research_manager.py işlem 2"
+            )
+        return payload
+
+    for name in (
+        "merge_duplicate_operation_rows",
+        "ground_requested_docstring_replace_anchors",
+        "repair_high_confidence_missing_anchors",
+        "remove_redundant_noop_replaces",
+        "qualify_inserted_private_helper_calls",
+        "normalize_structural_class_method_insertions",
+        "repair_unique_whitespace_anchors",
+        "repair_ambiguous_replace_anchors",
+        "reorder_insertions_after_exact_edits",
+    ):
+        monkeypatch.setitem(globals_map, name, lambda payload, **_kwargs: payload)
+
+    monkeypatch.setitem(globals_map, "normalize_structural_method_block_replacements", structural)
+    monkeypatch.setitem(
+        globals_map,
+        "validate_behavior_preserving_extraction_payload",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setitem(
+        globals_map,
+        "build_structural_method_block_guidance",
+        lambda **_kwargs: "",
+    )
+
+    proposal = engine._generate_validated_own_code_proposal(
+        "repair approved target",
+        max_attempts=1,
+        strict_attempt_limit=True,
+    )
+
+    assert proposal.summary == "repair"
+    assert len(prompts) == 2
+    assert "STRUCTURAL CONTRACT RECOVERY (MANDATORY)" in prompts[1]
+    assert "self.<yardımcı_metot>" in prompts[1]

@@ -393,6 +393,16 @@ def normalize_structural_method_block_replacements(
     requested = _requested_symbol(instruction)
     root = Path(project_root).resolve(strict=False)
     normalized_instruction = str(instruction or "").casefold()
+    behavior_preserving_extraction = (
+        (
+            "davranışı değiştirmeden" in normalized_instruction
+            or "davranisi degistirmeden" in normalized_instruction
+        )
+        and any(
+            word in normalized_instruction
+            for word in ("çıkar", "cikar", "ayır", "ayir", "extract")
+        )
+    )
     active_dialogue_request = (
         requested == ("WakeWordWorker", "run")
         and any(word in normalized_instruction for word in ("aktif diyalog", "active dialogue"))
@@ -554,7 +564,7 @@ def normalize_structural_method_block_replacements(
                     if isinstance(row, ast.If)
                 ]
             selector_was_copied = wanted in replacement_if_tests
-            if (
+            if behavior_preserving_extraction and (
                 selector_was_copied
                 or len(replacement_lines) > 12
                 or dedented_replacement.lstrip().startswith((
@@ -576,40 +586,41 @@ def normalize_structural_method_block_replacements(
                     f"Yapısal blok replacement sözdizimi geçersiz: {raw_path} "
                     f"işlem {operation_index}; {exc.msg}"
                 ) from exc
-            self_calls = [
-                node for node in ast.walk(replacement_tree)
-                if isinstance(node, ast.Call)
-                and isinstance(node.func, ast.Attribute)
-                and isinstance(node.func.value, ast.Name)
-                and node.func.value.id == "self"
-            ]
-            if not self_calls:
-                raise WorkspaceError(
-                    "Çıkarılan blok replacement alanında `self.<yardımcı_metot>(...)` "
-                    f"çağrısı zorunlu: {raw_path} işlem {operation_index}"
+            if behavior_preserving_extraction:
+                self_calls = [
+                    node for node in ast.walk(replacement_tree)
+                    if isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and isinstance(node.func.value, ast.Name)
+                    and node.func.value.id == "self"
+                ]
+                if not self_calls:
+                    raise WorkspaceError(
+                        "Çıkarılan blok replacement alanında `self.<yardımcı_metot>(...)` "
+                        f"çağrısı zorunlu: {raw_path} işlem {operation_index}"
+                    )
+                first_statement = replacement_tree.body[0] if replacement_tree.body else None
+                first_value: ast.AST | None = None
+                if isinstance(first_statement, ast.Expr):
+                    first_value = first_statement.value
+                elif isinstance(first_statement, (ast.Assign, ast.AnnAssign)):
+                    first_value = first_statement.value
+                direct_self_call = (
+                    isinstance(first_value, ast.Call)
+                    and isinstance(first_value.func, ast.Attribute)
+                    and isinstance(first_value.func.value, ast.Name)
+                    and first_value.func.value.id == "self"
                 )
-            first_statement = replacement_tree.body[0] if replacement_tree.body else None
-            first_value: ast.AST | None = None
-            if isinstance(first_statement, ast.Expr):
-                first_value = first_statement.value
-            elif isinstance(first_statement, (ast.Assign, ast.AnnAssign)):
-                first_value = first_statement.value
-            direct_self_call = (
-                isinstance(first_value, ast.Call)
-                and isinstance(first_value.func, ast.Attribute)
-                and isinstance(first_value.func.value, ast.Name)
-                and first_value.func.value.id == "self"
-            )
-            if not direct_self_call:
-                raise WorkspaceError(
-                    "replace_method_block replacement alanında yardımcı çağrı "
-                    "başka bir if/while/try bloğuna sarılmamalı. Seçilen if düğümü "
-                    "AST tarafından bütünüyle kaldırılır; replacement doğrudan "
-                    "`self.<yardımcı_metot>(...)` çağrısıyla başlamalı. Örnek: "
-                    '"replacement": "self._listen_active_dialogue()". Tam davranış '
-                    "ve gerekli girdiler yardımcı metodun content alanında olmalı: "
-                    f"{raw_path} işlem {operation_index}"
-                )
+                if not direct_self_call:
+                    raise WorkspaceError(
+                        "replace_method_block replacement alanında yardımcı çağrı "
+                        "başka bir if/while/try bloğuna sarılmamalı. Seçilen if düğümü "
+                        "AST tarafından bütünüyle kaldırılır; replacement doğrudan "
+                        "`self.<yardımcı_metot>(...)` çağrısıyla başlamalı. Örnek: "
+                        '"replacement": "self._listen_active_dialogue()". Tam davranış '
+                        "ve gerekli girdiler yardımcı metodun content alanında olmalı: "
+                        f"{raw_path} işlem {operation_index}"
+                    )
             target = matches[0]
             start = int(target.lineno) - 1
             end = int(getattr(target, "end_lineno", target.lineno))
