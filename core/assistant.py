@@ -1603,13 +1603,10 @@ class AssistantEngine:
 
         for attempt in range(1, attempts + 1):
             if attempt > base_attempts:
-                if strict_attempt_limit:
-                    if not anchor_retry_guidance:
-                        break
-                elif (
-                    not anchor_retry_guidance
-                    and not helper_shape_retry_guidance
-                    and not existing_helper_retry_guidance
+                if not (
+                    anchor_retry_guidance
+                    or helper_shape_retry_guidance
+                    or existing_helper_retry_guidance
                 ):
                     break
             current_prompt = prompt
