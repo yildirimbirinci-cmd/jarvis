@@ -152,3 +152,31 @@ def test_render_does_not_claim_execution() -> None:
     assert "henuz baslatilmadi" in rendered
     assert "Example.run official documentation" in rendered
     assert "dogrudan uygulanamaz" in rendered
+
+
+def test_approval_accepts_same_id_with_runtime_directives() -> None:
+    session = EvidenceResearchApprovalSession.create(
+        _plan()
+    )
+
+    assert approval_matches(
+        (
+            f"{session.approval_id} arastirma oturumunu onayla. "
+            "Yalniz arastir; hicbir kodu degistirme."
+        ),
+        session,
+    )
+
+
+def test_approval_directives_never_allow_wrong_id() -> None:
+    session = EvidenceResearchApprovalSession.create(
+        _plan()
+    )
+
+    assert not approval_matches(
+        (
+            "RS-0000000000 arastirma oturumunu onayla. "
+            "Yalniz arastir; hicbir kodu degistirme."
+        ),
+        session,
+    )

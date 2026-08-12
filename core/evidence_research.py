@@ -6,6 +6,7 @@ from typing import Iterable
 from artmach_assistant.core.evidence_maintenance import (
     EvidenceMaintenanceFinding,
 )
+from artmach_assistant.core.code_research_target_resolver import resolve_code_target
 from artmach_assistant.core.evidence_retest_executor import (
     RETEST_BLOCKED,
     RETEST_FAILED,
@@ -106,22 +107,14 @@ def _unique(values: Iterable[str]) -> tuple[str, ...]:
 def _resolved_finding_location(
     finding: EvidenceMaintenanceFinding,
 ) -> EvidenceMaintenanceFinding:
-    path = str(finding.path or "").strip()
-    symbol = str(finding.symbol or "").strip()
-    title = str(finding.title or "").casefold()
-    source = str(finding.source or "").casefold()
-
-    if (
-        source == "runtime"
-        and "taskorchestrator.execute_task" in title
-    ):
-        path = path or "core/task_orchestrator.py"
-        symbol = symbol or "TaskOrchestrator.wrap.execute"
-
-    if path == finding.path and symbol == finding.symbol:
-        return finding
-
-    return replace(finding, path=path, symbol=symbol)
+    resolution = resolve_code_target(finding)
+    if not resolution.resolved:
+        return replace(finding, path="", symbol="")
+    return replace(
+        finding,
+        path=resolution.target.path,
+        symbol=resolution.target.symbol,
+    )
 
 
 def _external_queries(
@@ -184,6 +177,16 @@ def build_evidence_research_plan(
             "Arastirma sonucu mevcut validator ve worktree zincirini atlayamaz.",
         ),
     }
+    if not str(finding.path or "").strip():
+        return EvidenceResearchPlan(
+            status=BLOCKED,
+            reason=(
+                "Yapilandirilmis kaynak hedefi cozulmedi. Baslik veya hata metninden "
+                "dosya/sembol tahmini yapilmayacak; once runtime/static kanit gercek "
+                "source path hedefini uretmeli."
+            ),
+            **common,
+        )
     if retest_result is not None:
         if retest_result.status == RETEST_PASSED:
             return EvidenceResearchPlan(

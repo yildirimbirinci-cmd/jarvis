@@ -21,7 +21,7 @@ class DuckDuckGoLiteProvider(SearchProvider):
             self.endpoint,
             params={"q": query},
             headers={"User-Agent": self.user_agent},
-            timeout=20,
+            timeout=6,
         )
         response.raise_for_status()
         raw_html = self.bounded_response_text(

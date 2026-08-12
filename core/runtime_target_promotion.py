@@ -119,14 +119,25 @@ def build_target_override(
     *,
     source_fingerprint: str,
 ) -> RuntimeTargetOverride | None:
-    if str(getattr(finding, "category", "") or "") != "repeated_slow_operation":
-        return None
     if not bool(getattr(report, "locally_confirmed", False)):
+        return None
+
+    category = str(getattr(finding, "category", "") or "").strip()
+    promotable_categories = {
+        "repeated_slow_operation",
+        "repeated_type_error",
+        "repeated_attribute_error",
+        "repeated_name_error",
+        "repeated_import_error",
+        "repeated_runtime_contract_error",
+    }
+    if category not in promotable_categories:
         return None
 
     action_ms = float(getattr(report, "action_median_ms", 0.0) or 0.0)
     wrapper_ms = float(getattr(report, "wrapper_median_ms", 0.0) or 0.0)
-    if action_ms <= max(wrapper_ms * 3.0, wrapper_ms + 1.0):
+    timing_evidence_present = action_ms > 0.0 or wrapper_ms > 0.0
+    if timing_evidence_present and action_ms <= max(wrapper_ms * 3.0, wrapper_ms + 1.0):
         return None
 
     source_path = str(getattr(report, "action_target_path", "") or "").strip().replace("\\", "/")
@@ -161,17 +172,14 @@ def apply_target_override(
         return finding
     if override.source_fingerprint != str(current_source_fingerprint or "").strip():
         return finding
-    if finding.category != "repeated_slow_operation":
-        return finding
-
     explanation = (
-        f"{finding.explanation} Yerel runtime dogrulamasi wrapper yerine "
-        f"{override.source_path} - {override.symbol} hedefini kanitladi."
+        f"{finding.explanation} Yerel runtime dogrulamasi "
+        f"{override.source_path} - {override.symbol} hedefini dogruladi."
     )
     recommendation = (
-        "Yalnizca yerel runtime dogrulamasinin gosterdigi gercek action hedefini "
-        "incele; once alt asama olcumlerini kullan, sonra en kucuk davranis-koruyan "
-        "duzeltmeyi mevcut validator/worktree zincirinde hazirla."
+        "Yalnizca yerel runtime kanitinin gosterdigi gercek hedefi incele; "
+        "kaynak ve test sozlesmesini dogrula, kok nedeni kanitla ve ancak sonra "
+        "en kucuk davranis-koruyan duzeltmeyi mevcut validator/worktree zincirinde hazirla."
     )
     return replace(
         finding,

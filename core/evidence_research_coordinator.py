@@ -5,6 +5,7 @@ from dataclasses import dataclass, replace
 from artmach_assistant.core.evidence_maintenance import (
     EvidenceMaintenanceFinding,
 )
+from artmach_assistant.core.code_research_query_planner import plan_external_code_queries
 from artmach_assistant.core.evidence_research import (
     EXTERNAL_APPROVAL_REQUIRED,
     LOCAL_REVIEW,
@@ -52,32 +53,24 @@ def _unique(values: tuple[str, ...]) -> tuple[str, ...]:
 def _external_queries(
     finding: EvidenceMaintenanceFinding,
 ) -> tuple[str, ...]:
-    title = str(finding.title or "").strip()
-    symbol = str(finding.symbol or "").strip()
-
-    lowered = f"{title} {symbol}".casefold()
-
-    if (
-        "yavas" in lowered
-        or "slow" in lowered
-        or "performance" in lowered
+    title_key = str(finding.title or "").casefold()
+    evidence_key = str(finding.evidence or "").casefold()
+    combined = title_key + " " + evidence_key
+    if any(
+        token in combined
+        for token in ("yavas", "slow", "latency", "performance")
     ):
-        return _unique(
-            (
-                "Python cProfile performance profiling official documentation",
-                "Python task execution latency profiling official documentation",
-                "Python decorator wrapper performance profiling",
-                "Python concurrent task orchestration performance diagnostics",
-            )
+        return (
+            "Python cProfile official documentation performance profiling",
+            "Python profiling deterministic profiler official documentation",
+            "Python performance measurement profiling best practices",
+            "Python runtime latency profiling official documentation",
         )
 
-    return _unique(
-        (
-            "Python runtime diagnostics official documentation",
-            "Python exception debugging official documentation",
-            "Python regression testing official documentation",
-            "Python application reliability diagnostics",
-        )
+    return plan_external_code_queries(
+        title=finding.title,
+        path=finding.path,
+        symbol=finding.symbol,
     )
 
 
@@ -175,7 +168,11 @@ class EvidenceResearchCoordinator:
             if existing.approval_id == created.approval_id:
                 return EvidenceResearchCoordinationResult(
                     status=EXTERNAL_APPROVAL_PENDING,
-                    report=render_pending_session(existing),
+                    report=(
+                        render_pending_session(existing)
+                        + "\nInternet arastirmasi henuz baslatilmadi. "
+                        "Acik kullanici onayi gerekiyor."
+                    ),
                     plan=external_plan,
                     approval_session=existing,
                 )
@@ -187,8 +184,8 @@ class EvidenceResearchCoordinator:
                     f"Mevcut onay kimligi: {existing.approval_id}\n"
                     f"Mevcut bulgu: {existing.title}\n"
                     "Yeni arastirma oturumu acilmadi. Once mevcut "
-                    "oturumu onayla veya iptal et. Internet "
-                    "arastirmasi baslatilmadi."
+                    "oturumu onayla veya iptal et. "
+                    "Internet arastirmasi henuz baslatilmadi."
                 ),
                 plan=external_plan,
                 approval_session=existing,
@@ -198,7 +195,11 @@ class EvidenceResearchCoordinator:
 
         return EvidenceResearchCoordinationResult(
             status=EXTERNAL_APPROVAL_PENDING,
-            report=render_pending_session(created),
+            report=(
+                render_pending_session(created)
+                + "\nInternet arastirmasi henuz baslatilmadi. "
+                "Acik kullanici onayi gerekiyor."
+            ),
             plan=external_plan,
             approval_session=created,
         )

@@ -7,7 +7,7 @@ import tokenize
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
+from typing import Callable, Iterable
 
 from artmach_assistant.core.project_index import IGNORED_DIRS
 from artmach_assistant.core.workspace import WorkspaceService
@@ -93,7 +93,11 @@ class CodeReviewService:
     def __init__(self, workspace: WorkspaceService) -> None:
         self.workspace = workspace
 
-    def analyze(self) -> CodeReviewAnalysis:
+    def analyze(
+        self,
+        *,
+        cancel_check: Callable[[], bool] | None = None,
+    ) -> CodeReviewAnalysis:
         """Return structured, read-only findings for reuse by architecture tools."""
 
         root = Path(self.workspace.require_root()).expanduser().resolve(strict=False)
@@ -104,6 +108,8 @@ class CodeReviewService:
         scan_limit_reached = False
 
         for path in self._iter_candidates(root):
+            if cancel_check is not None and cancel_check():
+                raise InterruptedError("Code review cancelled")
             if scanned >= _MAX_FILES:
                 scan_limit_reached = True
                 break
@@ -123,7 +129,12 @@ class CodeReviewService:
             if python_source:
                 self._scan_python(text, rel, signatures, signature_locations, issues)
 
+        if cancel_check is not None and cancel_check():
+            raise InterruptedError("Code review cancelled")
+
         for (name, argc), count in signatures.items():
+            if cancel_check is not None and cancel_check():
+                raise InterruptedError("Code review cancelled")
             if count < 4 or len(issues) >= _MAX_ISSUES:
                 continue
             locations = signature_locations.get((name, argc), ())

@@ -21,7 +21,7 @@ from artmach_assistant.core.evidence_engineering_plan import (
 )
 from artmach_assistant.core.evidence_patch_proposal import (
     EvidencePatchProposal,
-    build_evidence_patch_proposal,
+    build_guarded_evidence_patch_proposal,
 )
 from artmach_assistant.core.research_manager import (
     ResearchManager,
@@ -519,7 +519,7 @@ def execute_approved_research(
             symbol=session.symbol,
         )
         patch_proposal = (
-            build_evidence_patch_proposal(
+            build_guarded_evidence_patch_proposal(
                 engineering_plan,
                 conclusion,
                 path=session.path,
@@ -570,7 +570,7 @@ def execute_approved_research(
         symbol=session.symbol,
     )
     patch_proposal = (
-        build_evidence_patch_proposal(
+        build_guarded_evidence_patch_proposal(
             engineering_plan,
             conclusion,
             path=session.path,

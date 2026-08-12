@@ -27,6 +27,14 @@ from artmach_assistant.core.memory_manager import MemoryManager
 from artmach_assistant.core.agent_manager import AgentManager
 from artmach_assistant.core.planning_manager import PlanningManager
 from artmach_assistant.core.research_manager import ResearchManager, ResearchResult
+from artmach_assistant.core.research_intent import parse_research_request
+from artmach_assistant.core.research_knowledge_store import ResearchKnowledgeStore
+from artmach_assistant.core.research_runtime_bridge import resolve_research_command
+from artmach_assistant.core.research_runtime_service import ResearchRuntimeService
+from artmach_assistant.core.research_retrieval_engine import ResearchRetrievalEngine
+from artmach_assistant.core.research_topic_state import ResearchTopicStateStore
+from artmach_assistant.core.fact_research_runtime import FactResearchRuntime
+from artmach_assistant.core.internet_policy import InternetPolicy
 from artmach_assistant.core.edit_manager import EditManager, EditProposal
 from artmach_assistant.core.extract_method_refactoring import (
     ExtractMethodRefactoring,
@@ -403,7 +411,9 @@ class AssistantEngine:
         self.memory = MemoryManager(memory_constitution)
         self.planning = PlanningManager(planning_constitution)
         self.agents = AgentManager(agent_constitution)
-        self.researcher = ResearchManager()
+        self.internet_policy = InternetPolicy()
+        self.internet_status = self.internet_policy.prepare_startup_connection()
+        self.researcher = ResearchManager(self.internet_policy)
         self.architecture = ArchitectureService(self.workspace)
         self.self_awareness = SelfAwarenessEngine(
             self.own_project_root(), constitution=sae_constitution
@@ -561,9 +571,23 @@ class AssistantEngine:
         self.pending_research_query = ""
         self.pending_research_mode = ""
         self.pending_research_own_code = False
+        self.research_knowledge = ResearchKnowledgeStore()
+        self.research_topic_state = ResearchTopicStateStore()
+        self.research_retrieval = ResearchRetrievalEngine(
+            self.research_knowledge, self.research_topic_state
+        )
+        self.research_runtime = ResearchRuntimeService(
+            self.researcher,
+            self.dialogue,
+            self.research_knowledge,
+            topic_state=self.research_topic_state,
+            research_executor=self.research,
+        )
+        self.pending_research_learn = False
         # Öğrenilmiş cümleler kodun içinde değil, kullanıcının bilgisayarındaki
         # bu kalıcı yerel hafızada tutulur.
         self.learning_memory = LearningMemory()
+        self.fact_research = FactResearchRuntime()
         self.skills = SkillRegistry()
         self.skills.sync_learning(self.learning_memory.records)
         self.own_code_history = OwnCodeHistory()
@@ -751,9 +775,172 @@ class AssistantEngine:
             )
         return None
 
+    @staticmethod
+    def _research_followup_action_only(before: str, after: str) -> bool:
+        """Return True when a research command contains no new topic.
+
+        Examples:
+        - "internette araştır ve bulduklarını kısaca bana anlat"
+        - "webde ara ve sonuçları özetle"
+        - "internetten araştır, öğren ve kaydet"
+
+        A command that includes a real new subject must return False so the
+        previous factual question is never stolen accidentally.
+        """
+        action_words = {
+            "", "ve", "ara", "arastir", "bul", "bulduklarini", "buldugunu",
+            "buldugun", "sonuclari", "sonucu", "kaynaklari", "kisaca", "kisa",
+            "ozetle", "ozet", "bana", "anlat", "goster", "ogren", "dogrula",
+            "kontrol", "et", "kaydet", "hafizaya", "hafizana", "hatirla",
+            "kalici", "olarak", "detaylari", "detaylarini", "acikla",
+        }
+
+        tokens = [
+            token.strip(" :,-.?!")
+            for token in f"{before} {after}".split()
+            if token.strip(" :,-.?!")
+        ]
+        return bool(tokens) and all(token in action_words for token in tokens)
+
+    def _research_context_messages(self) -> list[dict[str, str]]:
+        reader = getattr(self.dialogue, "_recent_history", None)
+        if callable(reader):
+            try:
+                rows = reader()
+            except Exception:
+                rows = ()
+        else:
+            rows = getattr(self.dialogue, "history", ())
+        messages = [
+            {"role": str(row.get("role", "")), "content": str(row.get("content", ""))}
+            for row in rows
+            if isinstance(row, dict)
+            and str(row.get("role", "")).casefold() in {"user", "assistant"}
+            and str(row.get("content", "")).strip()
+        ]
+        if messages:
+            return messages
+        latest_user_message = getattr(self.dialogue, "latest_user_message", None)
+        if callable(latest_user_message):
+            try:
+                latest = str(latest_user_message(exclude="") or "").strip()
+            except (TypeError, ValueError):
+                latest = ""
+            if latest:
+                return [{"role": "user", "content": latest}]
+        return []
+
+    def _execute_general_research_command(self, text: str) -> str:
+        context_messages = self._research_context_messages()
+        runtime = getattr(self, "research_runtime", None)
+        if runtime is None:
+            command = resolve_research_command(text, context_messages)
+            if command is None:
+                return "Internette arastirmami istedigin konuyu soyle."
+            relation = str(command.request.topic.relation or "").strip()
+            query = command.request.topic.subject
+            resolved_question = str(command.request.topic.original_question or "").strip()
+            raw_request = str(command.request.raw_text or "").strip()
+            if resolved_question and raw_request and resolved_question != raw_request:
+                canonical_query = resolved_question
+            else:
+                if relation.casefold() not in {"", "general", "identity", "related_to"}:
+                    query = f"{query} {relation}"
+                canonical_query = self.command_key(query)
+            result = self.research(canonical_query)
+            learned = False
+            if command.request.wants_learning:
+                learned = self._learn_verified_research_fact(
+                    canonical_query, result
+                )
+            fact_runtime = getattr(self, "fact_research", None)
+            if fact_runtime is not None:
+                fact_runtime.remember_research(canonical_query, result, learned=learned)
+            report = result.report()
+            if learned:
+                report += "\n\nÖĞRENME: Doğrulanmış bilgiyi kalıcı yerel bilgi hafızama kaydettim."
+            remember = getattr(self, "_remember_action_context", None)
+            if callable(remember):
+                remember("internet_research", command.request.topic.subject, report)
+            return report
+
+        outcome = self.research_runtime.execute(text, context_messages)
+        if outcome is None:
+            return "Internette arastirmami istedigin konuyu soyle."
+        fact_runtime = getattr(self, "fact_research", None)
+        if fact_runtime is not None:
+            fact_runtime.remember_research(
+                str(outcome.result.query or outcome.command.request.topic.subject),
+                outcome.result,
+                learned=outcome.learned,
+            )
+        report = outcome.result.report()
+        if outcome.learned:
+            report += (
+                "\n\nOGRENME: Dogrulanmis arastirma bilgisi kalici "
+                "arastirma hafizasina kaydedildi."
+            )
+        self._remember_action_context(
+            "internet_research",
+            outcome.command.request.topic.subject,
+            report,
+        )
+        return report
+
+    def _auto_research_world_fact(self, text: str, resolved_fact_text: str) -> str | None:
+        policy = getattr(self, "internet_policy", None)
+        try:
+            if policy is None:
+                result = self.research(resolved_fact_text)
+            else:
+                with policy.research_scope("answer_unknown"):
+                    result = self.research(resolved_fact_text)
+        except (OSError, RuntimeError, TypeError, ValueError, PermissionError):
+            return None
+        fact_runtime = getattr(self, "fact_research", None)
+        if fact_runtime is not None:
+            fact_runtime.remember_research(resolved_fact_text, result, learned=False)
+        if not bool(getattr(result, "evidence_learnable", False)):
+            return None
+        if not str(getattr(result, "summary", "") or "").strip():
+            return None
+        report = result.report()
+        dialogue = getattr(self, "dialogue", None)
+        remember = getattr(dialogue, "remember", None)
+        if callable(remember):
+            remember(text, report)
+        return report
+
+    def _research_knowledge_recall(self, text: str) -> str | None:
+        retrieval = getattr(self, "research_retrieval", None)
+        if retrieval is None:
+            return None
+        try:
+            recalled = retrieval.recall(text)
+        except (OSError, TypeError, ValueError):
+            return None
+        if recalled is None or not recalled.found:
+            return None
+        rows = tuple(recalled.records)
+        if not rows:
+            return None
+        statements: list[str] = []
+        seen: set[str] = set()
+        for row in rows:
+            value = str(getattr(row, "object", "") or "").strip()
+            key = value.casefold()
+            if not value or key in seen:
+                continue
+            seen.add(key)
+            statements.append(value)
+        if not statements:
+            return None
+        return "\n".join(statements)
+
     def _internet_research_request(self, text: str) -> str | None:
         normalized = self.command_key(text)
         words = normalized.split()
+        # Yalnızca açıkça istenen araştırma komutları internet yoluna girer.
         allow_phrases = {
             "internet arastirmasina izin ver",
             "internette arama yapmana izin veriyorum",
@@ -786,13 +973,19 @@ class AssistantEngine:
                 return self.research_project_improvements(
                     own_code=pending_own_code
                 )
-            query = self.pending_research_query
+            pending_command = self.pending_research_query
             self.pending_research_query = ""
-            if query:
-                return self.research(query).report()
+            if pending_command:
+                policy = getattr(self, "internet_policy", None)
+                if policy is None:
+                    result = self.research(pending_command)
+                    report = getattr(result, "report", None)
+                    return report() if callable(report) else str(result)
+                with policy.research_scope("explicit_user_research"):
+                    return self._execute_general_research_command(pending_command)
             return (
-                "İnternet araştırmasına izin verildi. Yalnızca açıkça "
-                "araştırmamı istediğin sorgularda ağı kullanacağım."
+                "Internet arastirmasina izin verildi. Yalnizca acikca "
+                "arastirmami istedigin sorgularda agi kullanacagim."
             )
         asks_capability = (
             any(word.startswith(("internet", "web")) for word in words)
@@ -808,23 +1001,32 @@ class AssistantEngine:
                 f"İnternet araştırması şu anda {state}. "
                 "Kapalıysa 'internet araştırmasına izin ver' diyerek açabilirsin."
             )
-        markers = ("internette ara", "internetten arastir", "internette arastir", "webde ara")
-        marker = next((item for item in markers if item in normalized), "")
-        if not marker:
+
+        request = parse_research_request(text)
+        if request is None:
             return None
-        query = normalized.split(marker, 1)[1].strip(" :,-")
-        if not query:
-            return "İnternette araştırmamı istediğin konuyu söyle."
-        if not self.config.internet_research_enabled:
-            self.pending_research_query = query
-            self.pending_research_mode = ""
-            self.pending_research_own_code = False
-            self.dialogue_active = True
-            return (
-                f"'{query}' için internete bağlanmam gerekiyor. "
-                "Bu araştırmaya izin veriyorsan 'internet araştırmasına izin ver' de."
-            )
-        return self.research(query).report()
+        resolved = resolve_research_command(
+            text,
+            self._research_context_messages(),
+        )
+        if resolved is None:
+            return "Internette arastirmami istedigin konuyu soyle."
+        policy = getattr(self, "internet_policy", None)
+        if policy is None:
+            # Compatibility for lightweight/test engines that predate the
+            # central InternetPolicy. Production startup installs the policy.
+            if not bool(getattr(self.config, "internet_research_enabled", False)):
+                self.pending_research_query = str(text or "").strip()
+                self.pending_research_query = self.command_key(
+                    resolved.request.topic.subject
+                )
+                return (
+                    "Internet arastirmasi icin izin gerekiyor. "
+                    "'internet arastirmasina izin ver' diyerek devam edebilirsin."
+                )
+            return self._execute_general_research_command(text)
+        with policy.research_scope("explicit_user_research"):
+            return self._execute_general_research_command(text)
 
     def _project_improvement_runtime(self) -> ProjectImprovementRuntime:
         """Return the shared architecture improvement runtime.
@@ -9215,20 +9417,182 @@ class AssistantEngine:
         return None
 
     def research(self, query: str) -> ResearchResult:
-        if not self.config.internet_research_enabled:
-            raise PermissionError(
-                "İnternet araştırması kapalı. Açık izin vermek için "
-                "'internet araştırmasına izin ver' de."
+        policy = getattr(self, "internet_policy", None)
+        if policy is not None:
+            policy.require_research_access()
+        planned_queries = ()
+        plan_queries = getattr(self.dialogue, "plan_research_queries", None)
+        if callable(plan_queries):
+            try:
+                planned_queries = plan_queries(
+                    query,
+                    cancel_check=self._interaction_cancelled,
+                    progress_callback=self._interaction_model_progress,
+                )
+            except (RuntimeError, ValueError, TypeError):
+                planned_queries = ()
+        expanded_queries = ResearchManager.compose_query_plan(query, planned_queries)
+
+        # Resolve a factual multi-token entity first.  This is the normal web
+        # search behavior a user expects: find the entity page, then answer the
+        # original relation from that page.  It also avoids waiting for several
+        # failing provider calls when the exact entity is already found.
+        entity_seed = ResearchManager.entity_seed_query(query)
+        result = None
+        if entity_seed:
+            try:
+                seeded = self.researcher.search(entity_seed, max_results=4)
+            except (RuntimeError, ValueError, TypeError):
+                seeded = None
+            if seeded is not None and getattr(seeded, "sources", None):
+                seeded.query = query
+                result = seeded
+
+        if result is None:
+            search_many = getattr(self.researcher, "search_many", None)
+            if callable(search_many) and len(expanded_queries) > 1:
+                try:
+                    expanded_results = search_many(
+                        expanded_queries, max_results_per_query=4
+                    )
+                except (RuntimeError, ValueError, TypeError):
+                    expanded_results = []
+                if expanded_results:
+                    result = ResearchManager.merge_results(query, expanded_results)
+                else:
+                    result = self.researcher.search(query)
+            else:
+                result = self.researcher.search(query)
+        result.search_queries = tuple(expanded_queries)
+        # Extract query-matching passages before synthesis.  Passing whole web
+        # pages to a small local model made it answer from unrelated sections
+        # even when the correct sentence was present in a snippet/page.
+        query_evidence = ResearchManager.query_evidence_many(expanded_queries, result.sources)
+        if query_evidence:
+            source_context = "\n".join(
+                f"[{index}] {passage}\nURL: {url}"
+                for index, (passage, url) in enumerate(query_evidence, 1)
+            )[:24000]
+        else:
+            source_context = ""
+        answer_from_evidence = getattr(self.dialogue, "answer_from_evidence", None)
+        if callable(answer_from_evidence) and source_context:
+            summary = answer_from_evidence(
+                query,
+                source_context,
+                cancel_check=self._interaction_cancelled,
+                progress_callback=self._interaction_model_progress,
             )
-        result = self.researcher.search(query)
-        source_context = result.source_text()[:24000]
-        summary = self.dialogue.respond(
-            "Aşağıdaki internet araştırmasını Türkçe özetle. Yalnızca verilen "
-            "kaynaklara dayan; kaynak numaralarını ilgili cümlelerde belirt.\n\n"
-            f"SORU: {query}\n\nKAYNAKLAR:\n{source_context}"
+        else:
+            summary = None
+        candidate = str(summary or "").strip()
+        if candidate:
+            candidate = ResearchManager.grounded_answer(query, candidate, result.sources)
+        candidate_is_complete = bool(
+            candidate
+            and ResearchManager.answer_relevant_to_query(query, candidate)
+            and ResearchManager.answer_satisfies_question(query, candidate)
         )
-        result.summary = summary or "Kaynaklar bulundu; yerel özet modeli yanıt vermedi."
+        assessment = (
+            ResearchManager.assess_evidence(query, candidate, result.sources, query_variants=expanded_queries)
+            if candidate_is_complete
+            else ResearchManager.assess_evidence(query, "", result.sources)
+        )
+        result.evidence_confidence = assessment.confidence
+        result.evidence_domains = assessment.independent_domains
+        result.claim_key = assessment.claim_key
+        result.evidence_learnable = bool(assessment.learnable)
+        if not assessment.learnable:
+            result.summary = "Kaynaklar bu soruyu güvenilir biçimde doğrulamıyor."
+        else:
+            result.summary = candidate
         return result
+
+    @staticmethod
+    def _research_answer_is_learnable(answer: str) -> bool:
+        compact = str(answer or "").strip()
+        if not compact:
+            return False
+        lowered = compact.casefold()
+        blocked = (
+            "kaynaklar bu soruyu güvenilir biçimde doğrulamıyor",
+            "doğrulanmış kanıtım yok",
+            "emin değilim",
+        )
+        return not any(marker in lowered for marker in blocked)
+
+    def _learn_verified_research_fact(
+        self, query: str, result: ResearchResult
+    ) -> bool:
+        """Persist only an explicitly requested, evidence-grounded fact."""
+        answer = str(getattr(result, "summary", "") or "").strip()
+        sources = list(getattr(result, "sources", ()) or ())
+        if (
+            not sources
+            or not self._research_answer_is_learnable(answer)
+            or not ResearchManager.answer_relevant_to_query(query, answer)
+        ):
+            return False
+        assessment = ResearchManager.assess_evidence(
+            query,
+            answer,
+            sources,
+            query_variants=tuple(getattr(result, "search_queries", ()) or ()),
+        )
+        if assessment.conflicted:
+            record_conflict = getattr(self.learning_memory, "record_fact_conflict", None)
+            if callable(record_conflict):
+                conflict_passages = list(assessment.passages)
+                record_conflict(
+                    query,
+                    evidence="\n".join(passage for passage, _url in conflict_passages)[:6000],
+                    evidence_urls=[url for _passage, url in conflict_passages if str(url or "").strip()],
+                    claim_key=assessment.claim_key,
+                    confidence=assessment.confidence,
+                )
+            self.learning_memory.audit("çelişkili araştırma kanıtı kaydedildi", konu=query)
+            return False
+        if not assessment.learnable:
+            return False
+        supporting = list(assessment.passages)
+        evidence_text = "\n".join(passage for passage, _url in supporting)[:6000]
+        evidence_urls = []
+        for _passage, url in supporting:
+            clean_url = str(url or "").strip()
+            if clean_url and clean_url not in evidence_urls:
+                evidence_urls.append(clean_url)
+        teach_verified = getattr(self.learning_memory, "teach_verified_fact", None)
+        if callable(teach_verified):
+            teach_verified(
+                query,
+                response=answer,
+                source="verified_internet_research_v2",
+                confidence=1.0,
+                evidence=evidence_text,
+                evidence_urls=evidence_urls,
+                claim_key=assessment.claim_key,
+                claim_subject=" ".join(assessment.subject_tokens),
+                claim_relation=" ".join(assessment.relation_tokens),
+                evidence_confidence=assessment.confidence,
+                provenance_version="research_fact_v5",
+                atomic_claims=ResearchManager.atomic_claims(answer),
+            )
+        else:
+            self.learning_memory.teach(
+                "verified_fact",
+                query,
+                response=answer,
+                source="verified_internet_research_v2",
+                confidence=1.0,
+                evidence=evidence_text,
+                evidence_url=evidence_urls[0] if evidence_urls else "",
+            )
+        self.learning_memory.audit(
+            "doğrulanmış internet bilgisi öğrenildi",
+            konu=query,
+            kaynak_sayisi=str(len(sources)),
+        )
+        return True
 
     def add_memory(self, category: str, title: str, content: str) -> str:
         item = self.memory.add(self.config.workspace, category, title, content)
@@ -9419,7 +9783,7 @@ class AssistantEngine:
         if not callable(analyze):
             return RetestPlan(())
 
-        static_analysis = analyze()
+        static_analysis = analyze(cancel_check=self._interaction_cancelled)
         runtime_findings: tuple[RuntimeFinding, ...] = ()
 
         try:
@@ -10411,6 +10775,362 @@ class AssistantEngine:
         )
         explicit_state_report = state_subject and state_request
         return explicit_state_report or (state_subject and no_change)
+
+
+    def _runtime_subcall_measurement_execution_request(
+        self,
+        text: str,
+    ) -> str | None:
+        """Execute subcall evidence analysis without inventing unavailable timings."""
+        normalized = self.command_key(text)
+        has_measurement_context = any(
+            marker in normalized
+            for marker in (
+                "alt cagri olcum",
+                "subcall measurement",
+                "runtime event trace",
+                "run turn kimlikleri",
+                "dialogue_respond alt olcum",
+                "dialogue respond alt olcum",
+                "context hazirligi ollama_chat",
+                "context hazirligi ollama chat",
+            )
+        )
+        has_execute_intent = any(
+            marker in normalized
+            for marker in (
+                "simdi uygula",
+                "analiz et",
+                "calistir",
+                "yurut",
+                "uygula",
+            )
+        )
+        if not (has_measurement_context and has_execute_intent):
+            return None
+
+        finding_id = ""
+        match = re.search(r"RUN-[A-Z0-9]+", str(text or "").upper())
+        if match:
+            finding_id = match.group(0)
+        if not finding_id:
+            context = (
+                getattr(self, "active_runtime_measurement_context", None)
+                or getattr(self, "active_runtime_research_context", None)
+                or getattr(self, "last_action_context", None)
+                or {}
+            )
+            finding_id = str(context.get("finding_id", "") or "").strip()
+
+        finding = self._find_runtime_finding(finding_id) if finding_id else None
+        if finding is None:
+            return (
+                "ALT CAGRI OLCUM SONUCU\n"
+                "Durum: BLOCKED\n"
+                "Neden: Etkin runtime bulgusu bulunamadi.\n"
+                "Patch izni: hayir\n"
+                "Kaynak kodu degistirilmedi."
+            )
+
+        try:
+            events = self._runtime_event_service().recent(
+                limit=5000,
+                workspace=self._development_root(own_code=True),
+            )
+        except Exception:
+            events = ()
+
+        correlated = [
+            event
+            for event in events
+            if str(getattr(event, "status", "")) == "completed"
+            and str(
+                (getattr(event, "metadata", {}) or {}).get(
+                    "parent_correlation_id", ""
+                )
+            ).strip()
+            and str(
+                (getattr(event, "metadata", {}) or {}).get("turn_id", "")
+            ).strip()
+        ]
+        dialogue_phase_events = [
+            event
+            for event in correlated
+            if str((getattr(event, "metadata", {}) or {}).get("parent_action", ""))
+            == "dialogue_respond"
+        ]
+        deeper_events = [
+            event
+            for event in correlated
+            if str((getattr(event, "metadata", {}) or {}).get("parent_action", ""))
+            == "handle_local_command"
+        ]
+        child_events = dialogue_phase_events or deeper_events or [
+            event
+            for event in correlated
+            if str((getattr(event, "metadata", {}) or {}).get("parent_action", ""))
+            == "handle_command"
+        ]
+
+        if not child_events:
+            return (
+                "ALT CAGRI OLCUM SONUCU\n"
+                f"Bulgu: {finding_id}\n"
+                "Durum: INSUFFICIENT_TRACE_DATA\n"
+                "Kanit: Bounded nested-span destegi hazir, ancak bu kaynak "
+                "surumunde korelasyonlu yeni runtime ornegi henuz yok.\n"
+                "Gerekli sonraki adim: Ayni gercek kullanim senaryosunu en az "
+                "bir kez calistir ve olcumu tekrar iste.\n"
+                "Dominant cagri uydurulmadi.\n"
+                "Patch izni: hayir\n"
+                "Kaynak kodu degistirilmedi."
+            )
+
+        grouped: dict[str, list[float]] = {}
+        for event in child_events:
+            action = str(getattr(event, "action", "") or "").strip()
+            if not action:
+                continue
+            grouped.setdefault(action, []).append(
+                float(getattr(event, "duration_ms", 0.0) or 0.0)
+            )
+
+        if not grouped:
+            return (
+                "ALT CAGRI OLCUM SONUCU\n"
+                f"Bulgu: {finding_id}\n"
+                "Durum: INSUFFICIENT_TRACE_DATA\n"
+                "Kanit: Korelasyonlu span bulundu ancak olculebilir bounded "
+                "child action kaydi yok.\n"
+                "Dominant cagri uydurulmadi.\n"
+                "Patch izni: hayir\n"
+                "Kaynak kodu degistirilmedi."
+            )
+
+        rows = []
+        for action, values in grouped.items():
+            ordered = sorted(values)
+            median = ordered[len(ordered) // 2]
+            rows.append((median, action, len(values)))
+        rows.sort(reverse=True)
+
+        dominant_ms, dominant_action, sample_count = rows[0]
+        evidence_lines = "\n".join(
+            f"- {action}: ortanca {median:.3f} ms | ornek {count}"
+            for median, action, count in rows
+        )
+
+        return (
+            "ALT CAGRI OLCUM SONUCU\n"
+            f"Bulgu: {finding_id}\n"
+            "Durum: MEASURED\n"
+            f"Korelasyonlu bounded span: {len(child_events)}\n"
+            f"{evidence_lines}\n"
+            f"Dominant bounded cagri: {dominant_action} "
+            f"(ortanca {dominant_ms:.3f} ms, {sample_count} ornek)\n"
+            "Not: Bu karar yalniz instrument edilmis bounded child spanlar "
+            "arasindadir; instrument edilmemis alt cagrilar hakkinda iddia yapilmaz.\n"
+            "Patch izni: hayir\n"
+            "Kaynak kodu degistirilmedi."
+        )
+
+
+    def _runtime_subcall_measurement_request(
+        self,
+        text: str,
+    ) -> str | None:
+        """Handle explicit requests to localize runtime cost inside a promoted target."""
+        normalized = self.command_key(text)
+        intent = any(
+            marker in normalized
+            for marker in (
+                "sureyi domine eden cagri",
+                "sureyi domine eden alt cagri",
+                "cagri grubunu kanitla",
+                "dar kapsamli olcum",
+                "alt cagri olcumu",
+                "alt cagri olcum",
+                "subcall measurement",
+            )
+        )
+        if not intent:
+            return None
+
+        context = (
+            getattr(self, "active_runtime_research_context", None)
+            or getattr(self, "last_action_context", None)
+            or {}
+        )
+        finding_id = str(context.get("finding_id", "") or "").strip()
+        if not finding_id:
+            match = re.search(r"RUN-[A-Z0-9]+", str(text or "").upper())
+            finding_id = match.group(0) if match else ""
+
+        finding = self._find_runtime_finding(finding_id) if finding_id else None
+        if finding is None:
+            return (
+                "ALT CAGRI OLCUMU BASLATILAMADI: etkin runtime bulgusu bulunamadi. "
+                "Genel finding raporu uretilmedi ve kod degistirilmedi."
+            )
+
+        target_path = ""
+        target_symbol = ""
+
+        override = None
+        try:
+            override = self.runtime_target_override_store.load(finding_id)
+        except Exception:
+            override = None
+
+        if override is not None:
+            current_fingerprint = ""
+            try:
+                current_fingerprint = self._current_source_fingerprint(
+                    str(getattr(override, "source_path", "") or "")
+                )
+            except Exception:
+                current_fingerprint = ""
+
+            expected_fingerprint = str(
+                getattr(override, "source_fingerprint", "") or ""
+            ).strip()
+            if (
+                expected_fingerprint
+                and current_fingerprint
+                and expected_fingerprint == current_fingerprint
+            ):
+                target_path = str(
+                    getattr(override, "source_path", "") or ""
+                ).strip()
+                target_symbol = str(
+                    getattr(override, "symbol", "") or ""
+                ).strip()
+
+        if not target_path or not target_symbol:
+            target_path = next(
+                (
+                    str(v).strip()
+                    for v in tuple(getattr(finding, "affected_paths", ()) or ())
+                    if str(v or "").strip()
+                ),
+                "",
+            )
+            target_symbol = next(
+                (
+                    str(v).strip()
+                    for v in tuple(getattr(finding, "affected_symbols", ()) or ())
+                    if str(v or "").strip()
+                ),
+                "",
+            )
+
+        if not target_path or not target_symbol:
+            return (
+                "ALT CAGRI OLCUMU BASLATILAMADI: yapilandirilmis hedef yok. "
+                "Hedef tahmin edilmedi ve kod degistirilmedi."
+            )
+
+        self.active_runtime_measurement_context = {
+            "kind": "runtime_subcall_measurement",
+            "finding_id": finding_id,
+            "target_path": target_path,
+            "target_symbol": target_symbol,
+        }
+
+        return (
+            "ALT CAGRI OLCUM PLANI\n"
+            f"Bulgu: {finding_id}\n"
+            f"Hedef: {target_path} - {target_symbol}\n"
+            "Durum: MEASUREMENT_REQUIRED\n"
+            "Amac: Hedef metot icindeki benzersiz cagri/cagri gruplarinin "
+            "sure katkisini ayristirarak runtime gecikmesini domine eden "
+            "alt cagriyi kanitlamak.\n"
+            "Olcum: mevcut runtime event/trace altyapisini kullan; "
+            "kaynak dosyaya instrumentation patch'i yazma.\n"
+            "Kabul: toplam sure ile alt cagri sureleri ayni turn/run kimliginde "
+            "eslestirilmeli ve baskin cagri kanitlanmadan kok neden ilan edilmemeli.\n"
+            "Patch izni: hayir\n"
+            "Kaynak kodu degistirilmedi."
+        )
+
+    def _runtime_local_review_execution_request(
+        self,
+        text: str,
+    ) -> str | None:
+        """Execute the active runtime LOCAL_REVIEW instead of replanning it."""
+        normalized = self.command_key(text)
+        asks_execute = any(
+            marker in normalized
+            for marker in (
+                "local_review planini simdi uygula",
+                "local review planini simdi uygula",
+                "yerel inceleme planini simdi uygula",
+                "yerel incelemeyi simdi uygula",
+                "yerel incelemeyi gercekten yap",
+            )
+        )
+        if not asks_execute:
+            return None
+
+        context = (
+            getattr(self, "active_runtime_research_context", None)
+            or getattr(self, "last_action_context", None)
+            or {}
+        )
+        if str(context.get("kind", "")) != "runtime_research_plan":
+            return None
+
+        finding_id = str(context.get("finding_id", "") or "").strip()
+        finding = self._find_runtime_finding(finding_id) if finding_id else None
+        if finding is None:
+            return (
+                "LOCAL_REVIEW yurutulemedi: etkin runtime bulgusu bulunamadi. "
+                "Yeni teknik plan olusturulmadi."
+            )
+
+        path = next(
+            (
+                str(value).strip()
+                for value in tuple(getattr(finding, "affected_paths", ()) or ())
+                if str(value or "").strip()
+            ),
+            "",
+        )
+        symbol = next(
+            (
+                str(value).strip()
+                for value in tuple(getattr(finding, "affected_symbols", ()) or ())
+                if str(value or "").strip()
+            ),
+            "",
+        )
+        if not path or not symbol:
+            return (
+                "LOCAL_REVIEW yurutulemedi: yapilandirilmis path/symbol hedefi yok. "
+                "Hedef tahmin edilmedi ve yeni teknik plan olusturulmadi."
+            )
+
+        review = self._targeted_own_code_review_request(
+            f"incele {path} {symbol}"
+        )
+        if review is None:
+            return (
+                "LOCAL_REVIEW yurutulemedi: salt-okunur kaynak inceleme "
+                "yurutucusu hedefi kabul etmedi. Yeni teknik plan olusturulmadi."
+            )
+
+        return (
+            "LOCAL_REVIEW YURUTME SONUCU\n"
+            f"Bulgu: {finding_id}\n"
+            + review
+            + "\nKOK NEDEN KARARI: YETERSIZ\n"
+            "Gerekce: Kaynak ve ilgili test adaylari gercekten incelendi; "
+            "ancak yapisal kaynak incelemesi tek basina runtime gecikmesinin "
+            "kok nedenini kanitlamaz. Runtime olcumu ile kaynak davranisi "
+            "birlikte dogrulanmadan patch planina gecilemez.\n"
+            "Patch izni: hayir\n"
+            "Kaynak kodu degistirilmedi. Yeni teknik plan olusturulmadi."
+        )
 
     def _targeted_own_code_review_request(self, text: str) -> str | None:
         """Return a deterministic source-grounded review for an explicit path/symbol."""
@@ -13450,7 +14170,7 @@ class AssistantEngine:
 
     def _execute_learned_memory(self, record: LearnedMemory) -> str | None:
         """Run only a previously approved, locally stored behavior."""
-        if record.kind == "dialogue" and record.response:
+        if record.kind in {"dialogue", "verified_fact"} and record.response:
             return record.response
         if record.kind != "action":
             return None
@@ -13559,6 +14279,57 @@ class AssistantEngine:
             self.dialogue.remember(text, result)
             return result
         return None
+
+    def _learn_explicit_user_fact(self, text: str) -> str | None:
+        """Store an explicitly taught factual statement with user provenance.
+
+        User teaching is useful memory but is not internet verification.  Keep
+        it in a separate ``user_fact`` class so normal factual answers can cite
+        the user as the source instead of silently promoting an assertion to a
+        verified world fact.
+        """
+        normalized = self.command_key(text)
+        learn_markers = (
+            "ogren", "ogrenmelisin", "hatirla", "aklinda tut",
+            "bilgi olarak kaydet", "hafizana kaydet",
+        )
+        if not any(marker in normalized for marker in learn_markers):
+            return None
+        procedural = (
+            "bundan sonra", "dedigimde", "dersem", "soyledigimde",
+            "cevap ver", "komut", "ac ", "kapat ",
+        )
+        if any(marker in normalized for marker in procedural):
+            return None
+
+        raw = str(text or "").strip()
+        quoted = re.search(r'["“](.+?)["”]', raw)
+        if quoted is not None:
+            fact = quoted.group(1).strip()
+        else:
+            fact = re.sub(
+                r"(?i)\s*(?:,?\s*bunu)?\s*(?:ogren(?:melisin)?|öğren(?:melisin)?|hatirla|hatırla|aklinda tut|aklında tut|bilgi olarak kaydet|hafizana kaydet|hafızana kaydet)\s*[.!?]*$",
+                "",
+                raw,
+            ).strip(' .,:;!?-"')
+        if not fact or len(fact) < 8 or len(fact) > 1000 or "?" in fact:
+            return None
+        folded_fact = self.command_key(fact)
+        if not folded_fact or any(marker in folded_fact for marker in procedural):
+            return None
+        teach_user_fact = getattr(self.learning_memory, "teach_user_fact", None)
+        if not callable(teach_user_fact):
+            return None
+        teach_user_fact(fact, response=fact, confidence=1.0)
+        self.learning_memory.audit(
+            "kullanıcı tarafından olgusal bilgi öğretildi", konu=fact
+        )
+        result = (
+            "Öğrendim. Bunu kullanıcı tarafından öğretilmiş bilgi olarak yerel "
+            "hafızama kaydettim; internetten doğrulanmış bilgi olarak işaretlemedim."
+        )
+        self.dialogue.remember(text, result)
+        return result
 
     def _needs_dialogue_intent_interpretation(self, text: str) -> bool:
         """Use the intent model only when a side-effecting intent is plausible."""
@@ -14404,26 +15175,22 @@ class AssistantEngine:
         return compact.endswith("?") or lowered.startswith(question_openers)
 
     def _accept_dialogue_only_decision(self, text: str, decision: object) -> str | None:
-        """Accept a harmless language-model result without a second inference.
+        """Reuse only clarification text from intent extraction.
 
-        Intent extraction deliberately has a high confidence gate before it
-        may open programs, write memory, or change state.  Applying that same
-        gate to an ordinary answer caused a needless second local-model call:
-        one call to produce JSON and another call to say virtually the same
-        sentence.  A plain answer or a single clarification question has no
-        privileged side effect, so it is safe to reuse it immediately even
-        when the model marks the *intent* as uncertain.
+        ``interpret()`` exists to classify intent, not to be the authoritative
+        general-chat responder.  Reusing its ``chat`` payload let malformed or
+        factually wrong JSON-stage prose bypass the normal dialogue/grounding
+        path and enter persistent conversation history.  Clarifications remain
+        safe to reuse because they ask for missing information rather than
+        asserting a world fact.
         """
         kind = str(getattr(decision, "kind", "")).strip().lower()
         response = str(getattr(decision, "response", "")).strip()
-        if kind not in {"chat", "clarify"} or not response:
+        if kind != "clarify" or not response:
             return None
-        # Do not let malformed/rambling model output keep the microphone in a
-        # follow-up state.  The normal responder has the same short-answer
-        # contract.
         if len(response) > 1800:
             return None
-        self.dialogue_active = kind == "clarify" or self._keeps_dialogue_open(response)
+        self.dialogue_active = True
         self.dialogue.remember(text, response)
         return response
 
@@ -14459,12 +15226,300 @@ class AssistantEngine:
             )
         return None
 
-    def handle_local_command(self, raw_text: str) -> str:
+    def _finalize_general_dialogue_answer(self, text: str, response: str) -> str:
+        """Ground stable factual answers with independent evidence before memory.
+
+        The chat model is never allowed to certify its own factual output.
+        When a question asks for a stable world fact, a permitted web-research
+        pass supplies independent evidence and the dialogue model may only
+        phrase an answer from that evidence.  Without permitted/retrievable
+        evidence Jarvis declines to state the candidate as certain.
+        """
+        detector = getattr(self.dialogue, "_looks_like_stable_factual_question", None)
+        if not callable(detector) or not detector(text):
+            return response
+
+        uncertain = (
+            "Bu konuda güvenilir bir cevap verecek kadar doğrulanmış kanıtım yok; "
+            "kesin bir bilgi uydurmayacağım."
+        )
+        # Permission is not a standing instruction to browse.  Ordinary chat
+        # must not silently use the network after the user granted capability.
+        # For world-fact questions where this small local model has no trusted
+        # evidence, decline certainty and wait for an explicit research request.
+        # Keep this helper callable in narrow contract tests that invoke the
+        # unbound method with a lightweight engine double. command_key is a
+        # static normalization contract; it does not require instance state.
+        fact_runtime = getattr(self, "fact_research", None)
+        if fact_runtime is not None and fact_runtime.is_world_fact_question(text):
+            return uncertain
+        normalized = AssistantEngine.command_key(text)
+        external_fact_markers = (
+            "baskent", "nufus", "neresidir", "nerede", "kimdir",
+            "hangi ulke", "hangi sehir", "hangi lig", "hangi bolge",
+            "ne zaman", "dogru mu", "midir", "mudur",
+        )
+        if any(marker in normalized for marker in external_fact_markers):
+            return uncertain
+        return response
+
+    def _measure_handle_local_call(
+        self,
+        action: str,
+        function,
+        *args,
+        parent_correlation_id: str = "",
+        turn_id: str | None = None,
+    ):
+        with self._runtime_observer(
+            component="AssistantEngine",
+            action=action,
+            workspace=self._development_root(own_code=True),
+            scope="own_code",
+            source_path="core/assistant.py",
+            symbol=f"AssistantEngine.{action}",
+            metadata={
+                "parent_action": "handle_local_command",
+                "parent_correlation_id": parent_correlation_id,
+                "turn_id": turn_id or "",
+                "health_excluded": True,
+            },
+        ):
+            return function(*args)
+
+    @staticmethod
+    def _stage9_ascii_command_key(value: str) -> str:
+        return str(value or "").translate(
+            str.maketrans(
+                {
+                    "ç": "c",
+                    "ğ": "g",
+                    "ı": "i",
+                    "ö": "o",
+                    "ş": "s",
+                    "ü": "u",
+                    "Ç": "c",
+                    "Ğ": "g",
+                    "İ": "i",
+                    "Ö": "o",
+                    "Ş": "s",
+                    "Ü": "u",
+                }
+            )
+        )
+
+    @staticmethod
+    def _stage9_read_json(path: Path):
+        try:
+            raw = path.read_text(encoding="utf-8")
+            return json.loads(raw)
+        except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValueError):
+            return None
+
+    def pending_approval_status_report(self) -> str:
+        """Return pending engineering/research approvals without mutating them."""
+        lines = ["BEKLEYEN ONAY / OTURUM DURUMU"]
+        found = False
+
+        try:
+            research = EvidenceResearchApprovalStore(
+                DATA_DIR / "diagnostics" / "pending_evidence_research.json"
+            ).load()
+        except Exception:
+            research = None
+        if research is not None:
+            found = True
+            lines.append(
+                "Research: "
+                f"{getattr(research, 'approval_id', '(kimlik yok)')} | "
+                f"{getattr(research, 'title', 'DIS ARASTIRMA')}"
+            )
+
+        try:
+            patch_session = self._evidence_patch_session_store().load()
+        except Exception:
+            patch_session = None
+        if patch_session is not None and not bool(
+            getattr(patch_session, "terminal", False)
+        ):
+            found = True
+            lines.append(
+                "Engineering patch: "
+                f"{getattr(patch_session, 'session_id', '(kimlik yok)')} | "
+                f"{getattr(patch_session, 'status', 'UNKNOWN')}"
+            )
+
+        pending_editor = getattr(
+            getattr(self, "editor", None),
+            "pending",
+            None,
+        )
+        if pending_editor is not None:
+            found = True
+            proposal_id = str(
+                getattr(pending_editor, "proposal_id", "")
+                or getattr(pending_editor, "id", "")
+                or "(kimlik yok)"
+            )
+            lines.append(f"Own-code proposal: {proposal_id}")
+
+        try:
+            pending_proposal_store = self._own_code_pending_proposal_store()
+            pending_proposal = pending_proposal_store.load()
+        except Exception:
+            pending_proposal = None
+        if pending_proposal is not None:
+            found = True
+            proposal_id = str(
+                getattr(pending_proposal, "proposal_id", "")
+                or getattr(pending_proposal, "approval_id", "")
+                or getattr(pending_proposal, "id", "")
+                or "(kimlik yok)"
+            )
+            lines.append(f"Pending own-code proposal: {proposal_id}")
+
+        try:
+            retest = RetestApprovalStore(
+                DATA_DIR / "diagnostics" / "pending_retest.json"
+            ).load()
+        except Exception:
+            retest = None
+        if retest is not None:
+            found = True
+            retest_id = str(
+                getattr(retest, "approval_id", "")
+                or getattr(retest, "session_id", "")
+                or "(kimlik yok)"
+            )
+            lines.append(f"Retest: {retest_id}")
+
+        if not found:
+            lines.append("Bekleyen onay veya engineering/research oturumu yok.")
+
+        lines.append(
+            "Salt-okunur rapor: hicbir oturum onaylanmadi, iptal edilmedi veya uygulanmadi."
+        )
+        lines.append(
+            "hicbir onay, iptal, plan veya gorev baslatilmadi"
+        )
+        return "\n".join(lines)
+
+    def _stage9_read_only_backend_status_request(
+        self,
+        text: str,
+    ) -> str | None:
+        """Read live task/queue/approval state before model or finding routing."""
+        normalized = self._stage9_ascii_command_key(
+            self.command_key(text)
+        )
+
+        task_status = any(
+            phrase in normalized
+            for phrase in (
+                "su anda calisan gorevlerin durumunu goster",
+                "calisan gorevlerin durumunu goster",
+                "calisan gorev durumunu goster",
+                "aktif gorevin durumunu goster",
+                "su anda calisan gorev",
+            )
+        )
+        if task_status:
+            active = self._stage9_read_json(
+                DATA_DIR / "active_task.json"
+            )
+            if not isinstance(active, dict) or str(
+                active.get("state", "")
+            ) not in {"running", "cancelling"}:
+                return (
+                    "AKTIF GOREV DURUMU\n"
+                    "Calisan gorev yok.\n"
+                    "Salt-okunur rapor: yeni gorev baslatilmadi."
+                )
+            return (
+                "AKTIF GOREV DURUMU\n"
+                f"Gorev: {active.get('name') or 'Jarvis gorevi'}\n"
+                f"Task id: {active.get('task_id') or '(kimlik yok)'}\n"
+                f"Durum: {active.get('state') or 'running'}\n"
+                f"Ilerleme: {int(active.get('progress') or 0)}%\n"
+                f"Bilgi: {active.get('status_message') or '(yok)'}\n"
+                "Salt-okunur rapor: yeni gorev baslatilmadi."
+            )
+
+        queue_status = any(
+            phrase in normalized
+            for phrase in (
+                "kuyrukta bekleyen gorev",
+                "bekleyen gorev var mi",
+                "gorev kuyrugunu goster",
+                "kuyruk durumunu goster",
+            )
+        )
+        if queue_status:
+            payload = self._stage9_read_json(
+                DATA_DIR / "pending_tasks.json"
+            )
+            rows = payload if isinstance(payload, list) else []
+            pending = [
+                row for row in rows
+                if isinstance(row, dict)
+                and str(row.get("state", "")) == "queued"
+            ]
+            if not pending:
+                return (
+                    "GOREV KUYRUGU\n"
+                    "Bekleyen gorev yok.\n"
+                    "Salt-okunur rapor: kuyruk degistirilmedi."
+                )
+            result = [
+                "GOREV KUYRUGU",
+                f"Bekleyen: {len(pending)}",
+            ]
+            for index, row in enumerate(pending[:10], 1):
+                result.append(
+                    f"{index}. {row.get('name') or 'Jarvis gorevi'} | "
+                    f"{row.get('state') or 'queued'} | "
+                    f"{row.get('task_id') or '(kimlik yok)'}"
+                )
+            result.append(
+                "Salt-okunur rapor: kuyruk degistirilmedi."
+            )
+            return "\n".join(result)
+
+        approval_status = any(
+            phrase in normalized
+            for phrase in (
+                "bekleyen onay",
+                "engineering research oturumu",
+                "engineering/research oturumu",
+                "engineering veya research oturumu",
+                "research oturumu var mi",
+                "onay veya engineering",
+            )
+        )
+        if approval_status:
+            return self.pending_approval_status_report()
+
+        return None
+
+    def handle_local_command(
+        self,
+        raw_text: str,
+        *,
+        parent_correlation_id: str = "",
+        turn_id: str | None = None,
+    ) -> str:
         """Komutu yalnızca yerel kurallarla işler; hiçbir LLM veya ağ servisine göndermez."""
         text = self.normalize_address(raw_text)
         if not text:
             return "Komut duyamadım."
         normalized = self.command_key(text)
+
+        stage9_read_only_status = (
+            self._stage9_read_only_backend_status_request(text)
+        )
+        if stage9_read_only_status is not None:
+            return stage9_read_only_status
+
         if normalized in {
             "kendi kod gelistirme durumu",
             "kendi kod gelistirme raporu",
@@ -14552,6 +15607,18 @@ class AssistantEngine:
         if runtime_visibility is not None:
             return runtime_visibility
 
+        runtime_subcall_execution = (
+            self._runtime_subcall_measurement_execution_request(text)
+        )
+        if runtime_subcall_execution is not None:
+            return runtime_subcall_execution
+
+        runtime_subcall_measurement = (
+            self._runtime_subcall_measurement_request(text)
+        )
+        if runtime_subcall_measurement is not None:
+            return runtime_subcall_measurement
+
         targeted_runtime_report = self._targeted_runtime_finding_report_request(text)
         if targeted_runtime_report is not None:
             return targeted_runtime_report
@@ -14564,7 +15631,13 @@ class AssistantEngine:
             retest_command = self._retest_command_request(text)
             if retest_command is not None:
                 return retest_command
-        research_command = self._research_command_request(text)
+        research_command = self._measure_handle_local_call(
+            "research_command_request",
+            self._research_command_request,
+            text,
+            parent_correlation_id=parent_correlation_id,
+            turn_id=turn_id,
+        )
         if research_command is not None:
             return research_command
 
@@ -14672,19 +15745,41 @@ class AssistantEngine:
         if trust_approval is not None:
             return trust_approval
 
-        self_improvement_runtime = self._self_improvement_runtime_request(text)
+        self_improvement_runtime = self._measure_handle_local_call(
+            "self_improvement_runtime_request",
+            self._self_improvement_runtime_request,
+            text,
+            parent_correlation_id=parent_correlation_id,
+            turn_id=turn_id,
+        )
         if self_improvement_runtime is not None:
             return self_improvement_runtime
 
-        self_improvement_research = self._self_improvement_research_request(text)
+        self_improvement_research = self._measure_handle_local_call(
+            "self_improvement_research_request",
+            self._self_improvement_research_request,
+            text,
+            parent_correlation_id=parent_correlation_id,
+            turn_id=turn_id,
+        )
         if self_improvement_research is not None:
             return self_improvement_research
 
-        runtime_research_follow_up = (
-            self._runtime_research_follow_up_request(text)
+        runtime_research_follow_up = self._measure_handle_local_call(
+            "runtime_research_follow_up_request",
+            self._runtime_research_follow_up_request,
+            text,
+            parent_correlation_id=parent_correlation_id,
+            turn_id=turn_id,
         )
         if runtime_research_follow_up is not None:
             return runtime_research_follow_up
+
+        runtime_local_review = (
+            self._runtime_local_review_execution_request(text)
+        )
+        if runtime_local_review is not None:
+            return runtime_local_review
 
         action_follow_up = self._handle_action_follow_up(text)
         if action_follow_up is not None:
@@ -14702,7 +15797,13 @@ class AssistantEngine:
 
         # Explicit RUN identifiers take precedence over every older plan and
         # over the general dialogue model.
-        maintenance = self._maintenance_request(text)
+        maintenance = self._measure_handle_local_call(
+            "maintenance_request",
+            self._maintenance_request,
+            text,
+            parent_correlation_id=parent_correlation_id,
+            turn_id=turn_id,
+        )
         if maintenance is not None:
             return maintenance
         # A concrete new own-code plan outranks stale repair/cycle state and the
@@ -14739,7 +15840,13 @@ class AssistantEngine:
         project_improvement = self._project_improvement_request(text)
         if project_improvement is not None:
             return project_improvement
-        internet_research = self._internet_research_request(text)
+        internet_research = self._measure_handle_local_call(
+            "internet_research_request",
+            self._internet_research_request,
+            text,
+            parent_correlation_id=parent_correlation_id,
+            turn_id=turn_id,
+        )
         if internet_research is not None:
             return internet_research
         model_lab = self._model_lab_request(text)
@@ -14806,6 +15913,8 @@ class AssistantEngine:
             symbol="AssistantEngine._local_model_request",
             metadata={
                 "parent_action": "handle_local_command",
+                "parent_correlation_id": parent_correlation_id,
+                "turn_id": turn_id or "",
                 "health_excluded": True,
             },
         ):
@@ -14830,6 +15939,64 @@ class AssistantEngine:
         clarification = self._start_clarification_if_target_missing(text)
         if clarification is not None:
             return clarification
+
+        user_fact_learning = self._learn_explicit_user_fact(text)
+        if user_fact_learning is not None:
+            return user_fact_learning
+
+        # Stable world facts use a separate evidence-backed path.  They must
+        # never fall through to the small general-chat model, because a fluent
+        # guess can otherwise poison later conversation context.
+        fact_runtime = getattr(self, "fact_research", None)
+        if fact_runtime is not None and fact_runtime.is_world_fact_question(text):
+            resolved_fact_text = fact_runtime.resolve_factual_question(text)
+            fact_runtime.note_factual_question(resolved_fact_text)
+            research_recall = self._research_knowledge_recall(resolved_fact_text)
+            if research_recall is not None:
+                self.dialogue.remember(text, research_recall)
+                return research_recall
+            verified = self.learning_memory.match_verified_fact(resolved_fact_text)
+            if verified is not None and verified.response:
+                self.dialogue.remember(text, verified.response)
+                return verified.response
+            match_atomic = getattr(self.learning_memory, "match_verified_atomic_claim", None)
+            atomic = match_atomic(resolved_fact_text) if callable(match_atomic) else None
+            if atomic is not None:
+                _parent_fact, atomic_claim = atomic
+                self.dialogue.remember(text, atomic_claim)
+                return atomic_claim
+            revalidation_state = getattr(self.learning_memory, "revalidation_state", None)
+            if callable(revalidation_state) and revalidation_state(resolved_fact_text) == "stale":
+                return (
+                    "Bu bilgi için daha önce doğrulanmış bir kaydım var ancak güncellik süresi dolmuş. "
+                    "Kesin cevap vermeden önce yeniden araştırıp doğrulamam gerekiyor."
+                )
+            match_inference = getattr(self.learning_memory, "match_derived_inference", None)
+            inference = match_inference(resolved_fact_text) if callable(match_inference) else None
+            if inference is not None and inference.response:
+                result = "Doğrulanmış bilgilerden türettiğim çıkarım: " + inference.response
+                self.dialogue.remember(text, result)
+                return result
+            match_user_fact = getattr(self.learning_memory, "match_user_fact", None)
+            taught = match_user_fact(resolved_fact_text) if callable(match_user_fact) else None
+            if taught is not None and taught.response:
+                result = "Senin daha önce öğrettiğin bilgiye göre: " + taught.response
+                self.dialogue.remember(text, result)
+                return result
+            automatic_research = self._measure_handle_local_call(
+                "auto_research_world_fact",
+                self._auto_research_world_fact,
+                text,
+                resolved_fact_text,
+                parent_correlation_id=parent_correlation_id,
+                turn_id=turn_id,
+            )
+            if automatic_research is not None:
+                return automatic_research
+            return (
+                "Bu konuda güvenilir bir cevap verecek kadar doğrulanmış kanıtım yok; "
+                "kesin bir bilgi uydurmayacağım."
+            )
 
         # Already approved memories are cheap and deterministic.  Do this
         # before command parsing, but do not invoke the language model here:
@@ -14996,12 +16163,14 @@ class AssistantEngine:
         with self._runtime_observer(
             component="AssistantEngine",
             action="learn_from_conversation",
-            workspace=self.own_project_root(),
+            workspace=self._development_root(own_code=True),
             scope="own_code",
             source_path="core/assistant.py",
             symbol="AssistantEngine._learn_from_conversation",
             metadata={
                 "parent_action": "handle_local_command",
+                "parent_correlation_id": parent_correlation_id,
+                "turn_id": turn_id or "",
                 "health_excluded": True,
             },
         ):
@@ -15019,12 +16188,14 @@ class AssistantEngine:
             with self._runtime_observer(
                 component="AssistantEngine",
                 action="dialogue_interpret",
-                workspace=self.own_project_root(),
+                workspace=self._development_root(own_code=True),
                 scope="own_code",
                 source_path="core/assistant.py",
                 symbol="LocalDialogueManager.interpret",
                 metadata={
                     "parent_action": "handle_local_command",
+                    "parent_correlation_id": parent_correlation_id,
+                    "turn_id": turn_id or "",
                     "health_excluded": True,
                 },
             ):
@@ -15097,24 +16268,27 @@ class AssistantEngine:
                         return result
                 return f"'{decision.target}' için güvenli yerel uygulama kaydı bulamadım; önce uygulamayı bir kez tanıtmalısın."
             if decision.kind == "chat" and decision.response:
-                self.dialogue_active = self._keeps_dialogue_open(decision.response)
-                self.dialogue.remember(text, decision.response)
-                return decision.response
+                # ``interpret`` classifies intent; its prose is not the final
+                # chat answer.  Fall through to the dedicated responder below
+                # so every ordinary chat turn shares one grounding/history path.
+                pass
 
         # Intent extraction is deliberately strict.  General conversation must
         # still work even when the model did not return the required JSON.
         with self._runtime_observer(
             component="AssistantEngine",
             action="dialogue_respond",
-            workspace=self.own_project_root(),
+            workspace=self._development_root(own_code=True),
             scope="own_code",
             source_path="core/assistant.py",
             symbol="LocalDialogueManager.respond",
             metadata={
                 "parent_action": "handle_local_command",
+                "parent_correlation_id": parent_correlation_id,
+                "turn_id": turn_id or "",
                 "health_excluded": True,
             },
-        ):
+        ) as dialogue_respond_correlation_id:
             response = self.dialogue.respond(
                 text,
                 self.learning_memory.context(),
@@ -15123,11 +16297,34 @@ class AssistantEngine:
                 cancel_check=self._interaction_cancelled,
                 progress_callback=self._interaction_model_progress,
             )
+
+        for phase_action, phase_ms in dict(
+            getattr(self.dialogue, "last_respond_timings", {}) or {}
+        ).items():
+            try:
+                self._runtime_event_service().record(
+                    component="LocalDialogueManager",
+                    action=f"dialogue_respond_{phase_action}",
+                    status="completed",
+                    duration_ms=float(phase_ms or 0.0),
+                    workspace=self._development_root(own_code=True),
+                    scope="own_code",
+                    source_path="core/local_dialogue.py",
+                    symbol="LocalDialogueManager.respond",
+                    metadata={
+                        "parent_action": "dialogue_respond",
+                        "parent_correlation_id": dialogue_respond_correlation_id,
+                        "turn_id": turn_id or "",
+                        "health_excluded": True,
+                    },
+                )
+            except Exception:
+                pass
         if response:
-            # Do not mistake a guess for learning. A domain-independent
-            # clarification keeps one hands-free reply turn, so a user can
-            # supply the missing target/meaning without repeating "Jarvis".
-            # A completed answer returns to wake-only listening.
+            # Do not mistake a guess for learning. Stable factual answers are
+            # independently checked without dialogue history before they can
+            # enter persistent conversation context.
+            response = self._finalize_general_dialogue_answer(text, response)
             self.dialogue_active = self._keeps_dialogue_open(response)
             self.dialogue.remember(text, response)
             return response
@@ -15284,7 +16481,7 @@ class AssistantEngine:
         self._interaction_context.generated_chars = 0
         signal_answer = False
         try:
-            with observer:
+            with observer as handle_correlation_id:
                 self.self_awareness.mark_user_activity()
                 if runtime is not None:
                     runtime.raise_if_cancelled(turn_id)
@@ -15297,10 +16494,33 @@ class AssistantEngine:
                     symbol="AssistantEngine.handle_local_command",
                     metadata={
                         "parent_action": "handle_command",
+                        "parent_correlation_id": handle_correlation_id,
+                        "turn_id": turn_id,
                         "health_excluded": True,
                     },
-                ):
-                    answer = self.handle_local_command(raw_text)
+                ) as local_command_correlation_id:
+                    local_handler = self.handle_local_command
+                    try:
+                        local_handler_parameters = inspect.signature(
+                            local_handler
+                        ).parameters
+                    except (TypeError, ValueError):
+                        local_handler_parameters = {}
+                    if (
+                        "parent_correlation_id" in local_handler_parameters
+                        or any(
+                            parameter.kind
+                            == inspect.Parameter.VAR_KEYWORD
+                            for parameter in local_handler_parameters.values()
+                        )
+                    ):
+                        answer = local_handler(
+                            raw_text,
+                            parent_correlation_id=local_command_correlation_id,
+                            turn_id=turn_id,
+                        )
+                    else:
+                        answer = local_handler(raw_text)
                 if runtime is not None:
                     runtime.raise_if_cancelled(turn_id)
                 if answer in {
@@ -15330,6 +16550,8 @@ class AssistantEngine:
                             symbol="AssistantEngine.handle",
                             metadata={
                                 "parent_action": "handle_command",
+                        "parent_correlation_id": handle_correlation_id,
+                        "turn_id": turn_id,
                                 "health_excluded": True,
                             },
                         ):
@@ -15343,6 +16565,8 @@ class AssistantEngine:
                         symbol="AssistantEngine.handle",
                         metadata={
                             "parent_action": "handle_command",
+                        "parent_correlation_id": handle_correlation_id,
+                        "turn_id": turn_id,
                             "health_excluded": True,
                         },
                     ):
@@ -15368,6 +16592,8 @@ class AssistantEngine:
                 symbol="AssistantEngine.handle",
                 metadata={
                     "parent_action": "handle_command",
+                        "parent_correlation_id": handle_correlation_id,
+                        "turn_id": turn_id,
                     "health_excluded": True,
                 },
             ):
@@ -15384,6 +16610,8 @@ class AssistantEngine:
                     symbol="AssistantEngine.spoken_response",
                     metadata={
                         "parent_action": "handle_command",
+                        "parent_correlation_id": handle_correlation_id,
+                        "turn_id": turn_id,
                         "health_excluded": True,
                     },
                 ):

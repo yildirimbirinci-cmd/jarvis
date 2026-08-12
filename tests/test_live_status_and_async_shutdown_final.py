@@ -22,7 +22,8 @@ def test_live_status_branch_is_checked_without_busy_lock() -> None:
     text = ast.get_source_segment(source, method) or ""
     live_branch = "if (live_status or live_cancel) and worker_running:"
     assert live_branch in text
-    assert text.index(live_branch) < text.index("active = self.task_orchestrator.active")
+    assert "self.task_orchestrator.active" not in text
+    assert text.index(live_branch) < text.index("if self.busy():")
     assert "if self.busy() and (live_status or live_cancel):" not in text
 
 

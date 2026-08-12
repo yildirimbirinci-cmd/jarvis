@@ -91,7 +91,7 @@ def test_active_high_risk_finding_starts_local_review() -> None:
     assert plan.external_queries == ()
 
 
-def test_runtime_task_orchestrator_location_is_recovered() -> None:
+def test_runtime_task_orchestrator_without_structured_target_is_blocked() -> None:
     finding = EvidenceMaintenanceFinding(
         classification="A",
         score=90,
@@ -109,13 +109,9 @@ def test_runtime_task_orchestrator_location_is_recovered() -> None:
 
     plan = build_evidence_research_plan(finding)
 
-    assert plan.path == "core/task_orchestrator.py"
-    assert plan.symbol == "TaskOrchestrator.wrap.execute"
-    assert (
-        "Konum: core/task_orchestrator.py - "
-        "TaskOrchestrator.wrap.execute"
-    ) in plan.report()
-    assert "core/task_orchestrator.py icindeki" in plan.local_questions[0]
+    assert plan.status == BLOCKED
+    assert plan.path == ""
+    assert plan.symbol == ""
 
 
 def test_existing_location_is_preserved() -> None:

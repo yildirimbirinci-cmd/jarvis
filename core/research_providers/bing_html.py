@@ -67,7 +67,7 @@ class BingHtmlProvider(SearchProvider):
                 "User-Agent": self.user_agent,
                 "Accept-Language": "en-US,en;q=0.9",
             },
-            timeout=20,
+            timeout=6,
         )
         response.raise_for_status()
         raw_html = self.bounded_response_text(

@@ -23,7 +23,8 @@ def test_submit_fast_path_precedes_task_snapshot() -> None:
     method = source.split("    def submit_text(self, text: str) -> None:", 1)[1]
     method = method.split("    def ", 1)[0]
     live_branch = "if (live_status or live_cancel) and worker_running:"
-    assert method.index(live_branch) < method.index("active = self.task_orchestrator.active")
+    assert "self.task_orchestrator.active" not in method
+    assert method.index(live_branch) < method.index("if self.busy():")
     assert "if self.busy() and (live_status or live_cancel):" not in method
     assert "route=\"lock_free_snapshot\"" in method
 

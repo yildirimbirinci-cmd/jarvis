@@ -10,7 +10,8 @@ def test_persistent_learning_route_precedes_maintenance() -> None:
         "            self._persistent_engineering_learning_request(text)"
     )
     maintenance = source.index(
-        "maintenance = self._maintenance_request(text)"
+        'maintenance = self._measure_handle_local_call(\n'
+        '            "maintenance_request",'
     )
     assert learning < maintenance
 

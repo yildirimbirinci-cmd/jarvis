@@ -11,6 +11,12 @@ from artmach_assistant.core.evidence_engineering_plan import (
     PLAN_PATCH_PROPOSAL,
     EvidenceEngineeringPlan,
 )
+from artmach_assistant.core.code_research_contracts import CodeTarget
+from artmach_assistant.core.code_research_session import (
+    CodeResearchEvent,
+    CodeResearchSession,
+)
+from artmach_assistant.core.patch_research_gate import validate_patch_research_gate
 
 
 PROPOSAL_BLOCKED = "BLOCKED"
@@ -104,4 +110,49 @@ def build_evidence_patch_proposal(
         safety_constraints=tuple(plan.safety_constraints),
         user_approval_required=True,
         apply_allowed=False,
+    )
+
+
+def build_guarded_evidence_patch_proposal(
+    plan: EvidenceEngineeringPlan,
+    conclusion: EvidenceConclusion,
+    *,
+    path: str,
+    symbol: str,
+) -> EvidencePatchProposal:
+    """Build a proposal only after the general code-research gate passes.
+
+    PLAN_PATCH_PROPOSAL is treated as proof that the existing local validation
+    stage completed; external conclusion evidence is still recorded separately.
+    """
+    session = CodeResearchSession(CodeTarget(str(path or "").strip(), str(symbol or "").strip()))
+    if session.target.resolved:
+        session.record(CodeResearchEvent.SOURCE_REVIEWED)
+    if plan.status == PLAN_PATCH_PROPOSAL:
+        session.record(CodeResearchEvent.TESTS_REVIEWED)
+        session.record(CodeResearchEvent.LOCAL_ROOT_CAUSE)
+    if conclusion.confidence_level == CONFIDENCE_HIGH:
+        session.record(CodeResearchEvent.EXTERNAL_EVIDENCE)
+
+    gate = validate_patch_research_gate(session)
+    if not gate.allowed:
+        proposal = build_evidence_patch_proposal(
+            plan, conclusion, path=path, symbol=symbol
+        )
+        return EvidencePatchProposal(
+            proposal_id=proposal.proposal_id,
+            status=PROPOSAL_BLOCKED,
+            target_path=proposal.target_path,
+            target_symbol=proposal.target_symbol,
+            objective=proposal.objective,
+            rationale=gate.reason,
+            change_scope=(),
+            validation_steps=proposal.validation_steps,
+            safety_constraints=proposal.safety_constraints,
+            user_approval_required=True,
+            apply_allowed=False,
+        )
+
+    return build_evidence_patch_proposal(
+        plan, conclusion, path=path, symbol=symbol
     )

@@ -271,11 +271,32 @@ def approval_matches(
 
     approval_id = session.approval_id.casefold()
 
-    return normalized in {
-        f"{approval_id} onayla",
-        f"{approval_id} internet arastirmasini onayla",
-        f"{approval_id} dis arastirmayi onayla",
-    }
+    # The exact pending approval id is mandatory, but presentation/directive
+    # words around the approval intent must not make a valid approval fail.
+    tokens = set(re.findall(r"[a-z0-9_-]+", normalized))
+    if approval_id not in tokens:
+        return False
+
+    approval_intent = any(
+        phrase in normalized
+        for phrase in (
+            "onayla",
+            "onayliyorum",
+            "onay ver",
+        )
+    )
+    if not approval_intent:
+        return False
+
+    research_context = any(
+        phrase in normalized
+        for phrase in (
+            "arastirma",
+            "research",
+            "oturum",
+        )
+    )
+    return research_context or normalized.startswith(approval_id)
 
 
 def cancellation_matches(text: str) -> bool:

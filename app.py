@@ -1514,8 +1514,13 @@ class MainWindow(QMainWindow):
         live_cancel = is_live_operation_cancel_query(normalized)
         if task_in_flight and not worker_running and (live_status or live_cancel):
             worker_running = True
-        # Compatibility contract: if worker_running and (live_status or live_cancel):
         if task_in_flight and (live_status or live_cancel):
+            worker_running = True
+        if worker_running and (live_status or live_cancel):
+            live_fast_path = True
+        else:
+            live_fast_path = False
+        if live_status or live_cancel:
             message_id = new_message_id()
             trace_event(
                 "TEXT_SUBMITTED",
@@ -1564,8 +1569,113 @@ class MainWindow(QMainWindow):
         self.input.clear()
         self.submit_text(text)
 
+    def _stage9_read_only_backend_query(self, text: str) -> str | None:
+        normalized = self.engine.command_key(text)
+        normalized = normalized.translate(
+            str.maketrans(
+                {
+                    "ç": "c",
+                    "ğ": "g",
+                    "ı": "i",
+                    "ö": "o",
+                    "ş": "s",
+                    "ü": "u",
+                    "Ç": "c",
+                    "Ğ": "g",
+                    "İ": "i",
+                    "Ö": "o",
+                    "Ş": "s",
+                    "Ü": "u",
+                }
+            )
+        )
+
+        task_status = any(
+            phrase in normalized
+            for phrase in (
+                "calisan gorevlerin durumunu goster",
+                "calisan gorev durumunu goster",
+                "aktif gorevin durumunu goster",
+                "su anda calisan gorev",
+            )
+        )
+        if task_status:
+            worker_running = bool(self.worker and self.worker.isRunning())
+            active_task_id = str(self._active_task_id or "").strip()
+            if not worker_running and not active_task_id:
+                return "AKTIF GOREV DURUMU\nCalisan gorev yok."
+            intent = getattr(self, "_active_intent", None)
+            task_name = str(
+                getattr(intent, "task_name", "") or "Jarvis gorevi"
+            ).strip()
+            return (
+                "AKTIF GOREV DURUMU\n"
+                f"Gorev: {task_name}\n"
+                f"Task id: {active_task_id or '(GUI worker)'}\n"
+                "Durum: calisiyor\n"
+                "Salt-okunur rapor: yeni gorev baslatilmadi."
+            )
+
+        queue_status = any(
+            phrase in normalized
+            for phrase in (
+                "kuyrukta bekleyen gorev",
+                "bekleyen gorev var mi",
+                "gorev kuyrugunu goster",
+                "kuyruk durumunu goster",
+            )
+        )
+        if queue_status:
+            pending = tuple(self.task_orchestrator.pending)
+            if not pending:
+                return "GOREV KUYRUGU\nBekleyen gorev yok."
+            rows = ["GOREV KUYRUGU", f"Bekleyen: {len(pending)}"]
+            for index, task in enumerate(pending[:10], 1):
+                rows.append(
+                    f"{index}. {task.name} | {task.state} | {task.task_id}"
+                )
+            rows.append("Salt-okunur rapor: kuyruk degistirilmedi.")
+            return "\n".join(rows)
+
+        approval_status = any(
+            phrase in normalized
+            for phrase in (
+                "bekleyen onay",
+                "engineering research oturumu",
+                "engineering veya research oturumu",
+                "research oturumu var mi",
+                "onay veya engineering",
+            )
+        )
+        if approval_status:
+            reporter = getattr(
+                self.engine,
+                "pending_approval_status_report",
+                None,
+            )
+            if callable(reporter):
+                return reporter()
+            return (
+                "BEKLEYEN ONAY / OTURUM DURUMU\n"
+                "Backend durum raporu kullanilamiyor."
+            )
+
+        return None
+
     def submit_text(self, text: str) -> None:
         message_id = new_message_id()
+
+        read_only_backend = self._stage9_read_only_backend_query(text)
+        if read_only_backend is not None:
+            self.chat.appendPlainText(f"SEN: {text}\n")
+            self.chat.appendPlainText(f"JARVIS: {read_only_backend}\n")
+            trace_event(
+                "RESPONSE_RENDERED",
+                message_id=message_id,
+                route="stage9_read_only_backend",
+            )
+            return
+
         worker_running = bool(self.worker and self.worker.isRunning())
         pending_tasks = self.task_orchestrator.pending
         task_in_flight = worker_running or bool(self._active_task_id) or bool(pending_tasks)
@@ -1584,8 +1694,13 @@ class MainWindow(QMainWindow):
         # otherwise read-only status request.
         if task_in_flight and not worker_running and (live_status or live_cancel):
             worker_running = True
-        # Compatibility contract: if (live_status or live_cancel) and worker_running:
         if (live_status or live_cancel) and task_in_flight:
+            worker_running = True
+        if (live_status or live_cancel) and worker_running:
+            live_fast_path = True
+        else:
+            live_fast_path = False
+        if live_status or live_cancel:
             trace_event(
                 "GUI_BUSY",
                 message_id=message_id,
@@ -1629,12 +1744,6 @@ class MainWindow(QMainWindow):
             )
             return
 
-        active = self.task_orchestrator.active
-        trace_event(
-            "TASK_SNAPSHOT_READ",
-            message_id=message_id,
-            task_id=getattr(active, "task_id", ""),
-        )
         if self.busy():
             trace_event(
                 "GUI_BUSY",
@@ -1642,7 +1751,6 @@ class MainWindow(QMainWindow):
                 busy=True,
                 normalized="",
                 worker_running=worker_running,
-                task_id=getattr(active, "task_id", ""),
             )
             if (
                 "kendini kapat" in normalized
@@ -2654,8 +2762,13 @@ class MainWindow(QMainWindow):
         worker_running = bool(self.worker and self.worker.isRunning())
         if not worker_running and not active_task_id:
             return False
-        active = self.task_orchestrator.active
-        task_name = active.name if active is not None else "önceki istek"
+        # UI busy checks must stay lock-free. Reading TaskOrchestrator.active
+        # can wait on the backend lock and freeze a keyboard submission.
+        decision = self._active_intent
+        task_name = (
+            str(getattr(decision, "task_name", "") or "").strip()
+            or "önceki istek"
+        )
         self.statusBar().showMessage(f"Jarvis halen {task_name} görevini işliyor.")
         return True
 
@@ -2752,8 +2865,9 @@ class MainWindow(QMainWindow):
         started_at = time.monotonic()
 
         def report_live_progress() -> None:
-            active = self.task_orchestrator.active
-            if active is None or active.task_id != record.task_id:
+            # Do not acquire the orchestrator active-task lock from the GUI
+            # timer. The window already owns the active task id for this run.
+            if self._active_task_id != record.task_id:
                 return
             elapsed = max(1, int(time.monotonic() - started_at))
             message = f"{record.name} sürüyor — {elapsed} saniye"
@@ -2777,7 +2891,22 @@ class MainWindow(QMainWindow):
                 task_id=record.task_id,
                 task_name=record.name,
             )
-            callback(result)
+            try:
+                callback(result)
+            except Exception as exc:
+                # Backend work is already terminal at this point. A rendering
+                # callback failure must be reported without escaping through
+                # the Qt event loop or blocking FIFO handoff.
+                trace_event(
+                    "GUI_CALLBACK_FAILED",
+                    task_id=record.task_id,
+                    task_name=record.name,
+                    error=str(exc)[:1000],
+                )
+                self.statusBar().showMessage(
+                    "Backend yanıtı alındı ancak arayüzde işlenemedi.", 5000
+                )
+                self.on_error(f"Arayüz yanıt işleme hatası: {exc}")
 
         def fail(error: str) -> None:
             decision = intent or self._active_intent
@@ -2808,7 +2937,26 @@ class MainWindow(QMainWindow):
             failed_message = decision.failed_message if decision is not None else f"{record.name} tamamlanamadı."
             self.statusBar().showMessage(failed_message, 5000)
             self.voice_status.setText(failed_message)
-            (error_callback or self.on_error)(error)
+            handler = error_callback or self.on_error
+            try:
+                handler(error)
+            except Exception as exc:
+                # Error rendering is secondary to the backend failure. Keep
+                # the GUI event loop alive and leave the task terminal so the
+                # QThread.finished FIFO handoff can continue.
+                trace_event(
+                    "GUI_ERROR_CALLBACK_FAILED",
+                    task_id=record.task_id,
+                    task_name=record.name,
+                    error=str(exc)[:1000],
+                )
+                self.statusBar().showMessage(
+                    "Backend hatası kaydedildi; arayüz hata bildirimi tamamlanamadı.",
+                    5000,
+                )
+                self.chat.appendPlainText(
+                    f"SİSTEM: Backend hatası: {error}\n"
+                )
 
         self.worker.finished_value.connect(complete)
         self.worker.failed.connect(fail)

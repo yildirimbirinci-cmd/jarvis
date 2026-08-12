@@ -32,4 +32,4 @@ def test_submit_text_preserves_legacy_worker_fast_path_and_start_race_cover() ->
     assert 'if task_in_flight and not worker_running and (live_status or live_cancel):' in source
     assert 'worker_running = True' in source
     assert 'if (live_status or live_cancel) and worker_running:' in source
-    assert source.index('if (live_status or live_cancel) and worker_running:') < source.index('active = self.task_orchestrator.active')
+    assert 'self.task_orchestrator.active' not in source

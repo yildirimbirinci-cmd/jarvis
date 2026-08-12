@@ -189,7 +189,24 @@ def _is_strong_result(
         if host == "docs.python.org" or host.endswith(".docs.python.org"):
             return path not in {"", "/", "/3", "/3/"}
     else:
-        return bool(str(row.title or "").strip() and host)
+        combined = " ".join(
+            (str(row.title or ""), str(row.snippet or ""))
+        ).casefold()
+        query_tokens = {
+            token.strip(".,:;!?()[]{}\"'")
+            for token in query.casefold().split()
+            if len(token.strip(".,:;!?()[]{}\"'")) >= 3
+        }
+        result_tokens = {
+            token.strip(".,:;!?()[]{}\"'")
+            for token in combined.split()
+            if len(token.strip(".,:;!?()[]{}\"'")) >= 3
+        }
+        # For general searches, a syntactically valid result is not enough to
+        # stop provider fallback.  Require meaningful query overlap so a broad
+        # relation hit such as "Area" cannot terminate a "Marie Curie ..."
+        # search before later providers are tried.
+        return len(query_tokens & result_tokens) >= min(2, max(1, len(query_tokens)))
 
     combined = " ".join(
         (str(row.title or ""), str(row.snippet or ""))
@@ -200,6 +217,66 @@ def _is_strong_result(
         if len(token) >= 4 and token not in {"official", "documentation", "python"}
     }
     return bool(query_tokens.intersection(combined.split()))
+
+
+def _search_terms(value: str) -> tuple[str, ...]:
+    cleaned = str(value or "").casefold()
+    for char in '"\'.,:;!?()[]{}':
+        cleaned = cleaned.replace(char, " ")
+    stop = {
+        "and", "the", "for", "with", "from", "hangi", "nedir", "neresi",
+        "official", "documentation",
+    }
+    return tuple(
+        token for token in cleaned.split()
+        if len(token) >= 3 and token not in stop
+    )
+
+
+def _quoted_phrases(value: str) -> tuple[str, ...]:
+    import re
+    return tuple(
+        " ".join(match.split()).casefold()
+        for match in re.findall(r'"([^"]{2,160})"', str(value or ""))
+        if " ".join(match.split())
+    )
+
+
+def _requires_cross_provider_collection(query: str) -> bool:
+    if _is_python_technical_query(query):
+        return True
+    if _quoted_phrases(query):
+        return True
+    terms = _search_terms(query)
+    return len(terms) >= 4
+
+
+def _result_score(row: ProviderSearchResult, *, query: str) -> float:
+    title = str(row.title or "").casefold()
+    snippet = str(row.snippet or "").casefold()
+    combined = f"{title} {snippet}".strip()
+    terms = set(_search_terms(query))
+    result_terms = set(_search_terms(combined))
+    overlap = terms & result_terms
+    score = float(len(overlap) * 8)
+    if terms:
+        score += 25.0 * (len(overlap) / len(terms))
+    for phrase in _quoted_phrases(query):
+        if phrase in title:
+            score += 80.0
+        elif phrase in combined:
+            score += 55.0
+        else:
+            score -= 30.0
+    try:
+        host = str(urlparse(str(row.url or "")).hostname or "").casefold()
+    except ValueError:
+        host = ""
+    if host.endswith("wikipedia.org") or host.endswith("britannica.com"):
+        score += 3.0
+    if _is_python_technical_query(query) and (host == "docs.python.org" or host.endswith(".docs.python.org")):
+        score += 60.0
+    return score
 
 
 class SearchProviderManager:
@@ -238,10 +315,10 @@ class SearchProviderManager:
         tuple[ProviderFailure, ...],
     ]:
         limit = max(1, int(max_results))
-        strong: list[ProviderSearchResult] = []
-        weak: list[ProviderSearchResult] = []
-        seen: set[str] = set()
         failures: list[ProviderFailure] = []
+        seen: set[str] = set()
+        collected: list[ProviderSearchResult] = []
+        exhaustive = _requires_cross_provider_collection(query)
         technical_query = _is_python_technical_query(query)
 
         def add_row(row: ProviderSearchResult) -> None:
@@ -249,23 +326,34 @@ class SearchProviderManager:
             if not key or key in seen:
                 return
             seen.add(key)
-            target = strong if _is_strong_result(row, query=query) else weak
-            target.append(row)
+            collected.append(row)
 
         for row in _official_seed_results(query):
             add_row(row)
 
         variants = _query_variants(query)
+        provider_limit = min(max(limit * 2, 6), 20) if exhaustive else limit
 
-        for provider in self.providers:
-            provider_had_results = False
+        providers = self.providers
+        if _quoted_phrases(query):
+            # Preserve the default provider ordering contract for ordinary
+            # searches, but resolve exact quoted entities with Bing first in
+            # the current desktop runtime.  This avoids DDG timeout latency
+            # without changing legacy fallback behavior.
+            providers = tuple(
+                sorted(
+                    self.providers,
+                    key=lambda provider: (
+                        0 if "bing" in str(getattr(provider, "name", "")).casefold() else 1
+                    ),
+                )
+            )
 
+        for provider in providers:
+            provider_had_rows = False
             for variant in variants:
                 try:
-                    rows = provider.search(
-                        variant,
-                        limit,
-                    )
+                    rows = provider.search(variant, provider_limit)
                 except (
                     requests.RequestException,
                     RuntimeError,
@@ -276,27 +364,65 @@ class SearchProviderManager:
                     failures.append(
                         ProviderFailure(
                             provider=provider.name,
-                            error=(
-                                f"{type(exc).__name__}: {exc}"
-                            ),
+                            error=f"{type(exc).__name__}: {exc}",
                         )
                     )
                     break
 
                 if rows:
-                    provider_had_results = True
-
+                    provider_had_rows = True
                 for row in rows:
                     add_row(row)
 
-                if len(strong) >= limit:
+                # A quoted entity hit in title/snippet is already a strong
+                # identity resolution.  Do not keep probing slower fallback
+                # providers after it is found; relation evidence will be
+                # extracted from the hydrated entity page by ResearchManager.
+                if _quoted_phrases(query):
+                    strong_quoted = [
+                        row for row in collected
+                        if _is_strong_result(row, query=query)
+                    ]
+                    if strong_quoted:
+                        ranked_quoted = sorted(
+                            strong_quoted,
+                            key=lambda row: _result_score(row, query=query),
+                            reverse=True,
+                        )
+                        return ranked_quoted[:limit], tuple(failures)
+
+                if not exhaustive:
+                    strong = [
+                        row for row in collected
+                        if _is_strong_result(row, query=query)
+                    ]
+                    if strong:
+                        return strong[:limit], tuple(failures)
+
+            if not exhaustive and provider_had_rows:
+                strong = [
+                    row for row in collected
+                    if _is_strong_result(row, query=query)
+                ]
+                if strong:
                     return strong[:limit], tuple(failures)
 
-                if strong and not technical_query:
-                    return strong[:limit], tuple(failures)
+        if not collected:
+            return [], tuple(failures)
 
-            if provider_had_results and strong and not technical_query:
-                break
+        ranked = sorted(
+            collected,
+            key=lambda row: (
+                _result_score(row, query=query),
+                1 if _is_strong_result(row, query=query) else 0,
+            ),
+            reverse=True,
+        )
+        if technical_query:
+            ranked = sorted(
+                ranked,
+                key=lambda row: _result_score(row, query=query),
+                reverse=True,
+            )
+        return ranked[:limit], tuple(failures)
 
-        merged = strong + weak
-        return merged[:limit], tuple(failures)
