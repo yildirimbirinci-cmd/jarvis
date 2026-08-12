@@ -1532,7 +1532,13 @@ class AssistantEngine:
             return ""
 
         base_attempts = max(1, min(int(max_attempts), 3))
-        attempts = base_attempts if strict_attempt_limit else base_attempts + 1
+        # A production repair policy limits independent repair attempts, but a
+        # validator-proven source-grounding rejection is not a second repair
+        # hypothesis. Reserve one bounded recovery slot so the exact live-source
+        # block returned by the validator can be fed back to the code model.
+        # The overflow slot is entered only when validator guidance is present;
+        # otherwise the loop stops at base_attempts below.
+        attempts = base_attempts + 1
         previous_response = ""
         previous_error = ""
         seen_responses: set[str] = set()
@@ -1596,13 +1602,16 @@ class AssistantEngine:
                 pass
 
         for attempt in range(1, attempts + 1):
-            if (
-                attempt > base_attempts
-                and not anchor_retry_guidance
-                and not helper_shape_retry_guidance
-                and not existing_helper_retry_guidance
-            ):
-                break
+            if attempt > base_attempts:
+                if strict_attempt_limit:
+                    if not anchor_retry_guidance:
+                        break
+                elif (
+                    not anchor_retry_guidance
+                    and not helper_shape_retry_guidance
+                    and not existing_helper_retry_guidance
+                ):
+                    break
             current_prompt = prompt
             structural_guidance = ""
 
@@ -7177,11 +7186,29 @@ class AssistantEngine:
                 "kaynak kodundaki",
             )
         )
+        runtime_problem_subject = any(
+            marker in normalized
+            for marker in (
+                "tekrarlanan yavas",
+                "tekrarlanan hata",
+                "bakim uyarisi",
+                "runtime bulgu",
+                "runtime bulgus",
+                "bu tekrarlanan",
+                "bu sorun",
+                "bu hata",
+            )
+        )
+        explicit_execute_intent = any(
+            word.startswith(("yap", "uygula", "tamamla", "coz"))
+            for word in words
+        )
         natural_self_repair_request = (
-            own_code_subject
+            (own_code_subject or runtime_problem_subject)
             and fix_intent
             and (
                 diagnostic_intent
+                or research_intent
                 or any(
                     marker in normalized
                     for marker in (
@@ -7193,6 +7220,12 @@ class AssistantEngine:
                     )
                 )
             )
+        )
+        natural_runtime_autonomous_request = (
+            runtime_problem_subject
+            and fix_intent
+            and research_intent
+            and explicit_execute_intent
         )
 
         if run_id:
@@ -7306,6 +7339,10 @@ class AssistantEngine:
                     finding = self._latest_runtime_finding()
                     if finding is None:
                         return diagnosis
+                if natural_runtime_autonomous_request:
+                    return self.run_autonomous_runtime_repair(
+                        finding.finding_id
+                    )
                 return self.prepare_runtime_improvement_implementation(
                     finding.finding_id
                 )

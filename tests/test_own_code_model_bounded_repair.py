@@ -964,3 +964,61 @@ def test_structural_retry_forbids_expression_as_block_test(tmp_path) -> None:
     assert "YAPISAL OPERASYON ZORUNLULUGU" in retry
     assert "yalnız hedef metodun doğrudan gövdesinde gerçekten bulunan bir `if`" in retry
     assert "Hedef bir ifade satırıysa `replace` kullan" in retry
+
+def test_strict_single_attempt_allows_one_source_grounded_anchor_recovery(
+    tmp_path,
+) -> None:
+    engine = _engine(tmp_path)
+    source = tmp_path / "core" / "example.py"
+    source.write_text(
+        "class Example:\n"
+        "    VALUE = 1\n\n"
+        "    def read_value(self):\n"
+        "        return self.VALUE\n",
+        encoding="utf-8",
+    )
+    responses = iter((
+        json.dumps({
+            "summary": "invented anchor",
+            "files": [{
+                "path": "core/example.py",
+                "operations": [{
+                    "op": "replace",
+                    "old": "VALUE=1",
+                    "new": "VALUE = 2",
+                }],
+            }],
+        }),
+        json.dumps({
+            "summary": "grounded retry",
+            "files": [{
+                "path": "core/example.py",
+                "operations": [{
+                    "op": "replace",
+                    "old": "VALUE = 1",
+                    "new": "VALUE = 2",
+                }],
+            }],
+        }),
+    ))
+    prompts: list[str] = []
+    engine._request_code_model_json = (
+        lambda prompt, **_kwargs: prompts.append(prompt) or next(responses)
+    )
+
+    proposal = engine._generate_validated_own_code_proposal(
+        (
+            "APPROVED_STRUCTURAL_TARGET: Example.read_value\n"
+            "Yalnız core/example.py içindeki VALUE değerini değiştir."
+        ),
+        max_attempts=1,
+        strict_attempt_limit=True,
+    )
+
+    assert len(prompts) == 2
+    assert "SOURCE GROUNDED ANCHOR REDDI" in prompts[1]
+    assert "GERÇEK KAYNAK BLOĞU" in prompts[1]
+    assert "APPROVED METHOD SOURCE" in prompts[1]
+    assert "return self.VALUE" in prompts[1]
+    assert "VALUE = 2" in proposal.files[0].new_content
+    assert "class Example:" in proposal.files[0].new_content
