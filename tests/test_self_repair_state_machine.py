@@ -55,6 +55,19 @@ def _engine(tmp_path: Path) -> AssistantEngine:
     engine._load_own_code_plan = lambda: None
     engine._save_own_code_plan = lambda _plan: None
     engine.own_code_history = SimpleNamespace(record=lambda *_a, **_k: None)
+    # State-machine tests isolate orchestration from the autonomous diagnosis
+    # model dependency. Root-cause diagnosis has its own dedicated contract
+    # tests; here we supply a proven diagnosis so proposal state transitions
+    # can be tested without config/model initialization.
+    engine._diagnose_self_repair_session = lambda _session: (
+        "AUTONOMOUS_ROOT_CAUSE_DIAGNOSIS\nStatus: READY\nConfidence: 100\n"
+        "Root cause: fixture-proven runtime failure\n"
+        "Mechanism: Worker.execute raises the observed error\n"
+        "Change strategy: preserve scope and prepare the targeted proposal\n"
+        "Evidence used:\n- fixture runtime finding\n"
+        "Preserve:\n- exact approved path and symbol",
+        "",
+    )
     return engine
 
 

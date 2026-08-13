@@ -94,6 +94,8 @@ class SelfRepairSession:
     max_attempts: int = 1
     approval_required: bool = False
     approval_granted: bool = False
+    replan_count: int = 0
+    max_replans: int = 1
 
     @property
     def active(self) -> bool:
@@ -186,6 +188,8 @@ class SelfRepairSessionStore:
                 max_attempts=0 if int(row.get("max_attempts", 1) or 0) <= 0 else 1,
                 approval_required=bool(row.get("approval_required", False)),
                 approval_granted=bool(row.get("approval_granted", False)),
+                replan_count=max(0, min(int(row.get("replan_count", 0) or 0), 1)),
+                max_replans=max(0, min(int(row.get("max_replans", 1) or 0), 1)),
             )
         except (OSError, TypeError, ValueError, UnicodeError) as exc:
             self._quarantine_invalid_store(f"{type(exc).__name__}: {exc}")
@@ -215,6 +219,7 @@ class SelfRepairSessionStore:
         max_attempts: int = 1,
         approval_required: bool = False,
         approval_granted: bool = False,
+        max_replans: int = 1,
     ) -> SelfRepairSession:
         run_id = extract_run_id(finding_id)
         if run_id is None:
@@ -245,6 +250,8 @@ class SelfRepairSessionStore:
             max_attempts=0 if int(max_attempts) <= 0 else 1,
             approval_required=bool(approval_required),
             approval_granted=bool(approval_granted),
+            replan_count=0,
+            max_replans=max(0, min(int(max_replans), 1)),
             updated_at=now,
         )
         return self.save(session)
@@ -280,6 +287,44 @@ class SelfRepairSessionStore:
                 if last_error is None
                 else str(last_error)[-12000:]
             ),
+        )
+        return self.save(updated)
+
+
+    def replan_from_failure(
+        self,
+        *,
+        failure_evidence: str,
+        reason: str = "Isolated validation failed.",
+    ) -> SelfRepairSession:
+        """Start one new evidence revision without retrying the rejected transform."""
+        current = self.load()
+        if current is None:
+            raise ValueError("Etkin hedefli onarım oturumu yok.")
+        if current.replan_count >= current.max_replans:
+            raise ValueError("Kanita dayali yeniden planlama siniri kullanildi.")
+        evidence = (
+            current.evidence.rstrip()
+            + "\n\nWORKTREE_FAILURE_EVIDENCE\n"
+            + str(failure_evidence or "")[-10000:]
+        )[-30000:]
+        instruction = (
+            current.instruction.rstrip()
+            + "\n\nEVIDENCE_BASED_REPLAN\n"
+            + "Onceki transformation izole dogrulamada basarisiz oldu. "
+            + "Ayni patchi tekrar etme. Yeni test kanitindan kok nedeni yeniden "
+            + "degerlendir ve yalniz kanit farkli bir stratejiyi destekliyorsa yeni "
+            + "bir transformation hazirla."
+        )[-20000:]
+        updated = replace(
+            current,
+            state="planned",
+            instruction=instruction,
+            evidence=evidence,
+            proposal_fingerprint="",
+            attempts=0,
+            last_error=str(reason or "")[-12000:],
+            replan_count=current.replan_count + 1,
         )
         return self.save(updated)
 

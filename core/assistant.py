@@ -7394,18 +7394,51 @@ class AssistantEngine:
         )
         if worktree_failed:
             self._clear_own_code_pending_proposal_store()
+            store = self._self_repair_store()
             try:
-                self._self_repair_store().transition(
+                failed = store.transition(
                     "proposal_failed",
                     expected={"applying"},
                     last_error=result,
                 )
             except Exception:
-                pass
+                failed = None
+            if failed is None or failed.replan_count >= failed.max_replans:
+                return (
+                    result
+                    + "\n\nDeterministic repair durduruldu. Worktree kaniti kaydedildi; "
+                    "yeniden planlama siniri kullanildi ve ana kaynak degistirilmedi."
+                )
+            try:
+                replanned = store.replan_from_failure(
+                    failure_evidence=result,
+                    reason="Worktree validation failed; root cause must be revised from test evidence.",
+                )
+            except Exception as exc:
+                return (
+                    result
+                    + "\n\nWorktree kaniti kaydedildi ancak yeniden planlama baslatilamadi: "
+                    + str(exc)[:800]
+                    + ". Ana kaynak degistirilmedi."
+                )
+            prepared = self._prepare_active_self_repair_proposal(replanned)
+            current = store.load()
+            if current is None or current.state != "proposal_ready":
+                return (
+                    result
+                    + "\n\nECHO worktree test kanitiyla kok nedeni yeniden planladi ancak "
+                    "yeni guvenli transformation uretemedi. Ana kaynak degistirilmedi.\n\n"
+                    + str(prepared)
+                )
+            reapplied = self._apply_active_self_repair_proposal(current)
             return (
                 result
-                + "\n\nDeterministic repair durduruldu. Worktree reddinden sonra "
-                "otomatik reproposal/retry yapılmadı; ana kaynak değiştirilmedi."
+                + "\n\nECHO ayni taslagi retry etmedi. Worktree failure yeni muhendislik "
+                    "kaniti olarak kaydedildi, root-cause plani bir kez yeniden kuruldu "
+                    "ve yeni transformation izole dogrulamaya gonderildi.\n\n"
+                + str(prepared)
+                + "\n\n"
+                + str(reapplied)
             )
         success = "Onayladığın kod değişikliği uygulandı" in result
         try:
