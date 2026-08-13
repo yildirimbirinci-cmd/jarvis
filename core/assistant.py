@@ -8115,6 +8115,158 @@ class AssistantEngine:
             outputs.append(self._self_repair_status(final_session))
         return "\n\n".join(outputs)
 
+
+    def _runtime_target_requires_child_evidence(
+        self,
+        finding: RuntimeFinding,
+    ) -> bool:
+        """Return True when a slow-operation target is an aggregate dispatcher.
+
+        Aggregate runtime spans prove that time is spent somewhere below the
+        target, not that any particular statement in that method is defective.
+        Such targets must be localized with child-span evidence before proposal
+        generation is allowed.
+        """
+        if str(getattr(finding, "category", "") or "") != "repeated_slow_operation":
+            return False
+        paths = tuple(getattr(finding, "affected_paths", ()) or ())
+        symbols = tuple(getattr(finding, "affected_symbols", ()) or ())
+        if len(paths) != 1 or len(symbols) != 1:
+            return False
+        relative = str(paths[0] or "").strip().replace("\\", "/")
+        symbol = str(symbols[0] or "").strip()
+        if not relative or not symbol:
+            return False
+        try:
+            source_path = (Path(self.own_project_root()) / relative).resolve(strict=True)
+            root = Path(self.own_project_root()).resolve(strict=True)
+            source_path.relative_to(root)
+            source = source_path.read_text(encoding="utf-8")
+            tree = ast.parse(source)
+        except Exception:
+            return False
+
+        parts = [part for part in symbol.split(".") if part]
+        if not parts:
+            return False
+        class_name = parts[-2] if len(parts) >= 2 else ""
+        method_name = parts[-1]
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            if node.name != method_name:
+                continue
+            if class_name:
+                parent_ok = any(
+                    isinstance(parent, ast.ClassDef)
+                    and parent.name == class_name
+                    and node in parent.body
+                    for parent in ast.walk(tree)
+                )
+                if not parent_ok:
+                    continue
+            segment = ast.get_source_segment(source, node) or ""
+            normalized = segment.replace("'", '"').replace(" ", "")
+            if '"aggregate_operation":True' in normalized:
+                return True
+        return False
+
+    def _runtime_child_evidence_narrowing(
+        self,
+        finding: RuntimeFinding,
+    ) -> tuple[RuntimeFinding | None, str]:
+        """Narrow an aggregate slow target using measured child runtime spans.
+
+        No source target is guessed. A child target is accepted only when it has
+        its own source_path + symbol, at least three completed samples, and a
+        clear median-duration lead over the next independently targetable child.
+        """
+        try:
+            events = self._runtime_event_service().recent(
+                limit=5000,
+                workspace=self._development_root(own_code=True),
+            )
+        except Exception:
+            events = ()
+
+        target_path = next(
+            (str(v).strip().replace("\\", "/") for v in tuple(getattr(finding, "affected_paths", ()) or ()) if str(v or "").strip()),
+            "",
+        )
+        target_symbol = next(
+            (str(v).strip() for v in tuple(getattr(finding, "affected_symbols", ()) or ()) if str(v or "").strip()),
+            "",
+        )
+        grouped: dict[tuple[str, str, str], list[float]] = {}
+        for event in events:
+            if str(getattr(event, "status", "") or "") != "completed":
+                continue
+            metadata = getattr(event, "metadata", {}) or {}
+            parent_action = str(metadata.get("parent_action", "") or "").strip()
+            if parent_action not in {"handle_command", "handle_local_command", "dialogue_respond"}:
+                continue
+            path = str(getattr(event, "source_path", "") or "").strip().replace("\\", "/")
+            symbol = str(getattr(event, "symbol", "") or "").strip()
+            action = str(getattr(event, "action", "") or "").strip()
+            if not path or not symbol or not action:
+                continue
+            if path == target_path and symbol == target_symbol:
+                continue
+            duration = float(getattr(event, "duration_ms", 0.0) or 0.0)
+            if duration <= 0:
+                continue
+            grouped.setdefault((path, symbol, action), []).append(duration)
+
+        rows: list[tuple[float, int, str, str, str]] = []
+        for (path, symbol, action), values in grouped.items():
+            if len(values) < 3:
+                continue
+            ordered = sorted(values)
+            median = ordered[len(ordered) // 2]
+            rows.append((median, len(values), path, symbol, action))
+        rows.sort(reverse=True)
+
+        if not rows:
+            return None, (
+                "REPAIR EVIDENCE GATE\n"
+                "Durum: INSUFFICIENT_EVIDENCE\n"
+                f"Aggregate hedef: {target_path} - {target_symbol}\n"
+                "Neden: Patch uretmek icin ayri source_path + symbol tasiyan en az uc "
+                "tamamlanmis child runtime ornegi yok. Aggregate sure tek basina bir "
+                "statement veya helper degisikligini kanitlamaz.\n"
+                "Sonraki adim: mevcut runtime trace ile alt cagri olcumunu tekrarla.\n"
+                "Patch izni: hayir\nKaynak kodu degistirilmedi."
+            )
+
+        top = rows[0]
+        if len(rows) > 1 and top[0] < rows[1][0] * 1.5:
+            return None, (
+                "REPAIR EVIDENCE GATE\n"
+                "Durum: INSUFFICIENT_EVIDENCE\n"
+                f"Aggregate hedef: {target_path} - {target_symbol}\n"
+                f"En yuksek iki child median birbirinden yeterince ayrismiyor: "
+                f"{top[4]}={top[0]:.3f} ms, {rows[1][4]}={rows[1][0]:.3f} ms.\n"
+                "Dominant child kanitlanmadan proposal uretilmedi.\n"
+                "Patch izni: hayir\nKaynak kodu degistirilmedi."
+            )
+
+        median, count, path, symbol, action = top
+        narrowed = replace(
+            finding,
+            affected_paths=(path,),
+            affected_symbols=(symbol,),
+        )
+        report = (
+            "REPAIR EVIDENCE GATE\n"
+            "Durum: NARROWED\n"
+            f"Aggregate hedef: {target_path} - {target_symbol}\n"
+            f"Kanitli child hedef: {path} - {symbol}\n"
+            f"Child action: {action}\n"
+            f"Ortanca sure: {median:.3f} ms | Ornek: {count}\n"
+            "Proposal yalniz bu daraltilmis source target icin acilabilir."
+        )
+        return narrowed, report
+
     def prepare_runtime_improvement_implementation(
         self, finding_id: str, *, repair_policy=None
     ) -> str:
@@ -8125,6 +8277,7 @@ class AssistantEngine:
                 "bulunamadı. Önce bakım taraması yapmalıyım."
             )
         decision = repair_policy
+        repair_evidence_gate_context = ""
         if finding.category == "repeated_slow_operation":
             finding, _repair_decision, _target_validation = (
                 self._assess_runtime_repair_with_target_refresh(finding)
@@ -8134,6 +8287,18 @@ class AssistantEngine:
             finding, decision, _target_validation = (
                 self._assess_runtime_repair_with_target_refresh(finding)
             )
+        if (
+            finding.category == "repeated_slow_operation"
+            and self._runtime_target_requires_child_evidence(finding)
+        ):
+            narrowed, evidence_gate_report = self._runtime_child_evidence_narrowing(
+                finding
+            )
+            if narrowed is None:
+                return evidence_gate_report
+            finding = narrowed
+            repair_evidence_gate_context = evidence_gate_report
+
         if finding.category == "repeated_runtime_warning":
             return (
                 f"{finding.finding_id} bir uyarı/geri dönüş sinyalidir; tek başına "
@@ -8168,6 +8333,8 @@ class AssistantEngine:
                 "olay kaydına source_path ve symbol bilgisi eklenmeli."
             )
         evidence_text = self._runtime_finding_evidence(finding)
+        if repair_evidence_gate_context:
+            evidence_text += "\n\n" + repair_evidence_gate_context
         canonical_symbols = tuple(
             str(item).strip()
             for item in finding.affected_symbols

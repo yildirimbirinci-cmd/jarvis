@@ -1109,3 +1109,123 @@ def test_symbol_scoped_repair_rejects_placeholder_helper_and_recovers_in_method(
     assert len(prompts) == 2
     assert "SOURCE-GROUNDED HELPER ELIGIBILITY" in prompts[1]
     assert "Do not emit insert_class_method" in prompts[1]
+
+
+def test_runtime_repair_evidence_gate_detects_aggregate_method(tmp_path) -> None:
+    source = tmp_path / "core" / "assistant.py"
+    source.parent.mkdir(parents=True)
+    source.write_text(
+        "class AssistantEngine:\n"
+        "    def handle(self):\n"
+        "        metadata = {\"aggregate_operation\": True}\n"
+        "        return metadata\n",
+        encoding="utf-8",
+    )
+    engine = object.__new__(AssistantEngine)
+    engine.own_project_root = lambda: tmp_path
+    finding = SimpleNamespace(
+        category="repeated_slow_operation",
+        affected_paths=("core/assistant.py",),
+        affected_symbols=("AssistantEngine.handle",),
+    )
+
+    assert engine._runtime_target_requires_child_evidence(finding) is True
+
+
+def test_runtime_repair_evidence_gate_blocks_without_child_source_evidence() -> None:
+    engine = object.__new__(AssistantEngine)
+    engine._development_root = lambda own_code=True: "/project"
+    engine._runtime_event_service = lambda: SimpleNamespace(recent=lambda **_kwargs: ())
+    finding = SimpleNamespace(
+        category="repeated_slow_operation",
+        affected_paths=("core/assistant.py",),
+        affected_symbols=("AssistantEngine.handle",),
+    )
+
+    narrowed, report = engine._runtime_child_evidence_narrowing(finding)
+
+    assert narrowed is None
+    assert "INSUFFICIENT_EVIDENCE" in report
+    assert "Patch izni: hayir" in report
+
+
+def test_runtime_repair_evidence_gate_narrows_to_dominant_child_symbol() -> None:
+    engine = object.__new__(AssistantEngine)
+    engine._development_root = lambda own_code=True: "/project"
+
+    def event(symbol: str, action: str, duration: float):
+        return SimpleNamespace(
+            status="completed",
+            source_path="core/assistant.py",
+            symbol=symbol,
+            action=action,
+            duration_ms=duration,
+            metadata={"parent_action": "handle_command"},
+        )
+
+    events = (
+        event("AssistantEngine.handle_local_command", "handle_local_command", 120.0),
+        event("AssistantEngine.handle_local_command", "handle_local_command", 130.0),
+        event("AssistantEngine.handle_local_command", "handle_local_command", 140.0),
+        event("AssistantEngine.spoken_response", "spoken_response", 20.0),
+        event("AssistantEngine.spoken_response", "spoken_response", 22.0),
+        event("AssistantEngine.spoken_response", "spoken_response", 24.0),
+    )
+    engine._runtime_event_service = lambda: SimpleNamespace(
+        recent=lambda **_kwargs: events
+    )
+    @dataclass
+    class RuntimeFindingStub:
+        category: str
+        affected_paths: tuple[str, ...]
+        affected_symbols: tuple[str, ...]
+
+    finding = RuntimeFindingStub(
+        category="repeated_slow_operation",
+        affected_paths=("core/assistant.py",),
+        affected_symbols=("AssistantEngine.handle",),
+    )
+
+    narrowed, report = engine._runtime_child_evidence_narrowing(finding)
+
+    assert narrowed is not None
+    assert narrowed.affected_paths == ("core/assistant.py",)
+    assert narrowed.affected_symbols == ("AssistantEngine.handle_local_command",)
+    assert "Durum: NARROWED" in report
+
+
+def test_prepare_runtime_improvement_stops_before_session_when_evidence_gate_blocks(
+    monkeypatch,
+) -> None:
+    engine = object.__new__(AssistantEngine)
+    finding = SimpleNamespace(
+        finding_id="RUN-06578E9EDE",
+        category="repeated_slow_operation",
+        occurrence_count=12,
+        affected_paths=("core/assistant.py",),
+        affected_symbols=("AssistantEngine.handle",),
+    )
+    decision = SimpleNamespace(can_prepare_plan=True)
+    engine._find_runtime_finding = lambda _finding_id: finding
+    engine._assess_runtime_repair_with_target_refresh = lambda value: (
+        value,
+        decision,
+        "",
+    )
+    engine._runtime_target_requires_child_evidence = lambda _finding: True
+    engine._runtime_child_evidence_narrowing = lambda _finding: (
+        None,
+        "REPAIR EVIDENCE GATE\nDurum: INSUFFICIENT_EVIDENCE\nPatch izni: hayir",
+    )
+    create_calls: list[object] = []
+    engine._self_repair_store = lambda: SimpleNamespace(
+        create=lambda **kwargs: create_calls.append(kwargs)
+    )
+
+    result = engine.prepare_runtime_improvement_implementation(
+        finding.finding_id,
+        repair_policy=decision,
+    )
+
+    assert "INSUFFICIENT_EVIDENCE" in result
+    assert create_calls == []
