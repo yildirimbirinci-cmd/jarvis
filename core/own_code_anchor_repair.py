@@ -935,6 +935,96 @@ def _expand_unique_insert_anchor(
 
 
 
+def _recover_missing_method_boundary_insert_anchor(
+    source: str,
+    *,
+    class_name: str,
+    method_name: str,
+    anchor: str,
+    insert_before: bool,
+) -> tuple[str, str] | None:
+    """Recover one missing insert anchor from a proven method boundary.
+
+    This is intentionally narrow. It is used only when the model-supplied
+    anchor is absent from live source and clearly identifies the approved
+    ``Class.method`` by containing that method's ``def`` header. The insertion
+    point is then derived from the live AST instead of fuzzy text matching.
+
+    For ``insert_after`` we prefer the following direct class member and
+    rewrite the operation as ``insert_before`` that member. If there is no
+    following member, the exact live method source is used as the anchor.
+    ``insert_before`` uses the exact live method source directly.
+    """
+    if not anchor or source.count(anchor) != 0:
+        return None
+
+    header_pattern = re.compile(
+        rf"(?m)^[ \t]*(?:async[ \t]+)?def[ \t]+{re.escape(method_name)}[ \t]*\("
+    )
+    if header_pattern.search(anchor) is None:
+        return None
+
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return None
+
+    lines = source.splitlines(keepends=True)
+    owners = [
+        node for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == class_name
+    ]
+    if len(owners) != 1:
+        return None
+    owner = owners[0]
+    methods = [
+        node for node in owner.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name == method_name
+    ]
+    if len(methods) != 1:
+        return None
+    method = methods[0]
+
+    decorator_lines = [
+        int(getattr(row, "lineno", 0))
+        for row in getattr(method, "decorator_list", ())
+        if int(getattr(row, "lineno", 0)) > 0
+    ]
+    method_start = min([int(method.lineno), *decorator_lines]) - 1
+    method_end = int(getattr(method, "end_lineno", method.lineno))
+    method_source = "".join(lines[method_start:method_end])
+    if not method_source or source.count(method_source) != 1:
+        return None
+
+    if insert_before:
+        return "insert_before", method_source
+
+    member_index = owner.body.index(method)
+    if member_index + 1 < len(owner.body):
+        following = owner.body[member_index + 1]
+        following_decorators = [
+            int(getattr(row, "lineno", 0))
+            for row in getattr(following, "decorator_list", ())
+            if int(getattr(row, "lineno", 0)) > 0
+        ]
+        following_start = min(
+            [int(getattr(following, "lineno", 0)), *following_decorators]
+        )
+        if following_start > 0 and following_start <= len(lines):
+            # Grow from the first following-member line only as much as needed
+            # to prove uniqueness, keeping the insertion point unchanged.
+            for radius in range(1, 13):
+                candidate = "".join(
+                    lines[following_start - 1: min(len(lines), following_start - 1 + radius)]
+                )
+                if candidate and source.count(candidate) == 1:
+                    return "insert_before", candidate
+
+    return "insert_after", method_source
+
+
+
 def _direct_self_helper_name(value: str) -> str:
     """Return helper name for one direct ``self.helper(...)`` expression."""
     try:
@@ -1214,6 +1304,20 @@ def repair_ambiguous_replace_anchors(
             )
             if expanded_anchor:
                 operation["anchor"] = expanded_anchor
+                operation_index += 1
+                continue
+
+            missing_boundary = _recover_missing_method_boundary_insert_anchor(
+                source,
+                class_name=class_name,
+                method_name=method_name,
+                anchor=anchor,
+                insert_before=operation_name == "insert_before",
+            )
+            if missing_boundary is not None:
+                recovered_kind, recovered_anchor = missing_boundary
+                operation["op"] = recovered_kind
+                operation["anchor"] = recovered_anchor
             operation_index += 1
 
     return repaired
