@@ -1367,8 +1367,12 @@ def reorder_insertions_after_exact_edits(
         if not insertions or not exact_edits:
             continue
         reordered = exact_edits + insertions
-        if reordered == operations:
-            continue
+        # Do not skip simulation when the model already emitted exact edits
+        # before insertions.  That is precisely the case where an earlier
+        # exact edit can stale a method-boundary insertion anchor even though
+        # no list reordering is necessary.  The sequential simulation below
+        # must still run so the insertion can be re-grounded against the
+        # post-edit source.
         # Do not reinterpret payloads containing unknown/mixed operation rows.
         if len(reordered) != len(operations):
             continue

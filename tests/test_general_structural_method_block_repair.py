@@ -340,3 +340,63 @@ def test_reordered_insert_after_is_regrounded_after_prior_exact_edit(
 
     assert "self.conversation_runtime" in working
     assert "# post-handle marker" in working
+
+
+def test_already_ordered_insert_after_is_regrounded_after_prior_exact_edit(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "core" / "assistant.py"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    source = (
+        "class AssistantEngine:\n"
+        "    def handle(self, raw_text):\n"
+        "        runtime = self.runtime\n"
+        "        if runtime is not None:\n"
+        "            runtime.run(raw_text)\n"
+        "        return raw_text\n"
+    )
+    path.write_text(source, encoding="utf-8")
+    method_anchor = source.split("class AssistantEngine:\n", 1)[1]
+    payload = {
+        "files": [{
+            "path": "core/assistant.py",
+            "operations": [
+                {
+                    "op": "replace",
+                    "old": "        runtime = self.runtime\n",
+                    "new": "        runtime = self.conversation_runtime\n",
+                },
+                {
+                    "op": "insert_after",
+                    "anchor": method_anchor,
+                    "content": "\n    # post-handle marker\n",
+                },
+            ],
+        }]
+    }
+
+    repaired = reorder_insertions_after_exact_edits(
+        payload,
+        project_root=tmp_path,
+        instruction=(
+            "APPROVED_STRUCTURAL_TARGET: AssistantEngine.handle\n"
+            "Fix the repeated runtime failure."
+        ),
+    )
+
+    operations = repaired["files"][0]["operations"]
+    assert [row["op"] for row in operations] == ["replace", "insert_after"]
+
+    working = source
+    first = operations[0]
+    working = working.replace(first["old"], first["new"], 1)
+    second = operations[1]
+    assert working.count(second["anchor"]) == 1
+    assert second["anchor"] != method_anchor
+    working = working.replace(
+        second["anchor"],
+        second["anchor"] + second["content"],
+        1,
+    )
+    assert "self.conversation_runtime" in working
+    assert "# post-handle marker" in working
