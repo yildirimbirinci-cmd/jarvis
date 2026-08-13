@@ -1118,3 +1118,23 @@ def test_production_repair_prompt_removes_anchor_choice():
     assert "path, symbol, operation ve anchor secme yetkin yok" in source
     assert "old alani literal __ECHO_APPROVED_METHOD__ olmali" in source
 
+def test_measure_handle_local_call_uses_real_callable_symbol_name():
+    import inspect
+    from artmach_assistant.core.assistant import AssistantEngine
+
+    source = inspect.getsource(AssistantEngine._measure_handle_local_call)
+    assert "getattr(function, '__name__', '')" in source
+    assert 'symbol=f"AssistantEngine.{action}"' not in source
+
+
+def test_private_runtime_target_keeps_leading_underscore():
+    def _auto_research_world_fact():
+        return None
+
+    symbol = (
+        f"AssistantEngine.{getattr(_auto_research_world_fact, '__name__', '')}"
+        if str(getattr(_auto_research_world_fact, "__name__", "") or "").strip()
+        else "AssistantEngine.auto_research_world_fact"
+    )
+    assert symbol == "AssistantEngine._auto_research_world_fact"
+

@@ -15930,7 +15930,11 @@ class AssistantEngine:
             workspace=self._development_root(own_code=True),
             scope="own_code",
             source_path="core/assistant.py",
-            symbol=f"AssistantEngine.{action}",
+            symbol=(
+                f"AssistantEngine.{getattr(function, '__name__', '')}"
+                if str(getattr(function, "__name__", "") or "").strip()
+                else f"AssistantEngine.{action}"
+            ),
             metadata={
                 "parent_action": "handle_local_command",
                 "parent_correlation_id": parent_correlation_id,
