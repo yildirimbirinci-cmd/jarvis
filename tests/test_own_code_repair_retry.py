@@ -572,16 +572,20 @@ def test_single_attempt_structural_contract_rejection_is_terminal(monkeypatch, t
     engine.own_project_root = lambda: tmp_path
     engine._validate_own_code_payload_shape = lambda raw: json.loads(raw)
     calls: list[str] = []
+    source_path = tmp_path / "core" / "research_manager.py"
+    source_path.parent.mkdir(parents=True, exist_ok=True)
+    source_path.write_text(
+        "class ResearchManager:\n"
+        "    def search(self, query):\n"
+        "        return query\n",
+        encoding="utf-8",
+    )
 
     def request(prompt, **_kwargs):
         calls.append(prompt)
         return json.dumps({
+            "replacement_method": "def search(self, query):\n    return query.strip()",
             "summary": "first",
-            "files": [{
-                "path": "core/research_manager.py",
-                "reason": "repair",
-                "operations": [{"op": "insert_after", "anchor": "x", "content": "y"}],
-            }],
         })
 
     engine._request_code_model_json = request
@@ -612,9 +616,13 @@ def test_single_attempt_structural_contract_rejection_is_terminal(monkeypatch, t
 
     with pytest.raises(workspace_error):
         engine._generate_validated_own_code_proposal(
-            "repair approved target",
+            "repair approved target\n"
+            "DETERMINISTIC_METHOD_TRANSFORMATION\n"
+            "İzinli dosyalar: core/research_manager.py\n"
+            "APPROVED_STRUCTURAL_TARGET: ResearchManager.search",
             max_attempts=3,
             strict_attempt_limit=True,
+            proposal_mode="production",
         )
 
     assert len(calls) == 1
@@ -626,16 +634,20 @@ def test_strict_production_repair_is_exactly_one_model_call(monkeypatch, tmp_pat
     engine.own_project_root = lambda: tmp_path
     engine._validate_own_code_payload_shape = lambda raw: json.loads(raw)
     calls: list[str] = []
+    source_path = tmp_path / "core" / "assistant.py"
+    source_path.parent.mkdir(parents=True, exist_ok=True)
+    source_path.write_text(
+        "class AssistantEngine:\n"
+        "    def handle(self, raw_text):\n"
+        "        return raw_text\n",
+        encoding="utf-8",
+    )
 
     def request(prompt, **_kwargs):
         calls.append(prompt)
         return json.dumps({
+            "replacement_method": "def handle(self, raw_text):\n    return raw_text.strip()",
             "summary": "bad",
-            "files": [{
-                "path": "core/assistant.py",
-                "reason": "repair",
-                "operations": [{"op": "replace", "old": "missing", "new": "x"}],
-            }],
         })
 
     engine._request_code_model_json = request
@@ -664,9 +676,13 @@ def test_strict_production_repair_is_exactly_one_model_call(monkeypatch, tmp_pat
 
     with pytest.raises(workspace_error):
         engine._generate_validated_own_code_proposal(
-            "repair approved target",
+            "repair approved target\n"
+            "DETERMINISTIC_METHOD_TRANSFORMATION\n"
+            "İzinli dosyalar: core/assistant.py\n"
+            "APPROVED_STRUCTURAL_TARGET: AssistantEngine.handle",
             max_attempts=99,
             strict_attempt_limit=False,
+            proposal_mode="production",
         )
 
     assert len(calls) == 1
@@ -733,6 +749,7 @@ def test_scope_rejection_is_terminal_in_single_pass_repair(monkeypatch, tmp_path
             "APPROVED_STRUCTURAL_TARGET: AssistantEngine.handle",
             max_attempts=3,
             strict_attempt_limit=True,
+            proposal_mode="production",
         )
 
     assert len(calls) == 1
@@ -934,6 +951,14 @@ def test_symbol_scoped_placeholder_helper_rejection_is_terminal(monkeypatch, tmp
     engine.own_project_root = lambda: tmp_path
     engine._validate_own_code_payload_shape = lambda raw: json.loads(raw)
     calls: list[str] = []
+    source_path = tmp_path / "core" / "assistant.py"
+    source_path.parent.mkdir(parents=True, exist_ok=True)
+    source_path.write_text(
+        "class AssistantEngine:\n"
+        "    def handle(self, raw_text):\n"
+        "        return raw_text\n",
+        encoding="utf-8",
+    )
 
     def request(prompt, **_kwargs):
         calls.append(prompt)
@@ -971,9 +996,14 @@ def test_symbol_scoped_placeholder_helper_rejection_is_terminal(monkeypatch, tmp
 
     with pytest.raises(workspace_error):
         engine._generate_validated_own_code_proposal(
-            "repair approved target\n\nSEMBOL-KAPSAMLI PATCH KURALI:\nAPPROVED_STRUCTURAL_TARGET: AssistantEngine.handle",
+            "repair approved target\n"
+            "DETERMINISTIC_METHOD_TRANSFORMATION\n"
+            "İzinli dosyalar: core/assistant.py\n"
+            "SEMBOL-KAPSAMLI PATCH KURALI:\n"
+            "APPROVED_STRUCTURAL_TARGET: AssistantEngine.handle",
             max_attempts=3,
             strict_attempt_limit=True,
+            proposal_mode="production",
         )
 
     assert len(calls) == 1
@@ -1176,6 +1206,7 @@ def test_deterministic_transformation_builds_patch_from_live_method(monkeypatch,
         "İzinli dosyalar: core/assistant.py\n"
         "APPROVED_STRUCTURAL_TARGET: AssistantEngine.handle",
         strict_attempt_limit=True,
+            proposal_mode="production",
     )
 
     assert len(calls) == 1

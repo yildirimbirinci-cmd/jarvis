@@ -16,8 +16,9 @@ def test_approval_required_can_prepare_plan_but_cannot_auto_continue() -> None:
 
 
 def test_policy_single_transformation_limit_reaches_model_proposal_generator() -> None:
-    assert "repair_max_attempts: int = 1" in ASSISTANT
-    assert "max_attempts=repair_max_attempts" in ASSISTANT
+    assert "repair_max_attempts: int = 3" in ASSISTANT
+    assert "max_attempts=1 if production_repair else repair_max_attempts" in ASSISTANT
+    assert 'proposal_mode="production" if production_repair else "generic"' in ASSISTANT
     assert "repair_max_attempts=1" in ASSISTANT
     assert "session.attempts >= session.max_attempts" in ASSISTANT
 
@@ -32,3 +33,8 @@ def test_policy_metadata_is_persisted_in_self_repair_session() -> None:
         "def grant_approval",
     ):
         assert token in SESSION
+
+
+def test_production_repair_explicitly_selects_single_path_mode():
+    assert 'proposal_mode="production" if production_repair else "generic"' in ASSISTANT
+    assert "max_attempts=1 if production_repair else repair_max_attempts" in ASSISTANT

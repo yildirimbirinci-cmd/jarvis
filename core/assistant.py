@@ -1466,6 +1466,7 @@ class AssistantEngine:
         *,
         max_attempts: int = 3,
         strict_attempt_limit: bool = False,
+        proposal_mode: str = "generic",
     ) -> EditProposal:
         """Generate a syntactically valid, bounded proposal with feedback retries.
 
@@ -1724,11 +1725,23 @@ class AssistantEngine:
                     )
             return ""
 
-        # Deterministic repair contract: proposal generation is one pass.
-        # A validator rejection terminates this repair cycle. New evidence must
-        # start a new cycle; the model is never asked to guess another anchor.
-        base_attempts = 1
-        attempts = 1
+        # Production deterministic method transformation is exactly one model
+        # pass. The generic/manual proposal API keeps its historical bounded
+        # validator-feedback behavior for compatibility and diagnostics; it is
+        # not part of the production self-repair path.
+        normalized_mode = str(proposal_mode or "generic").strip().casefold()
+        deterministic_transform = (
+            normalized_mode == "production"
+            or "DETERMINISTIC_METHOD_TRANSFORMATION" in prompt
+        )
+        if deterministic_transform:
+            base_attempts = 1
+            attempts = 1
+        else:
+            # Generic/manual code-review keeps the historical bounded repair
+            # contract. Production self-repair never reaches this branch.
+            base_attempts = max(1, min(int(max_attempts), 3))
+            attempts = base_attempts + 1
         previous_response = ""
         previous_error = ""
         seen_responses: set[str] = set()
@@ -1979,7 +1992,6 @@ class AssistantEngine:
                     "ambiguous line again is a hard failure; use one complete CANDIDATE/ADAY "
                     "block exactly as provided or return an empty files list."
                 )
-            deterministic_transform = "DETERMINISTIC_METHOD_TRANSFORMATION" in prompt
             if deterministic_transform:
                 path_match = re.search(
                     r"(?im)^İzinli dosyalar:\s*(.+?)\s*$",
@@ -3419,7 +3431,7 @@ class AssistantEngine:
         approved_paths: tuple[str, ...] | list[str] = (),
         approved_symbols: tuple[str, ...] | list[str] = (),
         plan_id: str = "",
-        repair_max_attempts: int = 1,
+        repair_max_attempts: int = 3,
     ) -> str:
         """Prepare, but never apply, a change proposal for Jarvis' own source.
 
@@ -3683,8 +3695,9 @@ class AssistantEngine:
             try:
                 proposal = self._generate_validated_own_code_proposal(
                     prompt,
-                    max_attempts=repair_max_attempts,
+                    max_attempts=1 if production_repair else repair_max_attempts,
                     strict_attempt_limit=production_repair,
+                    proposal_mode="production" if production_repair else "generic",
                 )
             except (urllib.error.URLError, TimeoutError, ValueError, json.JSONDecodeError) as exc:
                 return f"Yerel kod öneri motoru yanıt veremedi: {exc}"
@@ -7765,8 +7778,6 @@ class AssistantEngine:
                 "runtime bulgu",
                 "runtime bulgus",
                 "bu tekrarlanan",
-                "bu sorun",
-                "bu hata",
             )
         )
         explicit_execute_intent = any(
