@@ -1327,6 +1327,7 @@ def reorder_insertions_after_exact_edits(
     payload: dict[str, Any],
     *,
     project_root: Path,
+    instruction: str = "",
 ) -> dict[str, Any]:
     """Move insert operations behind exact edits only when proven independent.
 
@@ -1343,6 +1344,7 @@ def reorder_insertions_after_exact_edits(
         return repaired
 
     root = Path(project_root).resolve(strict=False)
+    requested_symbol = _requested_symbol(instruction)
     for file_row in files:
         if not isinstance(file_row, dict):
             continue
@@ -1385,9 +1387,35 @@ def reorder_insertions_after_exact_edits(
             kind = str(operation.get("op", "replace")).strip().casefold()
             anchor_field = "anchor" if kind.startswith("insert_") else "old"
             anchor = operation.get(anchor_field)
-            if not isinstance(anchor, str) or not anchor or working.count(anchor) != 1:
+            if not isinstance(anchor, str) or not anchor:
                 safe = False
                 break
+
+            if working.count(anchor) != 1:
+                # Exact edits earlier in the reordered sequence may invalidate a
+                # method-boundary insert anchor that was valid against the live
+                # source. Re-ground only a proven approved Class.method boundary
+                # against the simulated post-edit source. This is deterministic:
+                # no fuzzy matching and no symbol widening are allowed here.
+                if kind in {"insert_before", "insert_after"} and requested_symbol:
+                    class_name, method_name = requested_symbol
+                    recovered = _recover_missing_method_boundary_insert_anchor(
+                        working,
+                        class_name=class_name,
+                        method_name=method_name,
+                        anchor=anchor,
+                        insert_before=kind == "insert_before",
+                    )
+                    if recovered is not None:
+                        recovered_kind, recovered_anchor = recovered
+                        operation["op"] = recovered_kind
+                        operation["anchor"] = recovered_anchor
+                        kind = recovered_kind
+                        anchor = recovered_anchor
+                if working.count(anchor) != 1:
+                    safe = False
+                    break
+
             if kind in {"replace", "replace_exact"}:
                 rendered = operation.get("new")
             elif kind == "delete":

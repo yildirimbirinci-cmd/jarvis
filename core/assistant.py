@@ -2110,6 +2110,7 @@ class AssistantEngine:
                 payload = reorder_insertions_after_exact_edits(
                     payload,
                     project_root=self.own_project_root(),
+                    instruction=prompt,
                 )
                 # Final live-source grounding gate for insert operations.  Some
                 # model drafts describe the approved method almost verbatim as

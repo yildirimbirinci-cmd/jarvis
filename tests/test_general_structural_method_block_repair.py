@@ -8,6 +8,7 @@ import pytest
 from artmach_assistant.core.own_code_anchor_repair import (
     normalize_structural_method_block_replacements,
     repair_ambiguous_replace_anchors,
+    reorder_insertions_after_exact_edits,
 )
 from artmach_assistant.core.workspace import WorkspaceError
 
@@ -276,3 +277,66 @@ def test_missing_insert_anchor_without_approved_method_header_is_not_guessed(
     operation = repaired["files"][0]["operations"][0]
     assert operation["op"] == "insert_after"
     assert operation["anchor"] == "this text does not exist in live source"
+
+
+
+def test_reordered_insert_after_is_regrounded_after_prior_exact_edit(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "core" / "assistant.py"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    source = (
+        "class AssistantEngine:\n"
+        "    def handle(self, raw_text):\n"
+        "        runtime = self.runtime\n"
+        "        if runtime is not None:\n"
+        "            runtime.run(raw_text)\n"
+        "        return raw_text\n"
+    )
+    path.write_text(source, encoding="utf-8")
+    method_anchor = source.split("class AssistantEngine:\n", 1)[1]
+    payload = {
+        "files": [{
+            "path": "core/assistant.py",
+            "operations": [
+                {
+                    "op": "insert_after",
+                    "anchor": method_anchor,
+                    "content": "\n    # post-handle marker\n",
+                },
+                {
+                    "op": "replace",
+                    "old": "        runtime = self.runtime\n",
+                    "new": "        runtime = self.conversation_runtime\n",
+                },
+            ],
+        }]
+    }
+
+    repaired = reorder_insertions_after_exact_edits(
+        payload,
+        project_root=tmp_path,
+        instruction=(
+            "APPROVED_STRUCTURAL_TARGET: AssistantEngine.handle\n"
+            "Fix the repeated runtime failure."
+        ),
+    )
+
+    operations = repaired["files"][0]["operations"]
+    assert [row["op"] for row in operations] == ["replace", "insert_after"]
+
+    working = source
+    for operation in operations:
+        if operation["op"] == "replace":
+            assert working.count(operation["old"]) == 1
+            working = working.replace(operation["old"], operation["new"], 1)
+        else:
+            assert working.count(operation["anchor"]) == 1
+            working = working.replace(
+                operation["anchor"],
+                operation["anchor"] + operation["content"],
+                1,
+            )
+
+    assert "self.conversation_runtime" in working
+    assert "# post-handle marker" in working
