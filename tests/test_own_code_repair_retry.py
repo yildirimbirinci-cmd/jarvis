@@ -727,7 +727,7 @@ def test_scope_rejection_is_terminal_in_single_pass_repair(monkeypatch, tmp_path
     with pytest.raises(workspace_error):
         engine._generate_validated_own_code_proposal(
             "repair approved target\n"
-            "DETERMINISTIC_REPAIR_ENVELOPE\n"
+            "DETERMINISTIC_METHOD_TRANSFORMATION\n"
             "İzinli dosyalar: core/assistant.py\n"
             "Hedef semboller: AssistantEngine.handle\n"
             "APPROVED_STRUCTURAL_TARGET: AssistantEngine.handle",
@@ -1098,25 +1098,92 @@ def test_prepare_runtime_improvement_stops_before_session_when_evidence_gate_blo
     assert "INSUFFICIENT_EVIDENCE" in result
     assert create_calls == []
 
-def test_deterministic_repair_envelope_contract_is_present():
+def test_deterministic_method_transformation_contract_is_present():
     import inspect
     from artmach_assistant.core.assistant import AssistantEngine
 
     source = inspect.getsource(AssistantEngine._generate_validated_own_code_proposal)
-    assert "DETERMINISTIC_REPAIR_ENVELOPE" in source
-    assert "__ECHO_APPROVED_METHOD__" in source
-    assert "model anchor secemez" in source
+    assert "DETERMINISTIC_METHOD_TRANSFORMATION" in source
+    assert "build_deterministic_method_payload" in source
+    assert "model patch yapisi uretemez" in source
     assert "base_attempts = 1" in source
     assert "attempts = 1" in source
 
 
-def test_production_repair_prompt_removes_anchor_choice():
+def test_production_repair_prompt_requests_method_only():
     import inspect
     from artmach_assistant.core.assistant import AssistantEngine
 
     source = inspect.getsource(AssistantEngine.prepare_own_code_proposal)
-    assert "path, symbol, operation ve anchor secme yetkin yok" in source
-    assert "old alani literal __ECHO_APPROVED_METHOD__ olmali" in source
+    assert "patch JSON üretme" in source
+    assert "replacement_method" in source
+    assert "operation ve anchor sistem tarafından" in source
+
+
+def test_deterministic_transformation_builds_patch_from_live_method(monkeypatch, tmp_path):
+    engine = object.__new__(AssistantEngine)
+    engine.own_code_history = SimpleNamespace(record=lambda *_args, **_kwargs: None)
+    engine.own_project_root = lambda: tmp_path
+    source_path = tmp_path / "core" / "assistant.py"
+    source_path.parent.mkdir(parents=True, exist_ok=True)
+    source_path.write_text(
+        "class AssistantEngine:\n"
+        "    def handle(self, raw_text):\n"
+        "        return raw_text\n",
+        encoding="utf-8",
+    )
+    calls = []
+    engine._request_code_model_json = lambda prompt, **_kwargs: (
+        calls.append(prompt)
+        or json.dumps({
+            "replacement_method": "def handle(self, raw_text):\n    return raw_text.strip()",
+            "summary": "normalize input",
+        })
+    )
+    captured = {}
+    engine.editor = SimpleNamespace(
+        reject=lambda: None,
+        create_proposal=lambda raw: (
+            captured.setdefault("payload", json.loads(raw))
+            or SimpleNamespace(summary="repair", files=())
+        ),
+    )
+    # create_proposal must return a proposal object, not the captured dict.
+    def create_proposal(raw):
+        captured["payload"] = json.loads(raw)
+        return SimpleNamespace(summary="repair", files=())
+    engine.editor.create_proposal = create_proposal
+    globals_map = AssistantEngine._generate_validated_own_code_proposal.__globals__
+    for name in (
+        "merge_duplicate_operation_rows",
+        "ground_requested_docstring_replace_anchors",
+        "repair_high_confidence_missing_anchors",
+        "repair_unique_whitespace_anchors",
+        "remove_redundant_noop_replaces",
+        "qualify_inserted_private_helper_calls",
+        "normalize_structural_class_method_insertions",
+        "normalize_structural_method_block_replacements",
+        "repair_ambiguous_replace_anchors",
+        "reorder_insertions_after_exact_edits",
+    ):
+        monkeypatch.setitem(globals_map, name, lambda payload, **_kwargs: payload)
+    monkeypatch.setitem(globals_map, "validate_behavior_preserving_extraction_payload", lambda *_args, **_kwargs: None)
+    monkeypatch.setitem(globals_map, "build_structural_method_block_guidance", lambda **_kwargs: "")
+
+    engine._generate_validated_own_code_proposal(
+        "repair approved target\n"
+        "DETERMINISTIC_METHOD_TRANSFORMATION\n"
+        "İzinli dosyalar: core/assistant.py\n"
+        "APPROVED_STRUCTURAL_TARGET: AssistantEngine.handle",
+        strict_attempt_limit=True,
+    )
+
+    assert len(calls) == 1
+    operation = captured["payload"]["files"][0]["operations"][0]
+    assert operation["op"] == "replace"
+    assert operation["old"] == "    def handle(self, raw_text):\n        return raw_text\n"
+    assert operation["new"] == "    def handle(self, raw_text):\n        return raw_text.strip()"
+
 
 def test_measure_handle_local_call_uses_real_callable_symbol_name():
     import inspect

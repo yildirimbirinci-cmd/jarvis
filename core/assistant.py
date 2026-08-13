@@ -1554,12 +1554,36 @@ class AssistantEngine:
                     )
             return payload
 
-        def enforce_deterministic_repair_envelope(payload: object) -> object:
-            """Bind production repair to one exact live Class.method envelope."""
-            if "DETERMINISTIC_REPAIR_ENVELOPE" not in prompt:
-                return payload
-            if not isinstance(payload, dict):
-                raise WorkspaceError("DETERMINISTIC REPAIR ENVELOPE REDDI: JSON object gerekli.")
+        def build_deterministic_method_payload(raw_response: str) -> object:
+            """Build the patch envelope from live AST plus one model method body.
+
+            In production repair the model is a transformation engine only. It
+            cannot choose files, symbols, operations, or anchors.
+            """
+            try:
+                response = json.loads(raw_response)
+            except json.JSONDecodeError as exc:
+                raise WorkspaceError(
+                    f"DETERMINISTIC TRANSFORMATION REDDI: gecersiz JSON: {exc}"
+                ) from exc
+            if not isinstance(response, dict):
+                raise WorkspaceError(
+                    "DETERMINISTIC TRANSFORMATION REDDI: JSON object gerekli."
+                )
+            if set(response) - {"replacement_method", "summary"}:
+                raise WorkspaceError(
+                    "DETERMINISTIC TRANSFORMATION REDDI: model patch yapisi uretemez; "
+                    "yalniz replacement_method ve summary alanlari kullanilabilir."
+                )
+            replacement = response.get("replacement_method", "")
+            if not isinstance(replacement, str):
+                raise WorkspaceError(
+                    "DETERMINISTIC TRANSFORMATION REDDI: replacement_method string olmali."
+                )
+            if not replacement.strip():
+                raise _OwnCodeSafeAbstention(
+                    "Kod modeli kanitli hedef icin guvenli method donusumu uretemedi."
+                )
 
             path_match = re.search(r"(?im)^İzinli dosyalar:\s*(.+?)\s*$", prompt)
             target_match = re.search(
@@ -1568,7 +1592,7 @@ class AssistantEngine:
             )
             if not path_match or not target_match:
                 raise WorkspaceError(
-                    "DETERMINISTIC REPAIR ENVELOPE REDDI: exact path/symbol kaniti yok."
+                    "DETERMINISTIC TRANSFORMATION REDDI: exact path/symbol kaniti yok."
                 )
             allowed_paths = [
                 row.strip().replace("\\", "/")
@@ -1577,24 +1601,29 @@ class AssistantEngine:
             ]
             if len(allowed_paths) != 1:
                 raise WorkspaceError(
-                    "DETERMINISTIC REPAIR ENVELOPE REDDI: tek exact production path gerekli."
+                    "DETERMINISTIC TRANSFORMATION REDDI: tek exact production path gerekli."
                 )
-            class_name, method_name = target_match.group(1).split(".", 1)
             relative = allowed_paths[0]
+            class_name, method_name = target_match.group(1).split(".", 1)
             source_path = self.own_project_root() / relative
             if not source_path.is_file():
                 raise WorkspaceError(
-                    f"DETERMINISTIC REPAIR ENVELOPE REDDI: kaynak yok: {relative}"
+                    f"DETERMINISTIC TRANSFORMATION REDDI: kaynak yok: {relative}"
                 )
             source = source_path.read_text(encoding="utf-8")
-            tree = ast.parse(source)
+            try:
+                tree = ast.parse(source)
+            except SyntaxError as exc:
+                raise WorkspaceError(
+                    f"DETERMINISTIC TRANSFORMATION REDDI: live source parse edilemedi: {exc}"
+                ) from exc
             owners = [
                 node for node in tree.body
                 if isinstance(node, ast.ClassDef) and node.name == class_name
             ]
             if len(owners) != 1:
                 raise WorkspaceError(
-                    "DETERMINISTIC REPAIR ENVELOPE REDDI: approved class tekil degil."
+                    "DETERMINISTIC TRANSFORMATION REDDI: approved class tekil degil."
                 )
             methods = [
                 node for node in owners[0].body
@@ -1603,7 +1632,7 @@ class AssistantEngine:
             ]
             if len(methods) != 1:
                 raise WorkspaceError(
-                    "DETERMINISTIC REPAIR ENVELOPE REDDI: approved method tekil degil."
+                    "DETERMINISTIC TRANSFORMATION REDDI: approved method tekil degil."
                 )
             method = methods[0]
             lines = source.splitlines(keepends=True)
@@ -1617,61 +1646,56 @@ class AssistantEngine:
             live_method = "".join(lines[start_line - 1:end_line])
             if not live_method or source.count(live_method) != 1:
                 raise WorkspaceError(
-                    "DETERMINISTIC REPAIR ENVELOPE REDDI: live method envelope tekil degil."
-                )
-
-            files = payload.get("files")
-            if not isinstance(files, list) or len(files) != 1:
-                raise WorkspaceError(
-                    "DETERMINISTIC REPAIR ENVELOPE REDDI: model tek replacement vermeli."
-                )
-            row = files[0]
-            operations = row.get("operations") if isinstance(row, dict) else None
-            if not isinstance(operations, list) or len(operations) != 1:
-                raise WorkspaceError(
-                    "DETERMINISTIC REPAIR ENVELOPE REDDI: model tek operation vermeli."
-                )
-            operation = operations[0]
-            if not isinstance(operation, dict) or str(operation.get("op", "")).strip() != "replace":
-                raise WorkspaceError(
-                    "DETERMINISTIC REPAIR ENVELOPE REDDI: operation deterministik replace olmali."
-                )
-            if str(operation.get("old", "")).strip() != "__ECHO_APPROVED_METHOD__":
-                raise WorkspaceError(
-                    "DETERMINISTIC REPAIR ENVELOPE REDDI: model anchor secemez."
-                )
-            replacement = operation.get("new")
-            if not isinstance(replacement, str) or not replacement.strip():
-                raise WorkspaceError(
-                    "DETERMINISTIC REPAIR ENVELOPE REDDI: replacement method gerekli."
+                    "DETERMINISTIC TRANSFORMATION REDDI: live method envelope tekil degil."
                 )
 
             import textwrap as _det_textwrap
             dedented = _det_textwrap.dedent(replacement).strip("\n") + "\n"
-            replacement_tree = ast.parse(dedented)
+            try:
+                replacement_tree = ast.parse(dedented)
+            except SyntaxError as exc:
+                raise WorkspaceError(
+                    f"DETERMINISTIC TRANSFORMATION REDDI: replacement method syntax: {exc}"
+                ) from exc
             if len(replacement_tree.body) != 1 or not isinstance(
                 replacement_tree.body[0], (ast.FunctionDef, ast.AsyncFunctionDef)
             ):
                 raise WorkspaceError(
-                    "DETERMINISTIC REPAIR ENVELOPE REDDI: replacement tek method olmali."
+                    "DETERMINISTIC TRANSFORMATION REDDI: replacement tek method olmali."
                 )
-            if replacement_tree.body[0].name != method_name:
+            replacement_method = replacement_tree.body[0]
+            if replacement_method.name != method_name:
                 raise WorkspaceError(
-                    "DETERMINISTIC REPAIR ENVELOPE REDDI: method adi degistirilemez."
+                    "DETERMINISTIC TRANSFORMATION REDDI: method adi degistirilemez."
+                )
+            if isinstance(method, ast.AsyncFunctionDef) != isinstance(
+                replacement_method, ast.AsyncFunctionDef
+            ):
+                raise WorkspaceError(
+                    "DETERMINISTIC TRANSFORMATION REDDI: async/sync method turu degistirilemez."
+                )
+            original_args = ast.dump(method.args, include_attributes=False)
+            replacement_args = ast.dump(replacement_method.args, include_attributes=False)
+            if original_args != replacement_args:
+                raise WorkspaceError(
+                    "DETERMINISTIC TRANSFORMATION REDDI: method imzasi degistirilemez."
                 )
 
             indent = re.match(r"[ \t]*", lines[int(method.lineno) - 1]).group(0)
             grounded_new = _det_textwrap.indent(dedented.rstrip("\n"), indent)
-            payload["files"] = [{
-                "path": relative,
-                "reason": str(row.get("reason", "")).strip() or "evidence-grounded repair",
-                "operations": [{
-                    "op": "replace",
-                    "old": live_method,
-                    "new": grounded_new,
+            return {
+                "summary": str(response.get("summary", "") or "").strip()
+                or "evidence-grounded deterministic method transformation",
+                "files": [{
+                    "path": relative,
+                    "reason": "evidence-grounded deterministic method transformation",
+                    "operations": [{
+                        "op": "replace",
+                        "old": live_method,
+                        "new": grounded_new,
+                    }],
                 }],
-            }]
-            return payload
+            }
 
         def rejected_operation_detail(
             payload: object,
@@ -2010,8 +2034,10 @@ class AssistantEngine:
 
             payload: object = None
             try:
-                payload = self._validate_own_code_payload_shape(raw)
-                payload = enforce_deterministic_repair_envelope(payload)
+                if "DETERMINISTIC_METHOD_TRANSFORMATION" in prompt:
+                    payload = build_deterministic_method_payload(raw)
+                else:
+                    payload = self._validate_own_code_payload_shape(raw)
 
                 # Enforce evidence-bound file scope before anchor repair or
                 # EditManager validation.
@@ -3543,15 +3569,16 @@ class AssistantEngine:
             )
         if production_repair:
             prompt += (
-                "\n\nDETERMINISTIC_REPAIR_ENVELOPE\n"
-                "Bu onarimda path, symbol, operation ve anchor secme yetkin yok. "
-                "Sistem bunlari live AST/source kanitindan belirler. "
-                "Cevap tam olarak tek file ve tek replace operation icermeli. "
-                "old alani literal __ECHO_APPROVED_METHOD__ olmali. "
-                "new alani yalniz APPROVED_STRUCTURAL_TARGET metodunun eksiksiz yeni "
-                "method definition'i olmali. Method adini degistirme. Yeni kardes "
-                "helper, yeni dosya veya ikinci operation uretme. Kanit yeterli degilse "
-                "files bos liste olmali."
+                "\n\nDETERMINISTIC_METHOD_TRANSFORMATION\n"
+                "Bu production repair akışında patch JSON üretme. Path, symbol, "
+                "operation ve anchor sistem tarafından live AST/source kanıtından "
+                "belirlenir. Yalnız şu JSON şemasını döndür: "
+                "{\"replacement_method\":\"<APPROVED_STRUCTURAL_TARGET metodunun "
+                "eksiksiz yeni Python method definition'i>\",\"summary\":\"<kısa neden>\"}. "
+                "replacement_method dışında kod/patch alanı üretme. Method adı, "
+                "imzası ve async/sync türü değişemez. Yeni kardeş helper, yeni dosya "
+                "veya ikinci operation üretme. Kanıt güvenli dönüşümü desteklemiyorsa "
+                "replacement_method alanını boş string döndür."
                 "\n\nONARIM GÜVENLİK SINIRI:\n"
                 "Test dosyaları yalnızca hatanın beklenen davranışını anlamak için bağlamdır. "
                 "tests/ altındaki dosyaları, test_*.py dosyalarını ve test beklentilerini değiştirme. "
