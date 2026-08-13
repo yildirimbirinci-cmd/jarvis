@@ -1979,10 +1979,99 @@ class AssistantEngine:
                     "ambiguous line again is a hard failure; use one complete CANDIDATE/ADAY "
                     "block exactly as provided or return an empty files list."
                 )
-            raw = self._request_code_model_json(
-                current_prompt,
-                temperature=0.0 if attempt > 1 else 0.05,
-            )
+            deterministic_transform = "DETERMINISTIC_METHOD_TRANSFORMATION" in prompt
+            if deterministic_transform:
+                path_match = re.search(
+                    r"(?im)^İzinli dosyalar:\s*(.+?)\s*$",
+                    prompt,
+                )
+                target_match = re.search(
+                    r"(?im)^APPROVED_STRUCTURAL_TARGET:\s*"
+                    r"([A-Za-z_][\w]*\.[A-Za-z_][\w]*)\s*$",
+                    prompt,
+                )
+                if not path_match or not target_match:
+                    raise WorkspaceError(
+                        "DETERMINISTIC TRANSFORMATION REDDI: exact path/symbol kaniti yok."
+                    )
+                approved_paths = [
+                    row.strip().replace("\\\\", "/")
+                    for row in path_match.group(1).split(",")
+                    if row.strip()
+                ]
+                if len(approved_paths) != 1:
+                    raise WorkspaceError(
+                        "DETERMINISTIC TRANSFORMATION REDDI: tek exact production path gerekli."
+                    )
+                relative = approved_paths[0]
+                class_name, method_name = target_match.group(1).split(".", 1)
+                source_path = self.own_project_root() / relative
+                try:
+                    live_source = source_path.read_text(encoding="utf-8")
+                    live_tree = ast.parse(live_source)
+                except (OSError, SyntaxError) as exc:
+                    raise WorkspaceError(
+                        "DETERMINISTIC TRANSFORMATION REDDI: live source okunamadi."
+                    ) from exc
+                owners = [
+                    node for node in live_tree.body
+                    if isinstance(node, ast.ClassDef) and node.name == class_name
+                ]
+                methods = []
+                if len(owners) == 1:
+                    methods = [
+                        node for node in owners[0].body
+                        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                        and node.name == method_name
+                    ]
+                if len(methods) != 1:
+                    raise WorkspaceError(
+                        "DETERMINISTIC REPAIR ENVELOPE REDDI: approved method tekil degil."
+                    )
+                method = methods[0]
+                source_lines = live_source.splitlines(keepends=True)
+                live_method = "".join(
+                    source_lines[int(method.lineno) - 1:int(method.end_lineno)]
+                )
+                evidence_match = re.search(
+                    r"(?is)REPAIR EVIDENCE GATE.*?(?=\\n\\n[A-ZÇĞİÖŞÜ_ ]{4,}:|\\Z)",
+                    prompt,
+                )
+                evidence = evidence_match.group(0).strip() if evidence_match else (
+                    "Use only the approved target and preserve observable behavior."
+                )
+                current_prompt = (
+                    "DETERMINISTIC METHOD TRANSFORMATION\n"
+                    "Transform exactly one existing Python method. Do not produce a patch, "
+                    "file list, operation, anchor, helper method, markdown, commentary, or "
+                    "additional JSON fields. Preserve the exact method name, signature, "
+                    "decorators, and async/sync kind. Preserve observable behavior except "
+                    "for the evidence-backed repair. If the evidence does not justify a "
+                    "safe change, return an empty replacement_method.\n\n"
+                    f"APPROVED PATH: {relative}\n"
+                    f"APPROVED SYMBOL: {class_name}.{method_name}\n\n"
+                    f"EVIDENCE:\n{evidence}\n\n"
+                    "LIVE METHOD SOURCE:\n"
+                    f"{live_method}\n\n"
+                    "Return exactly one JSON object with exactly these keys:\n"
+                    '{"replacement_method":"<complete replacement method source or empty string>",'
+                    '"summary":"<brief evidence-based reason>"}'
+                )
+                raw = self._request_code_model_json(
+                    current_prompt,
+                    system_prompt=(
+                        "You are a deterministic single-method transformation engine. "
+                        "Return only one JSON object with exactly replacement_method and "
+                        "summary. Never return files, operations, path, symbol, anchor, "
+                        "old, new, patches, markdown, or helper methods."
+                    ),
+                    temperature=0.0,
+                )
+            else:
+                raw = self._request_code_model_json(
+                    current_prompt,
+                    temperature=0.0 if attempt > 1 else 0.05,
+                )
             response_key = hashlib.sha256(
                 raw.encode("utf-8", errors="replace")
             ).hexdigest()
