@@ -6615,6 +6615,152 @@ class AssistantEngine:
             "Dosyalar henüz değiştirilmedi. Uygulamak için açıkça 'taslağı onayla' de."
         )
 
+    def _recover_self_repair_worktree_failure(
+        self,
+        session: SelfRepairSession,
+        failed_proposal: object,
+        failure_output: str,
+    ) -> str:
+        """Run one bounded reproposal after isolated worktree regression failure.
+
+        The failed proposal never reaches the main source tree.  The code model
+        receives the exact failing test evidence plus its own rejected draft,
+        remains locked to the already-approved production scope, and gets one
+        new proposal opportunity.  The revised draft must pass a fresh isolated
+        worktree validation before it can return to proposal_ready.
+        """
+        failed_payload = proposal_as_payload(failed_proposal)
+        try:
+            failed_json = json.dumps(
+                failed_payload, ensure_ascii=False, indent=2, sort_keys=True
+            )
+        except Exception:
+            failed_json = str(failed_payload)
+
+        # The failed draft must not remain actionable while a replacement is
+        # being generated.  The main source tree has not been changed.
+        reject = getattr(getattr(self, "editor", None), "reject", None)
+        if callable(reject):
+            reject()
+        self._pending_own_code_fingerprint = None
+        self._clear_own_code_pending_proposal_store()
+
+        recovery_instruction = (
+            session.instruction
+            + "\n\nWORKTREE REGRESSION RECOVERY (ONE PASS ONLY):\n"
+            + "The previous proposal was rejected only after isolated worktree tests. "
+            + "Do not broaden the approved production scope and do not edit tests. "
+            + "Use the failing test output as behavioral evidence, preserve the "
+            + "behaviors those tests protect, and produce one corrected proposal.\n"
+            + "APPROVED PATHS: "
+            + ", ".join(session.approved_paths)
+            + "\nAPPROVED SYMBOLS: "
+            + (", ".join(session.approved_symbols) or "approved path-local symbols")
+            + "\n\nFAILED WORKTREE OUTPUT:\n"
+            + str(failure_output or "")[-8000:]
+            + "\n\nREJECTED PROPOSAL JSON:\n"
+            + failed_json[-12000:]
+        )
+
+        try:
+            prepared = self.prepare_own_code_proposal(
+                recovery_instruction,
+                production_repair=True,
+                approved_paths=session.approved_paths,
+                approved_symbols=session.approved_symbols,
+                plan_id=session.plan_id,
+                repair_max_attempts=0,
+            )
+        except Exception as exc:
+            prepared = f"Worktree recovery proposal generation failed: {exc}"
+
+        revised = getattr(getattr(self, "editor", None), "pending", None)
+        if revised is None:
+            try:
+                self._self_repair_store().transition(
+                    "proposal_failed",
+                    expected={"applying"},
+                    last_error=str(prepared),
+                )
+            except Exception:
+                pass
+            return (
+                "Worktree regresyonu için tek bounded recovery pass çalıştı ancak "
+                "güvenli revize taslak üretilemedi. Ana kaynak dosyalar değiştirilmedi. "
+                + str(prepared)[-1200:]
+            )
+
+        try:
+            baseline_success, baseline_output = self._run_own_tests()
+            baseline_failures = self._test_failure_ids(baseline_output)
+            isolated = OwnCodeWorktreeValidator(
+                self.own_project_root()
+            ).validate(
+                revised,
+                lambda root: self._validate_own_code_at_root(
+                    root, baseline_failures=baseline_failures
+                ),
+            )
+        except Exception as exc:
+            reject = getattr(getattr(self, "editor", None), "reject", None)
+            if callable(reject):
+                reject()
+            self._pending_own_code_fingerprint = None
+            self._clear_own_code_pending_proposal_store()
+            error = f"Revize worktree doğrulaması başlatılamadı: {exc}"
+            try:
+                self._self_repair_store().transition(
+                    "proposal_failed", expected={"applying"}, last_error=error
+                )
+            except Exception:
+                pass
+            return error + " Ana kaynak dosyalar değiştirilmedi."
+
+        if not isolated.ok:
+            reject = getattr(getattr(self, "editor", None), "reject", None)
+            if callable(reject):
+                reject()
+            self._pending_own_code_fingerprint = None
+            self._clear_own_code_pending_proposal_store()
+            error = (
+                "Tek bounded worktree recovery pass de doğrulamadan geçmedi. "
+                + str(isolated.output or "")[-1600:]
+            )
+            try:
+                self._self_repair_store().transition(
+                    "proposal_failed", expected={"applying"}, last_error=error
+                )
+            except Exception:
+                pass
+            return error + " Ana kaynak dosyalar değiştirilmedi."
+
+        revised_fingerprint = proposal_fingerprint(revised)
+        try:
+            self._self_repair_store().transition(
+                "proposal_ready",
+                expected={"applying"},
+                proposal_fingerprint=revised_fingerprint,
+                last_error="",
+            )
+        except Exception as exc:
+            reject = getattr(getattr(self, "editor", None), "reject", None)
+            if callable(reject):
+                reject()
+            self._pending_own_code_fingerprint = None
+            self._clear_own_code_pending_proposal_store()
+            return (
+                "Revize taslak worktree doğrulamasından geçti ancak onarım durumu "
+                f"kaydedilemedi: {exc}. Ana kaynak dosyalar değiştirilmedi."
+            )
+
+        return (
+            str(prepared)
+            + "\n\nİlk taslak worktree regresyonu ürettiği için ECHO aynı kapsamda tek "
+            + "bounded recovery pass yaptı. Revize taslak geçici Git worktree "
+            + "doğrulamasından geçti; ana kaynak dosyalar hâlâ değiştirilmedi. "
+            + "Revize taslağı uygulamak için açıkça 'taslağı onayla' de."
+        )
+
     def _apply_active_self_repair_proposal(
         self, session: SelfRepairSession
     ) -> str:
@@ -6706,6 +6852,14 @@ class AssistantEngine:
         except ValueError as exc:
             return f"Hedefli taslak uygulanamadı: {exc}"
         result = self.apply_pending_own_code_proposal()
+        worktree_failed = (
+            "taslak geçici Git worktree doğrulamasından geçmedi" in result
+            or "taslak gecici Git worktree dogrulamasindan gecmedi" in result
+        )
+        if worktree_failed:
+            return self._recover_self_repair_worktree_failure(
+                session, pending, result
+            )
         success = "Onayladığın kod değişikliği uygulandı" in result
         try:
             self._self_repair_store().transition(

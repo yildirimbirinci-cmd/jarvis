@@ -832,3 +832,153 @@ def test_bounded_recovery_scope_lock_clamps_mixed_out_of_scope_file(
     assert "RECOVERY SCOPE LOCK (MANDATORY)" in prompts[1]
     assert "core/assistant.py" in prompts[1]
     assert [row["path"] for row in captured["files"]] == ["core/assistant.py"]
+
+
+def test_worktree_failure_gets_one_bounded_reproposal_and_revalidation(monkeypatch) -> None:
+    engine = object.__new__(AssistantEngine)
+    first = SimpleNamespace(
+        summary="first",
+        files=(SimpleNamespace(path="core/assistant.py", new_content="bad"),),
+    )
+    revised = SimpleNamespace(
+        summary="revised",
+        files=(SimpleNamespace(path="core/assistant.py", new_content="good"),),
+    )
+    editor = SimpleNamespace(pending=first)
+    editor.reject = lambda: setattr(editor, "pending", None)
+    engine.editor = editor
+    engine._pending_own_code_fingerprint = "old"
+    engine._clear_own_code_pending_proposal_store = lambda: None
+    engine._run_own_tests = lambda: (True, "baseline ok")
+    engine._test_failure_ids = lambda _output: set()
+    engine._validate_own_code_at_root = lambda _root, baseline_failures=None: "ok"
+    engine.own_project_root = lambda: "/project"
+
+    prepare_calls: list[dict[str, object]] = []
+
+    def prepare(instruction, **kwargs):
+        prepare_calls.append({"instruction": instruction, **kwargs})
+        editor.pending = revised
+        engine._pending_own_code_fingerprint = "revised"
+        return "revised proposal prepared"
+
+    engine.prepare_own_code_proposal = prepare
+    transitions: list[tuple[str, dict[str, object]]] = []
+    store = SimpleNamespace(
+        transition=lambda state, **kwargs: transitions.append((state, kwargs))
+        or SimpleNamespace(state=state)
+    )
+    engine._self_repair_store = lambda: store
+
+    class Validator:
+        def __init__(self, root):
+            assert root == "/project"
+
+        def validate(self, proposal, callback):
+            assert proposal is revised
+            callback("/tmp/worktree")
+            return SimpleNamespace(ok=True, output="24 passed")
+
+    monkeypatch.setitem(
+        AssistantEngine._recover_self_repair_worktree_failure.__globals__,
+        "OwnCodeWorktreeValidator",
+        Validator,
+    )
+    monkeypatch.setitem(
+        AssistantEngine._recover_self_repair_worktree_failure.__globals__,
+        "proposal_fingerprint",
+        lambda proposal: "fp-revised" if proposal is revised else "fp-first",
+    )
+
+    session = SimpleNamespace(
+        instruction="fix runtime finding",
+        approved_paths=("core/assistant.py",),
+        approved_symbols=("AssistantEngine.handle",),
+        plan_id="RPR-06578E9EDE",
+    )
+    result = engine._recover_self_repair_worktree_failure(
+        session,
+        first,
+        "FAILED tests/test_x.py::test_behavior",
+    )
+
+    assert len(prepare_calls) == 1
+    assert prepare_calls[0]["production_repair"] is True
+    assert prepare_calls[0]["repair_max_attempts"] == 0
+    assert "FAILED tests/test_x.py::test_behavior" in prepare_calls[0]["instruction"]
+    assert "REJECTED PROPOSAL JSON" in prepare_calls[0]["instruction"]
+    assert editor.pending is revised
+    assert transitions[-1][0] == "proposal_ready"
+    assert transitions[-1][1]["expected"] == {"applying"}
+    assert "worktree doğrulamasından geçti" in result
+    assert "taslağı onayla" in result
+
+
+def test_worktree_recovery_stops_after_revised_validation_failure(monkeypatch) -> None:
+    engine = object.__new__(AssistantEngine)
+    first = SimpleNamespace(
+        summary="first",
+        files=(SimpleNamespace(path="core/assistant.py", new_content="bad"),),
+    )
+    revised = SimpleNamespace(
+        summary="revised",
+        files=(SimpleNamespace(path="core/assistant.py", new_content="still bad"),),
+    )
+    editor = SimpleNamespace(pending=first)
+    editor.reject = lambda: setattr(editor, "pending", None)
+    engine.editor = editor
+    engine._pending_own_code_fingerprint = "old"
+    engine._clear_own_code_pending_proposal_store = lambda: None
+    engine._run_own_tests = lambda: (True, "baseline ok")
+    engine._test_failure_ids = lambda _output: set()
+    engine._validate_own_code_at_root = lambda _root, baseline_failures=None: "bad"
+    engine.own_project_root = lambda: "/project"
+    calls = 0
+
+    def prepare(_instruction, **_kwargs):
+        nonlocal calls
+        calls += 1
+        editor.pending = revised
+        return "revised proposal prepared"
+
+    engine.prepare_own_code_proposal = prepare
+    transitions: list[str] = []
+    store = SimpleNamespace(
+        transition=lambda state, **_kwargs: transitions.append(state)
+        or SimpleNamespace(state=state)
+    )
+    engine._self_repair_store = lambda: store
+
+    class Validator:
+        def __init__(self, _root):
+            pass
+
+        def validate(self, _proposal, _callback):
+            return SimpleNamespace(
+                ok=False,
+                output="FAILED tests/test_a.py::test_one\nFAILED tests/test_b.py::test_two",
+            )
+
+    monkeypatch.setitem(
+        AssistantEngine._recover_self_repair_worktree_failure.__globals__,
+        "OwnCodeWorktreeValidator",
+        Validator,
+    )
+
+    session = SimpleNamespace(
+        instruction="fix runtime finding",
+        approved_paths=("core/assistant.py",),
+        approved_symbols=("AssistantEngine.handle",),
+        plan_id="RPR-06578E9EDE",
+    )
+    result = engine._recover_self_repair_worktree_failure(
+        session,
+        first,
+        "initial worktree failure",
+    )
+
+    assert calls == 1
+    assert editor.pending is None
+    assert transitions[-1] == "proposal_failed"
+    assert "Tek bounded worktree recovery pass" in result
+    assert "FAILED tests/test_a.py::test_one" in result
