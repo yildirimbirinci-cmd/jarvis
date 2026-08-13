@@ -14,25 +14,37 @@ def _bootstrap() -> None:
 
 def main() -> int:
     _bootstrap()
-    from artmach_assistant.core.final_release import FinalReleaseError, install_release
+    from artmach_assistant.core.final_release import FinalReleaseError, install_release, uninstall_release
 
     parser = argparse.ArgumentParser(description="Jarvis final release kurulum/guncelleme araci.")
     parser.add_argument("--release-root", required=True)
     parser.add_argument("--destination", required=True)
     parser.add_argument("--backup-dir", default="")
     parser.add_argument("--python", default="")
+    parser.add_argument("--data-root", default="")
+    parser.add_argument("--uninstall", action="store_true")
+    parser.add_argument("--purge-persistent-data", action="store_true")
     args = parser.parse_args()
     try:
-        result = install_release(
-            args.release_root,
-            args.destination,
-            backup_dir=args.backup_dir or None,
-            compile_python=args.python or None,
-        )
+        if args.uninstall:
+            result = uninstall_release(
+                args.destination,
+                backup_dir=args.backup_dir or None,
+                data_root=args.data_root or None,
+                purge_persistent_data=bool(args.purge_persistent_data),
+            )
+        else:
+            result = install_release(
+                args.release_root,
+                args.destination,
+                backup_dir=args.backup_dir or None,
+                compile_python=args.python or None,
+                data_root=args.data_root or None,
+            )
     except (FinalReleaseError, OSError) as exc:
         print(f"KURULUM BASARISIZ: {exc}", file=sys.stderr)
         return 2
-    print("KURULUM BASARILI")
+    print("KALDIRMA BASARILI" if args.uninstall else "KURULUM BASARILI")
     print(f"Hedef: {result['destination']}")
     if result["backup"]:
         print(f"Geri donus: {result['backup']}")

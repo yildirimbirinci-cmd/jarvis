@@ -456,6 +456,7 @@ def install_release(
     *,
     backup_dir: str | Path | None = None,
     compile_python: str | Path | None = None,
+    data_root: str | Path | None = None,
 ) -> dict[str, str]:
     source = Path(release_root).expanduser().resolve()
     target_parent = Path(destination).expanduser().resolve()
@@ -482,19 +483,25 @@ def install_release(
     try:
         shutil.copytree(source_package, staging, symlinks=False)
         if compile_python is not None:
-            python = str(Path(compile_python).expanduser().resolve())
-            result = subprocess.run(
-                [python, "-m", "compileall", "-q", str(staging)],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=180,
-                check=False,
-            )
+            python_path = Path(compile_python).expanduser().resolve()
+            if not python_path.is_file():
+                raise FinalReleaseError(f"Kurulum oncesi derleme araci bulunamadi: {python_path}")
+            python = str(python_path)
+            try:
+                result = subprocess.run(
+                    [python, "-m", "compileall", "-q", str(staging)],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=180,
+                    check=False,
+                )
+            except (OSError, subprocess.SubprocessError) as exc:
+                raise FinalReleaseError(f"Kurulum oncesi derleme baslatilamadi: {exc}") from exc
             if result.returncode != 0:
-                raise FinalReleaseError("Kurulum öncesi derleme başarısız: " + result.stdout[-2000:])
+                raise FinalReleaseError("Kurulum oncesi derleme basarisiz: " + result.stdout[-2000:])
         if target.exists():
             os.replace(target, old)
         os.replace(staging, target)
@@ -509,17 +516,27 @@ def install_release(
             shutil.copy2(release_source, release_target)
         if old.exists():
             shutil.rmtree(old)
+        try:
+            from artmach_assistant.core.deployment_layout import DeploymentPaths
+            deployment = DeploymentPaths.resolve(target, data_root=data_root)
+            deployment.ensure_persistent_tree()
+            persistent_data_root = str(deployment.data_root)
+        except Exception:
+            persistent_data_root = str(Path(data_root).expanduser().resolve()) if data_root is not None else ""
         record = {
-            "schema_version": 1,
+            "schema_version": 2,
             "installed_at": utc_now(),
             "source": str(source),
             "destination": str(target),
+            "application_root": str(target),
+            "persistent_data_root": persistent_data_root,
             "backup": str(backup_zip) if backup_zip.exists() else "",
         }
         atomic_write_json(target_parent / "INSTALLATION.json", record)
         return {
             "destination": str(target),
             "backup": str(backup_zip) if backup_zip.exists() else "",
+            "persistent_data_root": persistent_data_root,
         }
     except Exception:
         if target.exists() and old.exists():
@@ -532,6 +549,95 @@ def install_release(
         if old.exists() and target.exists():
             shutil.rmtree(old, ignore_errors=True)
 
+
+
+def restore_application_backup(
+    backup_zip: str | Path,
+    destination: str | Path,
+) -> dict[str, str]:
+    """Restore only application files from a verified local rollback archive.
+
+    Persistent ECHO data is deliberately outside the application tree and is
+    never touched by this operation.
+    """
+    backup = Path(backup_zip).expanduser().resolve()
+    target_parent = Path(destination).expanduser().resolve()
+    target = target_parent / "artmach_assistant"
+    if not backup.is_file():
+        raise FinalReleaseError(f"Rollback arsivi bulunamadi: {backup}")
+    staging = target_parent / f".artmach_assistant.rollback.{os.getpid()}"
+    old = target_parent / f".artmach_assistant.rollback-old.{os.getpid()}"
+    shutil.rmtree(staging, ignore_errors=True)
+    shutil.rmtree(old, ignore_errors=True)
+    try:
+        staging.mkdir(parents=True, exist_ok=False)
+        with zipfile.ZipFile(backup) as archive:
+            for name in archive.namelist():
+                _safe_archive_name(name)
+            archive.extractall(staging)
+        validate_project_root(staging)
+        if target.exists():
+            os.replace(target, old)
+        os.replace(staging, target)
+        shutil.rmtree(old, ignore_errors=True)
+        return {"destination": str(target), "backup": str(backup)}
+    except Exception:
+        shutil.rmtree(staging, ignore_errors=True)
+        if old.exists() and not target.exists():
+            os.replace(old, target)
+        raise
+    finally:
+        if old.exists() and target.exists():
+            shutil.rmtree(old, ignore_errors=True)
+
+
+def uninstall_release(
+    destination: str | Path,
+    *,
+    backup_dir: str | Path | None = None,
+    data_root: str | Path | None = None,
+    purge_persistent_data: bool = False,
+) -> dict[str, str]:
+    """Remove the installed application while preserving user data by default."""
+    target_parent = Path(destination).expanduser().resolve()
+    target = target_parent / "artmach_assistant"
+    backups = (
+        Path(backup_dir).expanduser().resolve()
+        if backup_dir is not None
+        else target_parent / "rollback"
+    )
+    backups.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    backup_zip = backups / f"artmach_assistant_uninstall_{timestamp}.zip"
+    if target.exists():
+        _zip_tree(target, backup_zip)
+        shutil.rmtree(target)
+
+    for name in (*launcher_files().keys(), "RELEASE.json", "INSTALLATION.json"):
+        path = target_parent / name
+        if path.is_file():
+            path.unlink()
+
+    persistent_data_root = ""
+    try:
+        from artmach_assistant.core.deployment_layout import DeploymentPaths
+        deployment = DeploymentPaths.resolve(target, data_root=data_root)
+        persistent_data_root = str(deployment.data_root)
+        if purge_persistent_data and deployment.data_root.exists():
+            shutil.rmtree(deployment.data_root)
+    except Exception:
+        if data_root is not None:
+            persistent = Path(data_root).expanduser().resolve()
+            persistent_data_root = str(persistent)
+            if purge_persistent_data and persistent.exists():
+                shutil.rmtree(persistent)
+
+    return {
+        "destination": str(target),
+        "backup": str(backup_zip) if backup_zip.exists() else "",
+        "persistent_data_root": persistent_data_root,
+        "persistent_data_preserved": "false" if purge_persistent_data else "true",
+    }
 
 def _check_import(name: str) -> tuple[bool, str]:
     try:

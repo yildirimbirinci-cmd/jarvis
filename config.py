@@ -9,8 +9,11 @@ from pathlib import Path
 
 APP_NAME = "Artmach Assistant"
 NICKNAMES = ("jarvis", "artmach assistant", "assistant")
+_ECHO_DATA_ROOT = os.environ.get("ECHO_DATA_ROOT", "").strip()
 _LOCAL_DATA_ROOT = os.environ.get("LOCALAPPDATA")
-if _LOCAL_DATA_ROOT:
+if _ECHO_DATA_ROOT:
+    DATA_DIR = Path(_ECHO_DATA_ROOT).expanduser()
+elif _LOCAL_DATA_ROOT:
     DATA_DIR = Path(_LOCAL_DATA_ROOT) / "ArtmachAssistant"
 elif os.name == "nt":
     DATA_DIR = Path.home() / "AppData" / "Local" / "ArtmachAssistant"
