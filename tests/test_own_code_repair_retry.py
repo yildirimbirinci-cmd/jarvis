@@ -1277,3 +1277,75 @@ def test_runtime_child_symbol_rejects_ambiguous_live_ast(tmp_path):
     )
     assert resolved == ""
 
+def test_autonomous_root_cause_diagnosis_precedes_transformation(tmp_path):
+    engine = object.__new__(AssistantEngine)
+    source = tmp_path / "core" / "assistant.py"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_text(
+        "class AssistantEngine:\n"
+        "    def target(self, value):\n"
+        "        return value\n",
+        encoding="utf-8",
+    )
+    engine.own_project_root = lambda: tmp_path
+    calls = []
+
+    def request(prompt, **_kwargs):
+        calls.append(prompt)
+        return json.dumps({
+            "status": "READY",
+            "root_cause": "The measured call performs repeated blocking work.",
+            "mechanism": "The blocking work is executed synchronously for every call.",
+            "change_strategy": "Avoid redundant blocking work while preserving return behavior.",
+            "evidence_used": ["13 repeated slow samples", "dominant child span"],
+            "preserve": ["return contract", "cancellation behavior"],
+            "confidence": 88,
+        })
+
+    engine._request_code_model_json = request
+    session = SimpleNamespace(
+        approved_paths=("core/assistant.py",),
+        approved_symbols=("AssistantEngine.target",),
+        evidence="REPAIR EVIDENCE GATE\nDurum: NARROWED\nOrnek: 13",
+        acceptance=("Return behavior must remain unchanged.",),
+    )
+    diagnosis, error = engine._diagnose_self_repair_session(session)
+    assert error == ""
+    assert diagnosis is not None
+    assert "AUTONOMOUS_ROOT_CAUSE_DIAGNOSIS" in diagnosis
+    assert "Confidence: 88" in diagnosis
+    assert len(calls) == 1
+    assert "Do not write code" in calls[0]
+    assert "LIVE METHOD SOURCE" in calls[0]
+
+
+def test_autonomous_root_cause_abstention_blocks_code_generation(tmp_path):
+    engine = object.__new__(AssistantEngine)
+    source = tmp_path / "core" / "assistant.py"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_text(
+        "class AssistantEngine:\n"
+        "    def target(self, value):\n"
+        "        return value\n",
+        encoding="utf-8",
+    )
+    engine.own_project_root = lambda: tmp_path
+    engine._request_code_model_json = lambda *_args, **_kwargs: json.dumps({
+        "status": "INSUFFICIENT_EVIDENCE",
+        "root_cause": "Timing proves location but not defect mechanism.",
+        "mechanism": "",
+        "change_strategy": "",
+        "evidence_used": ["runtime timing"],
+        "preserve": ["behavior"],
+        "confidence": 45,
+    })
+    session = SimpleNamespace(
+        approved_paths=("core/assistant.py",),
+        approved_symbols=("AssistantEngine.target",),
+        evidence="runtime timing only",
+        acceptance=(),
+    )
+    diagnosis, error = engine._diagnose_self_repair_session(session)
+    assert diagnosis is None
+    assert "INSUFFICIENT_EVIDENCE" in error
+

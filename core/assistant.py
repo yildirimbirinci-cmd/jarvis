@@ -2052,6 +2052,12 @@ class AssistantEngine:
                 evidence = evidence_match.group(0).strip() if evidence_match else (
                     "Use only the approved target and preserve observable behavior."
                 )
+                diagnosis_match = re.search(
+                    r"(?is)AUTONOMOUS_ROOT_CAUSE_DIAGNOSIS.*$",
+                    prompt,
+                )
+                if diagnosis_match:
+                    evidence += "\n\n" + diagnosis_match.group(0).strip()
                 current_prompt = (
                     "DETERMINISTIC METHOD TRANSFORMATION\n"
                     "Transform exactly one existing Python method. Do not produce a patch, "
@@ -2062,7 +2068,10 @@ class AssistantEngine:
                     "safe change, return an empty replacement_method.\n\n"
                     f"APPROVED PATH: {relative}\n"
                     f"APPROVED SYMBOL: {class_name}.{method_name}\n\n"
-                    f"EVIDENCE:\n{evidence}\n\n"
+                    f"EVIDENCE AND ROOT-CAUSE DIAGNOSIS:\n{evidence}\n\n"
+                    "Implement only the diagnosed change strategy. Do not invent a "
+                    "different root cause or optimization. Preserve every item listed "
+                    "under Preserve and the existing method signature.\n\n"
                     "LIVE METHOD SOURCE:\n"
                     f"{live_method}\n\n"
                     "Return exactly one JSON object with exactly these keys:\n"
@@ -6896,6 +6905,170 @@ class AssistantEngine:
             detail += f" Son hata: {session.last_error[-900:]}"
         return detail
 
+    def _live_method_source_for_repair_target(
+        self,
+        relative_path: str,
+        symbol: str,
+    ) -> tuple[str, str, str]:
+        """Resolve one approved Class.method to exact live source.
+
+        This is the single source-resolution primitive used by autonomous
+        diagnosis and deterministic transformation. Telemetry labels or model
+        guesses are never accepted as source identifiers.
+        """
+        relative = str(relative_path or "").strip().replace("\\", "/")
+        target = str(symbol or "").strip()
+        parts = [part for part in target.split(".") if part]
+        if not relative or len(parts) != 2:
+            raise WorkspaceError(
+                "AUTONOMOUS DIAGNOSIS REDDI: tek exact path ve Class.method gerekli."
+            )
+        class_name, method_name = parts
+        project_root = Path(self.own_project_root()).resolve(strict=True)
+        source_path = (project_root / relative).resolve(strict=True)
+        try:
+            source_path.relative_to(project_root)
+        except ValueError as exc:
+            raise WorkspaceError(
+                "AUTONOMOUS DIAGNOSIS REDDI: hedef proje kokunun disinda."
+            ) from exc
+        source = source_path.read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        owners = [
+            node for node in tree.body
+            if isinstance(node, ast.ClassDef) and node.name == class_name
+        ]
+        if len(owners) != 1:
+            raise WorkspaceError(
+                "AUTONOMOUS DIAGNOSIS REDDI: approved class tekil degil."
+            )
+        methods = [
+            node for node in owners[0].body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name == method_name
+        ]
+        if len(methods) != 1:
+            raise WorkspaceError(
+                "AUTONOMOUS DIAGNOSIS REDDI: approved method tekil degil."
+            )
+        method = methods[0]
+        lines = source.splitlines(keepends=True)
+        decorator_lines = [
+            int(getattr(row, "lineno", 0))
+            for row in getattr(method, "decorator_list", ())
+            if int(getattr(row, "lineno", 0)) > 0
+        ]
+        start_line = min([int(method.lineno), *decorator_lines])
+        end_line = int(getattr(method, "end_lineno", method.lineno))
+        method_source = "".join(lines[start_line - 1:end_line])
+        if not method_source or source.count(method_source) != 1:
+            raise WorkspaceError(
+                "AUTONOMOUS DIAGNOSIS REDDI: live method envelope tekil degil."
+            )
+        return relative, target, method_source
+
+    def _diagnose_self_repair_session(
+        self,
+        session: SelfRepairSession,
+    ) -> tuple[str | None, str]:
+        """Produce one evidence-grounded root-cause diagnosis before code generation.
+
+        The diagnosis model cannot emit code or patch structure. A repair cycle
+        proceeds to transformation only when the model can explain the mechanism,
+        cite the supplied evidence and state a concrete behavior-preserving change
+        strategy with sufficient confidence.
+        """
+        if len(session.approved_paths) != 1 or len(session.approved_symbols) != 1:
+            return None, (
+                "AUTONOMOUS ROOT CAUSE: INSUFFICIENT_EVIDENCE - deterministic "
+                "production repair currently requires one exact path and symbol."
+            )
+        try:
+            relative, symbol, method_source = self._live_method_source_for_repair_target(
+                session.approved_paths[0],
+                session.approved_symbols[0],
+            )
+        except Exception as exc:
+            return None, f"AUTONOMOUS ROOT CAUSE: source resolution failed: {exc}"
+
+        acceptance = "\n".join(
+            f"- {row}" for row in session.acceptance if str(row).strip()
+        ) or "- Preserve existing observable behavior and safety contracts."
+        prompt = (
+            "AUTONOMOUS ROOT CAUSE DIAGNOSIS\n"
+            "Analyze one proven runtime repair target. Do not write code, patches, "
+            "operations, anchors, helper definitions, file lists or replacement text. "
+            "Use only the supplied runtime evidence and live method source. If the "
+            "evidence cannot explain a concrete defect mechanism, return status "
+            "INSUFFICIENT_EVIDENCE.\n\n"
+            f"APPROVED PATH: {relative}\n"
+            f"APPROVED SYMBOL: {symbol}\n\n"
+            f"RUNTIME EVIDENCE:\n{session.evidence[-18000:]}\n\n"
+            f"ACCEPTANCE CRITERIA:\n{acceptance}\n\n"
+            f"LIVE METHOD SOURCE:\n{method_source}\n\n"
+            "Return exactly one JSON object with exactly these keys: "
+            "status, root_cause, mechanism, change_strategy, evidence_used, "
+            "preserve, confidence. status must be READY or INSUFFICIENT_EVIDENCE; "
+            "evidence_used and preserve must be JSON arrays of short strings; "
+            "confidence must be an integer 0..100."
+        )
+        try:
+            raw = self._request_code_model_json(
+                prompt,
+                system_prompt=(
+                    "You are an evidence-bound software root-cause analyst. "
+                    "Return only diagnosis JSON. Never output code or patch structure."
+                ),
+                temperature=0.0,
+            )
+            payload = json.loads(raw)
+        except Exception as exc:
+            return None, f"AUTONOMOUS ROOT CAUSE: diagnosis request failed: {exc}"
+        required = {
+            "status", "root_cause", "mechanism", "change_strategy",
+            "evidence_used", "preserve", "confidence",
+        }
+        if not isinstance(payload, dict) or set(payload) != required:
+            return None, "AUTONOMOUS ROOT CAUSE: invalid diagnosis schema."
+        status = str(payload.get("status", "")).strip().upper()
+        if status not in {"READY", "INSUFFICIENT_EVIDENCE"}:
+            return None, "AUTONOMOUS ROOT CAUSE: invalid diagnosis status."
+        try:
+            confidence = int(payload.get("confidence", 0))
+        except (TypeError, ValueError):
+            confidence = 0
+        evidence_used = payload.get("evidence_used")
+        preserve = payload.get("preserve")
+        if not isinstance(evidence_used, list) or not isinstance(preserve, list):
+            return None, "AUTONOMOUS ROOT CAUSE: evidence/preserve arrays required."
+        if status != "READY" or confidence < 70:
+            return None, (
+                "AUTONOMOUS ROOT CAUSE: INSUFFICIENT_EVIDENCE. "
+                f"Confidence={confidence}. "
+                + str(payload.get("root_cause", ""))[:800]
+            )
+        root_cause = str(payload.get("root_cause", "")).strip()
+        mechanism = str(payload.get("mechanism", "")).strip()
+        strategy = str(payload.get("change_strategy", "")).strip()
+        if not root_cause or not mechanism or not strategy or not evidence_used:
+            return None, "AUTONOMOUS ROOT CAUSE: diagnosis is not evidence-grounded."
+        forbidden = ("```", '"files"', '"operations"', '"replacement_method"')
+        combined = "\n".join((root_cause, mechanism, strategy))
+        if any(token in combined for token in forbidden):
+            return None, "AUTONOMOUS ROOT CAUSE: diagnosis attempted to emit patch/code structure."
+        diagnosis = (
+            "AUTONOMOUS_ROOT_CAUSE_DIAGNOSIS\n"
+            f"Status: READY\nConfidence: {confidence}\n"
+            f"Root cause: {root_cause}\n"
+            f"Mechanism: {mechanism}\n"
+            f"Change strategy: {strategy}\n"
+            "Evidence used:\n- "
+            + "\n- ".join(str(row)[:500] for row in evidence_used if str(row).strip())
+            + "\nPreserve:\n- "
+            + "\n- ".join(str(row)[:500] for row in preserve if str(row).strip())
+        )
+        return diagnosis, ""
+
     def _prepare_active_self_repair_proposal(
         self, session: SelfRepairSession
     ) -> str:
@@ -6918,7 +7091,23 @@ class AssistantEngine:
         except ValueError as exc:
             return f"Hedefli onarım başlatılamadı: {exc}"
 
-        instruction = generating.instruction
+        diagnosis, diagnosis_error = self._diagnose_self_repair_session(generating)
+        if diagnosis is None:
+            try:
+                self._self_repair_store().transition(
+                    "proposal_failed",
+                    expected={"generating"},
+                    last_error=diagnosis_error,
+                )
+            except Exception:
+                pass
+            return (
+                diagnosis_error
+                + "\n\nKök neden kanıtlanmadan transformation başlatılmadı. "
+                "Hiçbir dosya değiştirilmedi; aynı session üzerinde tekrar yapılmayacak."
+            )
+
+        instruction = generating.instruction + "\n\n" + diagnosis
         try:
             result = self.prepare_own_code_proposal(
                 instruction,
