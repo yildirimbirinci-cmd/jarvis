@@ -5791,6 +5791,23 @@ class AssistantEngine:
         normalized = self.command_key(text)
         words = normalized.split()
 
+        # An active targeted self-repair proposal owns its approval/apply
+        # lifecycle.  Do not let the generic own-code approval path call
+        # apply_pending_own_code_proposal() directly, because that bypasses
+        # _apply_active_self_repair_proposal() and therefore skips bounded
+        # worktree-failure reproposal/revalidation.  Returning None lets the
+        # reserved self-repair router consume the same explicit approval.
+        try:
+            active_repair = self._active_self_repair_session()
+        except Exception:
+            active_repair = None
+        if (
+            active_repair is not None
+            and getattr(active_repair, "state", "") == "proposal_ready"
+            and self._self_repair_apply_intent(normalized)
+        ):
+            return None
+
         diagnostic_only_markers = (
             "kodu degistirmeden",
             "kod degisikligi uygulama",

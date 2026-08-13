@@ -995,3 +995,30 @@ def test_runtime_pipeline_regrounds_insert_anchors_immediately_before_create_pro
     final_window = source[start:end]
     assert final_window.count("payload = repair_ambiguous_replace_anchors(") == 1
     assert "instruction=prompt" in final_window
+
+
+def test_generic_approval_defers_active_self_repair_proposal_to_reserved_router() -> None:
+    engine = object.__new__(AssistantEngine)
+    engine.command_key = lambda _text: "taslagi onayla"
+    engine._active_self_repair_session = lambda: SimpleNamespace(state="proposal_ready")
+    engine.editor = SimpleNamespace(pending=SimpleNamespace())
+
+    called = []
+    engine.apply_pending_own_code_proposal = lambda: called.append(True) or "WRONG ROUTE"
+
+    result = engine._own_code_approval_request("taslağı onayla")
+
+    assert result is None
+    assert called == []
+
+
+def test_active_self_repair_apply_handler_owns_worktree_failure_recovery_source_contract() -> None:
+    import inspect
+
+    approval_source = inspect.getsource(AssistantEngine._own_code_approval_request)
+    apply_source = inspect.getsource(AssistantEngine._apply_active_self_repair_proposal)
+
+    assert "active_repair" in approval_source
+    assert "proposal_ready" in approval_source
+    assert "return None" in approval_source
+    assert "_recover_self_repair_worktree_failure" in apply_source
