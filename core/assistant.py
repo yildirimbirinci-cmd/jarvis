@@ -8294,15 +8294,95 @@ class AssistantEngine:
                 return True
         return False
 
+    def _canonical_runtime_source_symbol(
+        self,
+        relative_path: str,
+        recorded_symbol: str,
+        action: str = "",
+    ) -> str:
+        """Resolve telemetry identity to one exact live source symbol.
+
+        Runtime action labels are evidence labels, not source identifiers.
+        Historical events may therefore carry a label-like symbol. Repair
+        evidence is accepted only after the live AST proves one exact callable.
+        """
+        relative = str(relative_path or "").strip().replace("\\", "/")
+        recorded = str(recorded_symbol or "").strip()
+        action_name = str(action or "").strip()
+        if not relative or not recorded:
+            return ""
+
+        try:
+            root = Path(self.own_project_root()).resolve(strict=True)
+            source_path = (root / relative).resolve(strict=True)
+            source_path.relative_to(root)
+            source = source_path.read_text(encoding="utf-8")
+            tree = ast.parse(source)
+        except Exception:
+            return ""
+
+        parts = [part for part in recorded.split(".") if part]
+        class_name = parts[-2] if len(parts) >= 2 else ""
+        recorded_name = parts[-1] if parts else ""
+        normalized_labels = {
+            value.lstrip("_")
+            for value in (recorded_name, action_name)
+            if value
+        }
+
+        if class_name:
+            owners = [
+                node
+                for node in tree.body
+                if isinstance(node, ast.ClassDef) and node.name == class_name
+            ]
+            if len(owners) != 1:
+                return ""
+            methods = [
+                node
+                for node in owners[0].body
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            ]
+            exact = [node for node in methods if node.name == recorded_name]
+            if len(exact) == 1:
+                return f"{class_name}.{exact[0].name}"
+
+            candidates = [
+                node
+                for node in methods
+                if node.name.lstrip("_") in normalized_labels
+            ]
+            if len(candidates) == 1:
+                return f"{class_name}.{candidates[0].name}"
+            return ""
+
+        functions = [
+            node
+            for node in tree.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        ]
+        exact = [node for node in functions if node.name == recorded_name]
+        if len(exact) == 1:
+            return exact[0].name
+        candidates = [
+            node
+            for node in functions
+            if node.name.lstrip("_") in normalized_labels
+        ]
+        if len(candidates) == 1:
+            return candidates[0].name
+        return ""
+
     def _runtime_child_evidence_narrowing(
         self,
         finding: RuntimeFinding,
     ) -> tuple[RuntimeFinding | None, str]:
         """Narrow an aggregate slow target using measured child runtime spans.
 
-        No source target is guessed. A child target is accepted only when it has
-        its own source_path + symbol, at least three completed samples, and a
-        clear median-duration lead over the next independently targetable child.
+        No source target is guessed. Every runtime child identity is first
+        canonicalized against the live source AST. A child target is accepted
+        only when one exact callable is proven, it has at least three completed
+        samples, and a clear median-duration lead over the next child.
         """
         try:
             events = self._runtime_event_service().recent(
@@ -8329,9 +8409,16 @@ class AssistantEngine:
             if parent_action not in {"handle_command", "handle_local_command", "dialogue_respond"}:
                 continue
             path = str(getattr(event, "source_path", "") or "").strip().replace("\\", "/")
-            symbol = str(getattr(event, "symbol", "") or "").strip()
+            recorded_symbol = str(getattr(event, "symbol", "") or "").strip()
             action = str(getattr(event, "action", "") or "").strip()
-            if not path or not symbol or not action:
+            if not path or not recorded_symbol or not action:
+                continue
+            symbol = self._canonical_runtime_source_symbol(
+                path,
+                recorded_symbol,
+                action,
+            )
+            if not symbol:
                 continue
             if path == target_path and symbol == target_symbol:
                 continue

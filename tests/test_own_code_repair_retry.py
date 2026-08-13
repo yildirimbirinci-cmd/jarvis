@@ -1138,3 +1138,44 @@ def test_private_runtime_target_keeps_leading_underscore():
     )
     assert symbol == "AssistantEngine._auto_research_world_fact"
 
+def test_runtime_child_symbol_is_canonicalized_against_live_ast(tmp_path):
+    source = tmp_path / "core" / "assistant.py"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_text(
+        "class AssistantEngine:\n"
+        "    def _auto_research_world_fact(self, text, resolved):\n"
+        "        return None\n",
+        encoding="utf-8",
+    )
+    engine = object.__new__(AssistantEngine)
+    engine.own_project_root = lambda: tmp_path
+
+    resolved = engine._canonical_runtime_source_symbol(
+        "core/assistant.py",
+        "AssistantEngine.auto_research_world_fact",
+        "auto_research_world_fact",
+    )
+    assert resolved == "AssistantEngine._auto_research_world_fact"
+
+
+def test_runtime_child_symbol_rejects_ambiguous_live_ast(tmp_path):
+    source = tmp_path / "core" / "assistant.py"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_text(
+        "class AssistantEngine:\n"
+        "    def auto_research_world_fact(self):\n"
+        "        return None\n"
+        "    def _auto_research_world_fact(self):\n"
+        "        return None\n",
+        encoding="utf-8",
+    )
+    engine = object.__new__(AssistantEngine)
+    engine.own_project_root = lambda: tmp_path
+
+    resolved = engine._canonical_runtime_source_symbol(
+        "core/assistant.py",
+        "AssistantEngine.missing",
+        "auto_research_world_fact",
+    )
+    assert resolved == ""
+
