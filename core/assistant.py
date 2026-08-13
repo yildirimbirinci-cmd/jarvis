@@ -2111,6 +2111,22 @@ class AssistantEngine:
                     payload,
                     project_root=self.own_project_root(),
                 )
+                # Final live-source grounding gate for insert operations.  Some
+                # model drafts describe the approved method almost verbatim as
+                # an insert_after/insert_before anchor, but include text that is
+                # only true after another operation in the same proposal.  Such
+                # an anchor has count=0 in the live file and previously reached
+                # EditManager unchanged even though the approved structural
+                # target was known.  Re-run the deterministic AST boundary
+                # repair immediately before canonicalisation so runtime proposal
+                # validation cannot bypass it.  This never guesses a symbol: the
+                # helper acts only when APPROVED_STRUCTURAL_TARGET proves one
+                # direct Class.method boundary.
+                payload = repair_ambiguous_replace_anchors(
+                    payload,
+                    project_root=self.own_project_root(),
+                    instruction=prompt,
+                )
                 canonical = json.dumps(payload, ensure_ascii=False)
                 proposal = self.editor.create_proposal(canonical)
                 # Do not label a behavior-preserving structural extraction as

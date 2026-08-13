@@ -982,3 +982,16 @@ def test_worktree_recovery_stops_after_revised_validation_failure(monkeypatch) -
     assert transitions[-1] == "proposal_failed"
     assert "Tek bounded worktree recovery pass" in result
     assert "FAILED tests/test_a.py::test_one" in result
+
+
+def test_runtime_pipeline_regrounds_insert_anchors_immediately_before_create_proposal() -> None:
+    import inspect
+
+    source = inspect.getsource(AssistantEngine._generate_validated_own_code_proposal)
+    marker = "payload = reorder_insertions_after_exact_edits("
+    canonical = "canonical = json.dumps(payload, ensure_ascii=False)"
+    start = source.index(marker)
+    end = source.index(canonical, start)
+    final_window = source[start:end]
+    assert final_window.count("payload = repair_ambiguous_replace_anchors(") == 1
+    assert "instruction=prompt" in final_window
