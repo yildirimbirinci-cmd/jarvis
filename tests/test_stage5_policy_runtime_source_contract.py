@@ -15,10 +15,10 @@ def test_approval_required_can_prepare_plan_but_cannot_auto_continue() -> None:
     assert "_self_repair_explicit_plan_approval_intent" in ASSISTANT
 
 
-def test_policy_retry_limit_reaches_model_proposal_generator() -> None:
-    assert "repair_max_attempts: int = 3" in ASSISTANT
+def test_policy_single_transformation_limit_reaches_model_proposal_generator() -> None:
+    assert "repair_max_attempts: int = 1" in ASSISTANT
     assert "max_attempts=repair_max_attempts" in ASSISTANT
-    assert "repair_max_attempts=generating.max_attempts" in ASSISTANT
+    assert "repair_max_attempts=1" in ASSISTANT
     assert "session.attempts >= session.max_attempts" in ASSISTANT
 
 

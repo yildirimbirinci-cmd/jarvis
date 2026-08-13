@@ -171,7 +171,7 @@ def test_targeted_merge_rejects_identical_retry() -> None:
 
 
 def test_policy_bounds_attempts() -> None:
-    assert RepairRetryPolicy().max_attempts == 3
+    assert RepairRetryPolicy().max_attempts == 1
     with pytest.raises(ValueError):
         RepairRetryPolicy(max_attempts=4)
 
@@ -738,7 +738,7 @@ def test_scope_rejection_is_terminal_in_single_pass_repair(monkeypatch, tmp_path
     assert len(calls) == 1
 
 
-def test_worktree_failure_gets_one_bounded_reproposal_and_revalidation(monkeypatch) -> None:
+def test_legacy_worktree_recovery_helper_remains_bounded(monkeypatch) -> None:
     engine = object.__new__(AssistantEngine)
     first = SimpleNamespace(
         summary="first",
@@ -925,7 +925,7 @@ def test_active_self_repair_apply_handler_owns_worktree_failure_recovery_source_
     assert "active_repair" in approval_source
     assert "proposal_ready" in approval_source
     assert "return None" in approval_source
-    assert "_recover_self_repair_worktree_failure" in apply_source
+    assert "_recover_self_repair_worktree_failure" not in apply_source
 
 
 def test_symbol_scoped_placeholder_helper_rejection_is_terminal(monkeypatch, tmp_path) -> None:

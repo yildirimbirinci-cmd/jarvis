@@ -6876,7 +6876,7 @@ class AssistantEngine:
         detail = (
             f"{session.plan_id} durumu: {state_names.get(session.state, session.state)}. "
             f"Bulgu: {session.finding_id}. Dosyalar: {files}. Semboller: {symbols}. "
-            f"Deneme: {session.attempts}/{session.max_attempts}. "
+            f"Transformation: {session.attempts}/{session.max_attempts}. "
             f"Policy: {session.policy_status} ({session.risk})."
         )
         if session.last_error:
@@ -6892,9 +6892,9 @@ class AssistantEngine:
             )
         if session.max_attempts <= 0 or session.attempts >= session.max_attempts:
             return (
-                f"{session.plan_id} için üç güvenli taslak denemesi tamamlandı. "
-                "Aynı isteği tekrar üretmeyeceğim; yeni çalışma zamanı kanıtı veya "
-                "daha dar bir dosya/sembol kapsamı gerekli."
+                f"{session.plan_id} için tek kanıtlı transformation hakkı kullanıldı. "
+                "Aynı bulgu üzerinde yeniden model denemesi yapılmayacak; yeni çalışma "
+                "zamanı kanıtı veya yeni bir repair session gerekli."
             )
         try:
             generating = self._self_repair_store().transition(
@@ -6906,12 +6906,6 @@ class AssistantEngine:
             return f"Hedefli onarım başlatılamadı: {exc}"
 
         instruction = generating.instruction
-        if generating.last_error:
-            instruction += (
-                "\n\nÖNCEKİ TASLAK HATASI:\n"
-                + generating.last_error[-4000:]
-                + "\nAynı hatalı taslağı tekrar etme."
-            )
         try:
             result = self.prepare_own_code_proposal(
                 instruction,
@@ -6919,7 +6913,7 @@ class AssistantEngine:
                 approved_paths=generating.approved_paths,
                 approved_symbols=generating.approved_symbols,
                 plan_id=generating.plan_id,
-                repair_max_attempts=generating.max_attempts,
+                repair_max_attempts=1,
             )
         except Exception as exc:
             result = f"Hedefli taslak hazırlanırken beklenmeyen hata oluştu: {exc}"
@@ -7197,8 +7191,19 @@ class AssistantEngine:
             or "taslak gecici Git worktree dogrulamasindan gecmedi" in result
         )
         if worktree_failed:
-            return self._recover_self_repair_worktree_failure(
-                session, pending, result
+            self._clear_own_code_pending_proposal_store()
+            try:
+                self._self_repair_store().transition(
+                    "proposal_failed",
+                    expected={"applying"},
+                    last_error=result,
+                )
+            except Exception:
+                pass
+            return (
+                result
+                + "\n\nDeterministic repair durduruldu. Worktree reddinden sonra "
+                "otomatik reproposal/retry yapılmadı; ana kaynak değiştirilmedi."
             )
         success = "Onayladığın kod değişikliği uygulandı" in result
         try:

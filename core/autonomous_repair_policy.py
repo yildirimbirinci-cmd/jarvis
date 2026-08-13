@@ -115,7 +115,7 @@ class AutonomousRepairDecision:
             f"Status: {self.status}\n"
             f"Risk: {self.risk}\n"
             f"Reason: {self.reason}\n"
-            f"Retry limit: {self.max_attempts}\n"
+            f"Transformation limit: {self.max_attempts}\n"
             f"Paths: {paths}\n"
             f"Symbols: {symbols}"
         )
@@ -236,7 +236,7 @@ def _decision(
         reason=reason,
         approved_paths=paths,
         approved_symbols=symbols,
-        max_attempts=max(0, min(int(max_attempts), 3)),
+        max_attempts=0 if int(max_attempts) <= 0 else 1,
     )
 
 
@@ -357,7 +357,7 @@ def assess_autonomous_runtime_repair(finding: object) -> AutonomousRepairDecisio
             "The repair scope is valid but exceeds the low-risk autonomous envelope. Explicit user approval is required before source changes.",
             production_paths,
             symbols,
-            2 if severity != "high" else 1,
+            1,
         )
     return _decision(
         AUTO_ALLOWED,
@@ -365,7 +365,7 @@ def assess_autonomous_runtime_repair(finding: object) -> AutonomousRepairDecisio
         "Evidence, target scope, validation and rollback prerequisites permit autonomous repair.",
         production_paths,
         symbols,
-        3,
+        1,
     )
 
 @dataclass(frozen=True, slots=True)

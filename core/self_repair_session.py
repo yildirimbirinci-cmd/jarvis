@@ -91,7 +91,7 @@ class SelfRepairSession:
     last_error: str = ""
     policy_status: str = "AUTO_ALLOWED"
     risk: str = "LOW"
-    max_attempts: int = 3
+    max_attempts: int = 1
     approval_required: bool = False
     approval_granted: bool = False
 
@@ -183,7 +183,7 @@ class SelfRepairSessionStore:
                 last_error=str(row.get("last_error", ""))[-12000:],
                 policy_status=str(row.get("policy_status", "AUTO_ALLOWED"))[:64],
                 risk=str(row.get("risk", "LOW"))[:32],
-                max_attempts=max(0, min(int(row.get("max_attempts", 3) or 0), 3)),
+                max_attempts=0 if int(row.get("max_attempts", 1) or 0) <= 0 else 1,
                 approval_required=bool(row.get("approval_required", False)),
                 approval_granted=bool(row.get("approval_granted", False)),
             )
@@ -212,7 +212,7 @@ class SelfRepairSessionStore:
         source_fingerprint: str = "",
         policy_status: str = "AUTO_ALLOWED",
         risk: str = "LOW",
-        max_attempts: int = 3,
+        max_attempts: int = 1,
         approval_required: bool = False,
         approval_granted: bool = False,
     ) -> SelfRepairSession:
@@ -242,7 +242,7 @@ class SelfRepairSessionStore:
             created_at=now,
             policy_status=str(policy_status or "AUTO_ALLOWED")[:64],
             risk=str(risk or "LOW")[:32],
-            max_attempts=max(0, min(int(max_attempts), 3)),
+            max_attempts=0 if int(max_attempts) <= 0 else 1,
             approval_required=bool(approval_required),
             approval_granted=bool(approval_granted),
             updated_at=now,
@@ -274,7 +274,7 @@ class SelfRepairSessionStore:
                 if proposal_fingerprint is None
                 else str(proposal_fingerprint)[:128]
             ),
-            attempts=max(0, min(attempts, 3)),
+            attempts=max(0, min(attempts, 1)),
             last_error=(
                 current.last_error
                 if last_error is None

@@ -34,7 +34,7 @@ def test_allows_exact_low_risk_runtime_target() -> None:
     decision = assess_autonomous_runtime_repair(Finding())
     assert decision.status == AUTO_ALLOWED
     assert decision.risk == "LOW"
-    assert decision.max_attempts == 3
+    assert decision.max_attempts == 1
     assert decision.allowed
     assert decision.can_prepare_plan
 
@@ -82,7 +82,7 @@ def test_high_severity_target_requires_approval() -> None:
     assert decision.max_attempts == 1
 
 
-def test_two_file_target_requires_approval_and_two_attempt_limit() -> None:
+def test_two_file_target_requires_approval_and_single_transformation_limit() -> None:
     decision = assess_autonomous_runtime_repair(
         Finding(
             category="repeated_runtime_failure",
@@ -93,7 +93,7 @@ def test_two_file_target_requires_approval_and_two_attempt_limit() -> None:
     )
     assert decision.status == APPROVAL_REQUIRED
     assert decision.risk == "MEDIUM"
-    assert decision.max_attempts == 2
+    assert decision.max_attempts == 1
 
 
 def test_protected_policy_target_is_never_autonomous() -> None:

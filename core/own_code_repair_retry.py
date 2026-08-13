@@ -24,7 +24,7 @@ _ISSUE_CODE = re.compile(r"\[([A-Za-z0-9_.-]+)\]")
 
 @dataclass(frozen=True, slots=True)
 class RepairRetryPolicy:
-    max_attempts: int = 3
+    max_attempts: int = 1
 
     def __post_init__(self) -> None:
         if self.max_attempts < 0 or self.max_attempts > 3:
