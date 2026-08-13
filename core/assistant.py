@@ -1513,6 +1513,47 @@ class AssistantEngine:
                 in folded
             )
 
+        def is_helper_eligibility_error(value: object) -> bool:
+            folded = str(value or "").casefold()
+            return "source-grounded helper eligibility reddi" in folded
+
+        def enforce_source_grounded_helper_eligibility(payload: object) -> object:
+            """Forbid invented sibling helpers during ordinary symbol-scoped repair.
+
+            A normal runtime repair is constrained to the approved existing symbol.
+            ``insert_class_method`` is permitted only for an explicit behavior-preserving
+            extraction request.  This is enforced here rather than left as prompt advice,
+            because small code models may otherwise keep proposing placeholder helpers.
+            """
+            if not isinstance(payload, dict):
+                return payload
+            prompt_folded = self.command_key(prompt)
+            extraction_requested = (
+                "davranisi degistirmeden" in prompt_folded
+                and any(word in prompt_folded for word in ("refaktor", "cikar", "ayir", "extract"))
+            )
+            if extraction_requested:
+                return payload
+            symbol_scoped = "SEMBOL-KAPSAMLI PATCH KURALI:" in prompt
+            if not symbol_scoped:
+                return payload
+            for file_row in payload.get("files", ()):
+                if not isinstance(file_row, dict):
+                    continue
+                for operation in file_row.get("operations", ()):
+                    if not isinstance(operation, dict):
+                        continue
+                    if str(operation.get("op", "")).strip() != "insert_class_method":
+                        continue
+                    raise WorkspaceError(
+                        "SOURCE-GROUNDED HELPER ELIGIBILITY REDDI: normal symbol-scoped "
+                        "repair insert_class_method kullanamaz. Yalnız izinli mevcut "
+                        "sembol içinde exact replace/replace_method_block kullan; yeni "
+                        "kardeş helper üretme. Explicit behavior-preserving extraction "
+                        "isteği yok."
+                    )
+            return payload
+
         def rejected_operation_detail(
             payload: object,
             error: object,
@@ -1559,6 +1600,7 @@ class AssistantEngine:
         helper_shape_retry_guidance = ""
         existing_helper_retry_guidance = ""
         structural_contract_retry_guidance = ""
+        helper_eligibility_retry_guidance = ""
         diagnostic_run_id = (
             datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
             + "-"
@@ -1621,6 +1663,7 @@ class AssistantEngine:
                     or helper_shape_retry_guidance
                     or existing_helper_retry_guidance
                     or structural_contract_retry_guidance
+                    or helper_eligibility_retry_guidance
                 ):
                     break
             current_prompt = prompt
@@ -1738,6 +1781,17 @@ class AssistantEngine:
                     "class, method, and source block. The replacement must call the "
                     "inserted private helper as self.<helper>(...). Do not widen scope, "
                     "invent sibling APIs, or repeat the rejected operation unchanged."
+                )
+
+            if is_helper_eligibility_error(previous_error):
+                current_prompt += (
+                    "\n\nSOURCE-GROUNDED HELPER ELIGIBILITY RECOVERY (MANDATORY): "
+                    "Do not emit insert_class_method in this repair. The approved scope "
+                    "is an existing symbol, not a helper-extraction task. Repair only "
+                    "inside the approved live method with exact replace or, for one real "
+                    "direct if node, replace_method_block. Do not invent _optimize_*, "
+                    "cache/state APIs, placeholder bodies, pass, or TODO. If no safe "
+                    "in-method edit is justified, return an empty files list."
                 )
 
             if is_existing_helper_error(previous_error):
@@ -2084,6 +2138,7 @@ class AssistantEngine:
                 except Exception:
                     pass
 
+                payload = enforce_source_grounded_helper_eligibility(payload)
                 payload = qualify_inserted_private_helper_calls(
                     payload,
                     instruction=prompt,
@@ -2175,6 +2230,7 @@ class AssistantEngine:
                     helper_shape_retry_guidance = ""
                     existing_helper_retry_guidance = ""
                     structural_contract_retry_guidance = ""
+                    helper_eligibility_retry_guidance = ""
                     previous_response = ""
                 else:
                     if not is_anchor_error(previous_error):
@@ -2185,6 +2241,17 @@ class AssistantEngine:
                         existing_helper_retry_guidance = ""
                     if not is_structural_contract_error(previous_error):
                         structural_contract_retry_guidance = ""
+                    if not is_helper_eligibility_error(previous_error):
+                        helper_eligibility_retry_guidance = ""
+
+                if is_helper_eligibility_error(previous_error):
+                    previous_response = ""
+                    helper_eligibility_retry_guidance = (
+                        "SOURCE-GROUNDED HELPER ELIGIBILITY RECOVERY: do not use "
+                        "insert_class_method; edit only the approved existing symbol "
+                        "with exact live-source operations."
+                    )
+                    previous_error += "\n\n" + helper_eligibility_retry_guidance
 
                 if is_helper_shape_error(previous_error):
                     previous_response = ""

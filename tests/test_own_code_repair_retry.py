@@ -1022,3 +1022,90 @@ def test_active_self_repair_apply_handler_owns_worktree_failure_recovery_source_
     assert "proposal_ready" in approval_source
     assert "return None" in approval_source
     assert "_recover_self_repair_worktree_failure" in apply_source
+
+
+def test_symbol_scoped_repair_rejects_placeholder_helper_and_recovers_in_method(
+    monkeypatch, tmp_path
+) -> None:
+    engine = object.__new__(AssistantEngine)
+    engine.own_code_history = SimpleNamespace(record=lambda *_args, **_kwargs: None)
+    engine.own_project_root = lambda: tmp_path
+    engine._validate_own_code_payload_shape = lambda raw: json.loads(raw)
+
+    responses = iter((
+        json.dumps({
+            "summary": "invented helper",
+            "files": [{
+                "path": "core/assistant.py",
+                "reason": "repair",
+                "operations": [{
+                    "op": "insert_class_method",
+                    "class_name": "AssistantEngine",
+                    "content": "def _optimize_task_execution(self, task):\n    pass",
+                }],
+            }],
+        }),
+        json.dumps({
+            "summary": "in method repair",
+            "files": [{
+                "path": "core/assistant.py",
+                "reason": "repair",
+                "operations": [{
+                    "op": "replace",
+                    "old": "runtime.raise_if_cancelled(turn_id)",
+                    "new": "runtime.raise_if_cancelled(turn_id)  # bounded in-method repair",
+                }],
+            }],
+        }),
+    ))
+    prompts: list[str] = []
+
+    def request(prompt, **_kwargs):
+        prompts.append(prompt)
+        return next(responses)
+
+    engine._request_code_model_json = request
+    engine.editor = SimpleNamespace(
+        create_proposal=lambda _raw: SimpleNamespace(
+            summary="repair",
+            files=(SimpleNamespace(path="core/assistant.py"),),
+        ),
+        reject=lambda: None,
+    )
+
+    globals_map = AssistantEngine._generate_validated_own_code_proposal.__globals__
+    for name in (
+        "merge_duplicate_operation_rows",
+        "ground_requested_docstring_replace_anchors",
+        "repair_high_confidence_missing_anchors",
+        "repair_unique_whitespace_anchors",
+        "remove_redundant_noop_replaces",
+        "qualify_inserted_private_helper_calls",
+        "normalize_structural_class_method_insertions",
+        "normalize_structural_method_block_replacements",
+        "repair_ambiguous_replace_anchors",
+        "reorder_insertions_after_exact_edits",
+    ):
+        monkeypatch.setitem(globals_map, name, lambda payload, **_kwargs: payload)
+    monkeypatch.setitem(
+        globals_map,
+        "validate_behavior_preserving_extraction_payload",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setitem(
+        globals_map,
+        "build_structural_method_block_guidance",
+        lambda **_kwargs: "",
+    )
+
+    proposal = engine._generate_validated_own_code_proposal(
+        "repair approved target\n\nSEMBOL-KAPSAMLI PATCH KURALI:\n"
+        "APPROVED_STRUCTURAL_TARGET: AssistantEngine.handle",
+        max_attempts=1,
+        strict_attempt_limit=True,
+    )
+
+    assert proposal.summary == "repair"
+    assert len(prompts) == 2
+    assert "SOURCE-GROUNDED HELPER ELIGIBILITY" in prompts[1]
+    assert "Do not emit insert_class_method" in prompts[1]
