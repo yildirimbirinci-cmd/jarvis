@@ -96,6 +96,11 @@ class SelfRepairSession:
     approval_granted: bool = False
     replan_count: int = 0
     max_replans: int = 1
+    validation_summary: str = ""
+    closeout_summary: str = ""
+    learning_summary: str = ""
+    rollback_verified: bool | None = None
+    completed_at: str = ""
 
     @property
     def active(self) -> bool:
@@ -190,6 +195,15 @@ class SelfRepairSessionStore:
                 approval_granted=bool(row.get("approval_granted", False)),
                 replan_count=max(0, min(int(row.get("replan_count", 0) or 0), 1)),
                 max_replans=max(0, min(int(row.get("max_replans", 1) or 0), 1)),
+                validation_summary=str(row.get("validation_summary", ""))[-12000:],
+                closeout_summary=str(row.get("closeout_summary", ""))[-12000:],
+                learning_summary=str(row.get("learning_summary", ""))[-12000:],
+                rollback_verified=(
+                    None
+                    if row.get("rollback_verified", None) is None
+                    else bool(row.get("rollback_verified"))
+                ),
+                completed_at=str(row.get("completed_at", ""))[:64],
             )
         except (OSError, TypeError, ValueError, UnicodeError) as exc:
             self._quarantine_invalid_store(f"{type(exc).__name__}: {exc}")
@@ -327,6 +341,36 @@ class SelfRepairSessionStore:
             replan_count=current.replan_count + 1,
         )
         return self.save(updated)
+
+    def finalize_outcome(
+        self,
+        *,
+        state: str,
+        validation_summary: str,
+        closeout_summary: str,
+        learning_summary: str,
+        rollback_verified: bool | None,
+        last_error: str = "",
+    ) -> SelfRepairSession:
+        """Persist one terminal self-repair outcome without reopening the cycle."""
+        current = self.load()
+        if current is None:
+            raise ValueError("Etkin hedefli onarım oturumu yok.")
+        if state not in {"completed", "proposal_failed", "cancelled", "stale"}:
+            raise ValueError("Geçersiz terminal onarım durumu.")
+        completed_at = _now_iso() if state == "completed" else current.completed_at
+        return self.save(
+            replace(
+                current,
+                state=state,
+                validation_summary=str(validation_summary or "")[-12000:],
+                closeout_summary=str(closeout_summary or "")[-12000:],
+                learning_summary=str(learning_summary or "")[-12000:],
+                rollback_verified=rollback_verified,
+                completed_at=completed_at,
+                last_error=str(last_error or "")[-12000:],
+            )
+        )
 
     def grant_approval(self) -> SelfRepairSession:
         current = self.load()

@@ -7297,6 +7297,105 @@ class AssistantEngine:
             + "Revize taslağı uygulamak için açıkça 'taslağı onayla' de."
         )
 
+    def _finalize_self_repair_apply_outcome(
+        self,
+        session: SelfRepairSession,
+        result: str,
+        *,
+        successful: bool,
+    ) -> SelfRepairSession:
+        """Persist terminal validation, rollback and learning for self-repair."""
+        rendered = str(result or "").strip()
+        folded = rendered.casefold()
+        rollback_detected = any(
+            marker in folded
+            for marker in ("geri alindi", "geri alındı", "rollback")
+        )
+        rollback_verified = None
+        if rollback_detected:
+            rollback_verified = any(
+                marker in folded
+                for marker in (
+                    "dogrulanmis baseline yeniden test edildi",
+                    "doğrulanmış baseline yeniden test edildi",
+                    "rollback sonrasi derleme, temiz surec ve regresyon",
+                    "rollback sonrası derleme, temiz süreç ve regresyon",
+                )
+            )
+
+        if successful:
+            validation_summary = (
+                "Post-apply doğrulama tamamlandı: source write, compile, runtime health "
+                "ve regression karşılaştırması geçti; yeni regresyon kabul edilmedi."
+            )
+            closeout_summary = (
+                "SELF_REPAIR_CLOSEOUT: COMPLETED. Onaylı transformation uygulandı ve "
+                "post-apply doğrulama zinciri başarıyla tamamlandı."
+            )
+            learning_summary = (
+                f"{session.finding_id} için {', '.join(session.approved_paths)} | "
+                f"{', '.join(session.approved_symbols) or 'path-local target'} üzerinde "
+                "kanıta dayalı transformation doğrulandı; aynı kanıt/target sınıfında "
+                "yalnız doğrulanmış sequence yeniden kullanılabilir."
+            )
+            terminal_state = "completed"
+            last_error = ""
+        else:
+            validation_summary = rendered[-6000:]
+            closeout_summary = (
+                "SELF_REPAIR_CLOSEOUT: FAILED. Apply/validation zinciri terminal "
+                "başarı üretmedi; kaynak güvenliği sonucu kaydedildi."
+            )
+            learning_summary = (
+                f"{session.finding_id} için transformation terminal olarak başarısız oldu; "
+                "aynı çözüm kanıt değişmeden yeniden kullanılmamalı."
+            )
+            terminal_state = "proposal_failed"
+            last_error = rendered[-12000:]
+
+        history = getattr(self, "own_code_history", None)
+        record = getattr(history, "record", None)
+        if callable(record):
+            try:
+                record(
+                    "self_repair_outcome",
+                    finding=session.finding_id,
+                    plan=session.plan_id,
+                    successful=successful,
+                    rollback_verified=rollback_verified,
+                    summary=closeout_summary[:700],
+                )
+            except Exception:
+                pass
+
+        learning = getattr(self, "learning_memory", None)
+        audit = getattr(learning, "audit", None)
+        if callable(audit):
+            try:
+                audit(
+                    "self_repair_outcome",
+                    finding=session.finding_id,
+                    plan=session.plan_id,
+                    successful=str(successful),
+                    rollback_verified=str(rollback_verified),
+                    ogrenme=learning_summary[:1200],
+                )
+            except Exception:
+                pass
+
+        try:
+            return self._self_repair_store().finalize_outcome(
+                state=terminal_state,
+                validation_summary=validation_summary,
+                closeout_summary=closeout_summary,
+                learning_summary=learning_summary,
+                rollback_verified=rollback_verified,
+                last_error=last_error,
+            )
+        except Exception:
+            current = self._self_repair_store().load()
+            return current if current is not None else session
+
     def _apply_active_self_repair_proposal(
         self, session: SelfRepairSession
     ) -> str:
@@ -7441,15 +7540,20 @@ class AssistantEngine:
                 + str(reapplied)
             )
         success = "Onayladığın kod değişikliği uygulandı" in result
-        try:
-            self._self_repair_store().transition(
-                "completed" if success else "proposal_failed",
-                expected={"applying"},
-                last_error="" if success else result,
+        finalized = self._finalize_self_repair_apply_outcome(
+            session,
+            result,
+            successful=success,
+        )
+        if success:
+            return (
+                result
+                + "\n\n"
+                + finalized.closeout_summary
+                + "\n"
+                + finalized.learning_summary
             )
-        except Exception:
-            pass
-        return result
+        return result + "\n\n" + finalized.closeout_summary
 
     @staticmethod
     def _asks_for_one_shot_maintenance(text: str) -> bool:
