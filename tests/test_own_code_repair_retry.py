@@ -566,58 +566,35 @@ def test_symbol_scope_retry_forbids_new_helper_without_explicit_extraction() -> 
     assert "yardimciyi dogrudan self.<yardimci>" not in prompt
 
 
-def test_single_attempt_gets_one_structural_contract_recovery_pass(monkeypatch, tmp_path) -> None:
+def test_single_attempt_structural_contract_rejection_is_terminal(monkeypatch, tmp_path) -> None:
     engine = object.__new__(AssistantEngine)
     engine.own_code_history = SimpleNamespace(record=lambda *_args, **_kwargs: None)
     engine.own_project_root = lambda: tmp_path
     engine._validate_own_code_payload_shape = lambda raw: json.loads(raw)
+    calls: list[str] = []
 
-    responses = iter((
-        json.dumps({
+    def request(prompt, **_kwargs):
+        calls.append(prompt)
+        return json.dumps({
             "summary": "first",
             "files": [{
                 "path": "core/research_manager.py",
                 "reason": "repair",
                 "operations": [{"op": "insert_after", "anchor": "x", "content": "y"}],
             }],
-        }),
-        json.dumps({
-            "summary": "second",
-            "files": [{
-                "path": "core/research_manager.py",
-                "reason": "repair",
-                "operations": [{"op": "insert_after", "anchor": "x", "content": "z"}],
-            }],
-        }),
-    ))
-    prompts: list[str] = []
-
-    def request(prompt, **_kwargs):
-        prompts.append(prompt)
-        return next(responses)
+        })
 
     engine._request_code_model_json = request
-    engine.editor = SimpleNamespace(
-        create_proposal=lambda _raw: SimpleNamespace(
-            summary="repair",
-            files=(SimpleNamespace(path="core/research_manager.py"),),
-        ),
-        reject=lambda: None,
-    )
-
+    engine.editor = SimpleNamespace(reject=lambda: None)
     globals_map = AssistantEngine._generate_validated_own_code_proposal.__globals__
     workspace_error = globals_map["WorkspaceError"]
-    structural_calls = {"count": 0}
 
-    def structural(payload, **_kwargs):
-        structural_calls["count"] += 1
-        if structural_calls["count"] == 1:
-            raise workspace_error(
-                "Çıkarılan blok replacement alanında `self.<yardımcı_metot>(...)` "
-                "çağrısı zorunlu: core/research_manager.py işlem 2"
-            )
-        return payload
-
+    engine.editor.create_proposal = lambda _raw: (_ for _ in ()).throw(
+        workspace_error(
+            "Çıkarılan blok replacement alanında `self.<yardımcı_metot>(...)` "
+            "çağrısı zorunlu: core/research_manager.py işlem 2"
+        )
+    )
     for name in (
         "merge_duplicate_operation_rows",
         "ground_requested_docstring_replace_anchors",
@@ -625,37 +602,25 @@ def test_single_attempt_gets_one_structural_contract_recovery_pass(monkeypatch, 
         "remove_redundant_noop_replaces",
         "qualify_inserted_private_helper_calls",
         "normalize_structural_class_method_insertions",
+        "normalize_structural_method_block_replacements",
         "repair_unique_whitespace_anchors",
         "repair_ambiguous_replace_anchors",
         "reorder_insertions_after_exact_edits",
     ):
         monkeypatch.setitem(globals_map, name, lambda payload, **_kwargs: payload)
+    monkeypatch.setitem(globals_map, "validate_behavior_preserving_extraction_payload", lambda *_args, **_kwargs: None)
 
-    monkeypatch.setitem(globals_map, "normalize_structural_method_block_replacements", structural)
-    monkeypatch.setitem(
-        globals_map,
-        "validate_behavior_preserving_extraction_payload",
-        lambda *_args, **_kwargs: None,
-    )
-    monkeypatch.setitem(
-        globals_map,
-        "build_structural_method_block_guidance",
-        lambda **_kwargs: "",
-    )
+    with pytest.raises(workspace_error):
+        engine._generate_validated_own_code_proposal(
+            "repair approved target",
+            max_attempts=3,
+            strict_attempt_limit=True,
+        )
 
-    proposal = engine._generate_validated_own_code_proposal(
-        "repair approved target",
-        max_attempts=1,
-        strict_attempt_limit=True,
-    )
-
-    assert proposal.summary == "repair"
-    assert len(prompts) == 2
-    assert "STRUCTURAL CONTRACT RECOVERY (MANDATORY)" in prompts[1]
-    assert "self.<yardımcı_metot>" in prompts[1]
+    assert len(calls) == 1
 
 
-def test_strict_production_repair_never_exceeds_two_model_calls(monkeypatch, tmp_path) -> None:
+def test_strict_production_repair_is_exactly_one_model_call(monkeypatch, tmp_path) -> None:
     engine = object.__new__(AssistantEngine)
     engine.own_code_history = SimpleNamespace(record=lambda *_args, **_kwargs: None)
     engine.own_project_root = lambda: tmp_path
@@ -674,11 +639,13 @@ def test_strict_production_repair_never_exceeds_two_model_calls(monkeypatch, tmp
         })
 
     engine._request_code_model_json = request
-    engine.editor = SimpleNamespace(reject=lambda: None)
     globals_map = AssistantEngine._generate_validated_own_code_proposal.__globals__
     workspace_error = globals_map["WorkspaceError"]
-    engine.editor.create_proposal = lambda _raw: (_ for _ in ()).throw(
-        workspace_error("SOURCE GROUNDED ANCHOR REDDI: core/assistant.py operation 1")
+    engine.editor = SimpleNamespace(
+        reject=lambda: None,
+        create_proposal=lambda _raw: (_ for _ in ()).throw(
+            workspace_error("SOURCE GROUNDED ANCHOR REDDI: core/assistant.py operation 1")
+        ),
     )
     for name in (
         "merge_duplicate_operation_rows",
@@ -694,144 +661,81 @@ def test_strict_production_repair_never_exceeds_two_model_calls(monkeypatch, tmp
     ):
         monkeypatch.setitem(globals_map, name, lambda payload, **_kwargs: payload)
     monkeypatch.setitem(globals_map, "validate_behavior_preserving_extraction_payload", lambda *_args, **_kwargs: None)
-    monkeypatch.setitem(globals_map, "build_structural_method_block_guidance", lambda **_kwargs: "")
-    monkeypatch.setitem(globals_map, "build_ambiguous_anchor_guidance", lambda *_args, **_kwargs: "EXACT LIVE SOURCE GUIDANCE")
 
     with pytest.raises(workspace_error):
         engine._generate_validated_own_code_proposal(
             "repair approved target",
-            max_attempts=3,
-            strict_attempt_limit=True,
+            max_attempts=99,
+            strict_attempt_limit=False,
         )
 
-    assert len(calls) == 2
+    assert len(calls) == 1
 
 
-def test_bounded_recovery_scope_lock_clamps_mixed_out_of_scope_file(
-    monkeypatch, tmp_path
-) -> None:
+def test_scope_rejection_is_terminal_in_single_pass_repair(monkeypatch, tmp_path) -> None:
     engine = object.__new__(AssistantEngine)
     engine.own_code_history = SimpleNamespace(record=lambda *_args, **_kwargs: None)
     engine.own_project_root = lambda: tmp_path
     engine._validate_own_code_payload_shape = lambda raw: json.loads(raw)
+    calls: list[str] = []
 
-    responses = iter((
-        json.dumps({
-            "summary": "first",
-            "files": [{
-                "path": "core/assistant.py",
-                "reason": "repair",
-                "operations": [{
-                    "op": "replace_method_block",
-                    "class_name": "AssistantEngine",
-                    "method_name": "handle",
-                    "block_test": "if runtime is not None:",
-                    "replacement": "return None",
-                }],
-            }],
-        }),
-        json.dumps({
-            "summary": "second",
-            "files": [
-                {
-                    "path": "core/assistant.py",
-                    "reason": "repair",
-                    "operations": [{
-                        "op": "replace",
-                        "old": "unique approved source",
-                        "new": "unique repaired source",
-                    }],
-                },
-                {
-                    "path": "core/task_orchestrator.py",
-                    "reason": "wrong wrapper target",
-                    "operations": [{
-                        "op": "replace",
-                        "old": "wrapper old",
-                        "new": "wrapper new",
-                    }],
-                },
-            ],
-        }),
-    ))
-    prompts: list[str] = []
+    source_path = tmp_path / "core" / "assistant.py"
+    source_path.parent.mkdir(parents=True, exist_ok=True)
+    source_path.write_text(
+        "class AssistantEngine:\n"
+        "    def handle(self, raw_text):\n"
+        "        return raw_text\n",
+        encoding="utf-8",
+    )
 
     def request(prompt, **_kwargs):
-        prompts.append(prompt)
-        return next(responses)
+        calls.append(prompt)
+        return json.dumps({
+            "summary": "bad scope",
+            "files": [
+                {"path": "core/assistant.py", "reason": "repair", "operations": [{"op": "replace", "old": "__ECHO_APPROVED_METHOD__", "new": "def handle(self, raw_text):\n    return raw_text"}]},
+                {"path": "core/task_orchestrator.py", "reason": "wrong", "operations": [{"op": "replace", "old": "a", "new": "b"}]},
+            ],
+        })
 
     engine._request_code_model_json = request
-    captured: dict[str, object] = {}
-
-    def create_proposal(raw):
-        captured.update(json.loads(raw))
-        return SimpleNamespace(
-            summary="repair",
-            files=(SimpleNamespace(path="core/assistant.py"),),
-        )
-
-    engine.editor = SimpleNamespace(create_proposal=create_proposal, reject=lambda: None)
-
     globals_map = AssistantEngine._generate_validated_own_code_proposal.__globals__
     workspace_error = globals_map["WorkspaceError"]
-    structural_calls = {"count": 0}
-
-    def structural(payload, **_kwargs):
-        structural_calls["count"] += 1
-        if structural_calls["count"] == 1:
-            raise workspace_error(
-                "Yapısal blok koşulu hedef metot ağacında tam olarak bir kez bulunmalı: "
-                "core/assistant.py işlem 1; bulunan=8"
-            )
-        return payload
-
+    engine.editor = SimpleNamespace(
+        reject=lambda: None,
+        create_proposal=lambda _raw: SimpleNamespace(summary="repair", files=()),
+    )
     for name in (
         "merge_duplicate_operation_rows",
         "ground_requested_docstring_replace_anchors",
         "repair_high_confidence_missing_anchors",
+        "repair_unique_whitespace_anchors",
         "remove_redundant_noop_replaces",
         "qualify_inserted_private_helper_calls",
         "normalize_structural_class_method_insertions",
-        "repair_unique_whitespace_anchors",
+        "normalize_structural_method_block_replacements",
         "repair_ambiguous_replace_anchors",
         "reorder_insertions_after_exact_edits",
     ):
         monkeypatch.setitem(globals_map, name, lambda payload, **_kwargs: payload)
-
-    monkeypatch.setitem(
-        globals_map,
-        "normalize_structural_method_block_replacements",
-        structural,
-    )
     monkeypatch.setitem(
         globals_map,
         "validate_behavior_preserving_extraction_payload",
         lambda *_args, **_kwargs: None,
     )
-    monkeypatch.setitem(
-        globals_map,
-        "build_structural_method_block_guidance",
-        lambda **_kwargs: "",
-    )
-    monkeypatch.setitem(
-        globals_map,
-        "build_ambiguous_anchor_guidance",
-        lambda *_args, **_kwargs: "CANDIDATE 1:\nunique approved source",
-    )
 
-    proposal = engine._generate_validated_own_code_proposal(
-        "repair approved target\n"
-        "İzinli dosyalar: core/assistant.py\n"
-        "Hedef semboller: AssistantEngine.handle",
-        max_attempts=1,
-        strict_attempt_limit=True,
-    )
+    with pytest.raises(workspace_error):
+        engine._generate_validated_own_code_proposal(
+            "repair approved target\n"
+            "DETERMINISTIC_REPAIR_ENVELOPE\n"
+            "İzinli dosyalar: core/assistant.py\n"
+            "Hedef semboller: AssistantEngine.handle\n"
+            "APPROVED_STRUCTURAL_TARGET: AssistantEngine.handle",
+            max_attempts=3,
+            strict_attempt_limit=True,
+        )
 
-    assert proposal.summary == "repair"
-    assert len(prompts) == 2
-    assert "RECOVERY SCOPE LOCK (MANDATORY)" in prompts[1]
-    assert "core/assistant.py" in prompts[1]
-    assert [row["path"] for row in captured["files"]] == ["core/assistant.py"]
+    assert len(calls) == 1
 
 
 def test_worktree_failure_gets_one_bounded_reproposal_and_revalidation(monkeypatch) -> None:
@@ -1024,16 +928,16 @@ def test_active_self_repair_apply_handler_owns_worktree_failure_recovery_source_
     assert "_recover_self_repair_worktree_failure" in apply_source
 
 
-def test_symbol_scoped_repair_rejects_placeholder_helper_and_recovers_in_method(
-    monkeypatch, tmp_path
-) -> None:
+def test_symbol_scoped_placeholder_helper_rejection_is_terminal(monkeypatch, tmp_path) -> None:
     engine = object.__new__(AssistantEngine)
     engine.own_code_history = SimpleNamespace(record=lambda *_args, **_kwargs: None)
     engine.own_project_root = lambda: tmp_path
     engine._validate_own_code_payload_shape = lambda raw: json.loads(raw)
+    calls: list[str] = []
 
-    responses = iter((
-        json.dumps({
+    def request(prompt, **_kwargs):
+        calls.append(prompt)
+        return json.dumps({
             "summary": "invented helper",
             "files": [{
                 "path": "core/assistant.py",
@@ -1044,36 +948,12 @@ def test_symbol_scoped_repair_rejects_placeholder_helper_and_recovers_in_method(
                     "content": "def _optimize_task_execution(self, task):\n    pass",
                 }],
             }],
-        }),
-        json.dumps({
-            "summary": "in method repair",
-            "files": [{
-                "path": "core/assistant.py",
-                "reason": "repair",
-                "operations": [{
-                    "op": "replace",
-                    "old": "runtime.raise_if_cancelled(turn_id)",
-                    "new": "runtime.raise_if_cancelled(turn_id)  # bounded in-method repair",
-                }],
-            }],
-        }),
-    ))
-    prompts: list[str] = []
-
-    def request(prompt, **_kwargs):
-        prompts.append(prompt)
-        return next(responses)
+        })
 
     engine._request_code_model_json = request
-    engine.editor = SimpleNamespace(
-        create_proposal=lambda _raw: SimpleNamespace(
-            summary="repair",
-            files=(SimpleNamespace(path="core/assistant.py"),),
-        ),
-        reject=lambda: None,
-    )
-
     globals_map = AssistantEngine._generate_validated_own_code_proposal.__globals__
+    workspace_error = globals_map["WorkspaceError"]
+    engine.editor = SimpleNamespace(reject=lambda: None, create_proposal=lambda _raw: SimpleNamespace(summary="repair", files=()))
     for name in (
         "merge_duplicate_operation_rows",
         "ground_requested_docstring_replace_anchors",
@@ -1087,28 +967,16 @@ def test_symbol_scoped_repair_rejects_placeholder_helper_and_recovers_in_method(
         "reorder_insertions_after_exact_edits",
     ):
         monkeypatch.setitem(globals_map, name, lambda payload, **_kwargs: payload)
-    monkeypatch.setitem(
-        globals_map,
-        "validate_behavior_preserving_extraction_payload",
-        lambda *_args, **_kwargs: None,
-    )
-    monkeypatch.setitem(
-        globals_map,
-        "build_structural_method_block_guidance",
-        lambda **_kwargs: "",
-    )
+    monkeypatch.setitem(globals_map, "validate_behavior_preserving_extraction_payload", lambda *_args, **_kwargs: None)
 
-    proposal = engine._generate_validated_own_code_proposal(
-        "repair approved target\n\nSEMBOL-KAPSAMLI PATCH KURALI:\n"
-        "APPROVED_STRUCTURAL_TARGET: AssistantEngine.handle",
-        max_attempts=1,
-        strict_attempt_limit=True,
-    )
+    with pytest.raises(workspace_error):
+        engine._generate_validated_own_code_proposal(
+            "repair approved target\n\nSEMBOL-KAPSAMLI PATCH KURALI:\nAPPROVED_STRUCTURAL_TARGET: AssistantEngine.handle",
+            max_attempts=3,
+            strict_attempt_limit=True,
+        )
 
-    assert proposal.summary == "repair"
-    assert len(prompts) == 2
-    assert "SOURCE-GROUNDED HELPER ELIGIBILITY" in prompts[1]
-    assert "Do not emit insert_class_method" in prompts[1]
+    assert len(calls) == 1
 
 
 def test_runtime_repair_evidence_gate_detects_aggregate_method(tmp_path) -> None:
@@ -1229,3 +1097,24 @@ def test_prepare_runtime_improvement_stops_before_session_when_evidence_gate_blo
 
     assert "INSUFFICIENT_EVIDENCE" in result
     assert create_calls == []
+
+def test_deterministic_repair_envelope_contract_is_present():
+    import inspect
+    from artmach_assistant.core.assistant import AssistantEngine
+
+    source = inspect.getsource(AssistantEngine._generate_validated_own_code_proposal)
+    assert "DETERMINISTIC_REPAIR_ENVELOPE" in source
+    assert "__ECHO_APPROVED_METHOD__" in source
+    assert "model anchor secemez" in source
+    assert "base_attempts = 1" in source
+    assert "attempts = 1" in source
+
+
+def test_production_repair_prompt_removes_anchor_choice():
+    import inspect
+    from artmach_assistant.core.assistant import AssistantEngine
+
+    source = inspect.getsource(AssistantEngine.prepare_own_code_proposal)
+    assert "path, symbol, operation ve anchor secme yetkin yok" in source
+    assert "old alani literal __ECHO_APPROVED_METHOD__ olmali" in source
+

@@ -1554,6 +1554,125 @@ class AssistantEngine:
                     )
             return payload
 
+        def enforce_deterministic_repair_envelope(payload: object) -> object:
+            """Bind production repair to one exact live Class.method envelope."""
+            if "DETERMINISTIC_REPAIR_ENVELOPE" not in prompt:
+                return payload
+            if not isinstance(payload, dict):
+                raise WorkspaceError("DETERMINISTIC REPAIR ENVELOPE REDDI: JSON object gerekli.")
+
+            path_match = re.search(r"(?im)^İzinli dosyalar:\s*(.+?)\s*$", prompt)
+            target_match = re.search(
+                r"(?im)^APPROVED_STRUCTURAL_TARGET:\s*([A-Za-z_][\w]*\.[A-Za-z_][\w]*)\s*$",
+                prompt,
+            )
+            if not path_match or not target_match:
+                raise WorkspaceError(
+                    "DETERMINISTIC REPAIR ENVELOPE REDDI: exact path/symbol kaniti yok."
+                )
+            allowed_paths = [
+                row.strip().replace("\\", "/")
+                for row in path_match.group(1).split(",")
+                if row.strip()
+            ]
+            if len(allowed_paths) != 1:
+                raise WorkspaceError(
+                    "DETERMINISTIC REPAIR ENVELOPE REDDI: tek exact production path gerekli."
+                )
+            class_name, method_name = target_match.group(1).split(".", 1)
+            relative = allowed_paths[0]
+            source_path = self.own_project_root() / relative
+            if not source_path.is_file():
+                raise WorkspaceError(
+                    f"DETERMINISTIC REPAIR ENVELOPE REDDI: kaynak yok: {relative}"
+                )
+            source = source_path.read_text(encoding="utf-8")
+            tree = ast.parse(source)
+            owners = [
+                node for node in tree.body
+                if isinstance(node, ast.ClassDef) and node.name == class_name
+            ]
+            if len(owners) != 1:
+                raise WorkspaceError(
+                    "DETERMINISTIC REPAIR ENVELOPE REDDI: approved class tekil degil."
+                )
+            methods = [
+                node for node in owners[0].body
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and node.name == method_name
+            ]
+            if len(methods) != 1:
+                raise WorkspaceError(
+                    "DETERMINISTIC REPAIR ENVELOPE REDDI: approved method tekil degil."
+                )
+            method = methods[0]
+            lines = source.splitlines(keepends=True)
+            decorator_lines = [
+                int(getattr(row, "lineno", 0))
+                for row in getattr(method, "decorator_list", ())
+                if int(getattr(row, "lineno", 0)) > 0
+            ]
+            start_line = min([int(method.lineno), *decorator_lines])
+            end_line = int(getattr(method, "end_lineno", method.lineno))
+            live_method = "".join(lines[start_line - 1:end_line])
+            if not live_method or source.count(live_method) != 1:
+                raise WorkspaceError(
+                    "DETERMINISTIC REPAIR ENVELOPE REDDI: live method envelope tekil degil."
+                )
+
+            files = payload.get("files")
+            if not isinstance(files, list) or len(files) != 1:
+                raise WorkspaceError(
+                    "DETERMINISTIC REPAIR ENVELOPE REDDI: model tek replacement vermeli."
+                )
+            row = files[0]
+            operations = row.get("operations") if isinstance(row, dict) else None
+            if not isinstance(operations, list) or len(operations) != 1:
+                raise WorkspaceError(
+                    "DETERMINISTIC REPAIR ENVELOPE REDDI: model tek operation vermeli."
+                )
+            operation = operations[0]
+            if not isinstance(operation, dict) or str(operation.get("op", "")).strip() != "replace":
+                raise WorkspaceError(
+                    "DETERMINISTIC REPAIR ENVELOPE REDDI: operation deterministik replace olmali."
+                )
+            if str(operation.get("old", "")).strip() != "__ECHO_APPROVED_METHOD__":
+                raise WorkspaceError(
+                    "DETERMINISTIC REPAIR ENVELOPE REDDI: model anchor secemez."
+                )
+            replacement = operation.get("new")
+            if not isinstance(replacement, str) or not replacement.strip():
+                raise WorkspaceError(
+                    "DETERMINISTIC REPAIR ENVELOPE REDDI: replacement method gerekli."
+                )
+
+            import textwrap as _det_textwrap
+            dedented = _det_textwrap.dedent(replacement).strip("\n") + "\n"
+            replacement_tree = ast.parse(dedented)
+            if len(replacement_tree.body) != 1 or not isinstance(
+                replacement_tree.body[0], (ast.FunctionDef, ast.AsyncFunctionDef)
+            ):
+                raise WorkspaceError(
+                    "DETERMINISTIC REPAIR ENVELOPE REDDI: replacement tek method olmali."
+                )
+            if replacement_tree.body[0].name != method_name:
+                raise WorkspaceError(
+                    "DETERMINISTIC REPAIR ENVELOPE REDDI: method adi degistirilemez."
+                )
+
+            indent = re.match(r"[ \t]*", lines[int(method.lineno) - 1]).group(0)
+            grounded_new = _det_textwrap.indent(dedented.rstrip("\n"), indent)
+            payload["files"] = [{
+                "path": relative,
+                "reason": str(row.get("reason", "")).strip() or "evidence-grounded repair",
+                "operations": [{
+                    "op": "replace",
+                    "old": live_method,
+                    "new": grounded_new,
+                }],
+            }]
+            return payload
+
         def rejected_operation_detail(
             payload: object,
             error: object,
@@ -1581,17 +1700,11 @@ class AssistantEngine:
                     )
             return ""
 
-        # In production-repair mode max_attempts is the policy retry budget,
-        # not a request to multiply model calls. One initial proposal plus one
-        # validator-guided recovery is the hard bound for the current policy.
-        base_attempts = 1 if strict_attempt_limit else max(1, min(int(max_attempts), 3))
-        # A production repair policy limits independent repair attempts, but a
-        # validator-proven source-grounding rejection is not a second repair
-        # hypothesis. Reserve one bounded recovery slot so the exact live-source
-        # block returned by the validator can be fed back to the code model.
-        # The overflow slot is entered only when validator guidance is present;
-        # otherwise the loop stops at base_attempts below.
-        attempts = base_attempts + 1
+        # Deterministic repair contract: proposal generation is one pass.
+        # A validator rejection terminates this repair cycle. New evidence must
+        # start a new cycle; the model is never asked to guess another anchor.
+        base_attempts = 1
+        attempts = 1
         previous_response = ""
         previous_error = ""
         seen_responses: set[str] = set()
@@ -1898,6 +2011,7 @@ class AssistantEngine:
             payload: object = None
             try:
                 payload = self._validate_own_code_payload_shape(raw)
+                payload = enforce_deterministic_repair_envelope(payload)
 
                 # Enforce evidence-bound file scope before anchor repair or
                 # EditManager validation.
@@ -3190,7 +3304,7 @@ class AssistantEngine:
         approved_paths: tuple[str, ...] | list[str] = (),
         approved_symbols: tuple[str, ...] | list[str] = (),
         plan_id: str = "",
-        repair_max_attempts: int = 3,
+        repair_max_attempts: int = 1,
     ) -> str:
         """Prepare, but never apply, a change proposal for Jarvis' own source.
 
@@ -3429,6 +3543,15 @@ class AssistantEngine:
             )
         if production_repair:
             prompt += (
+                "\n\nDETERMINISTIC_REPAIR_ENVELOPE\n"
+                "Bu onarimda path, symbol, operation ve anchor secme yetkin yok. "
+                "Sistem bunlari live AST/source kanitindan belirler. "
+                "Cevap tam olarak tek file ve tek replace operation icermeli. "
+                "old alani literal __ECHO_APPROVED_METHOD__ olmali. "
+                "new alani yalniz APPROVED_STRUCTURAL_TARGET metodunun eksiksiz yeni "
+                "method definition'i olmali. Method adini degistirme. Yeni kardes "
+                "helper, yeni dosya veya ikinci operation uretme. Kanit yeterli degilse "
+                "files bos liste olmali."
                 "\n\nONARIM GÜVENLİK SINIRI:\n"
                 "Test dosyaları yalnızca hatanın beklenen davranışını anlamak için bağlamdır. "
                 "tests/ altındaki dosyaları, test_*.py dosyalarını ve test beklentilerini değiştirme. "
