@@ -52,7 +52,7 @@ def test_explicit_approval_is_restart_safe(tmp_path: Path) -> None:
     assert restored.approval_granted is True
 
 
-def test_low_risk_defaults_remain_backward_compatible(tmp_path: Path) -> None:
+def test_low_risk_defaults_use_single_transformation_limit(tmp_path: Path) -> None:
     store = SelfRepairSessionStore(tmp_path / "session.json")
     session = store.create(
         finding_id="RUN-1234567890",
@@ -62,5 +62,5 @@ def test_low_risk_defaults_remain_backward_compatible(tmp_path: Path) -> None:
     )
     assert session.policy_status == "AUTO_ALLOWED"
     assert session.risk == "LOW"
-    assert session.max_attempts == 3
+    assert session.max_attempts == 1
     assert session.approval_required is False
