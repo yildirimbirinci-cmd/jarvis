@@ -5753,43 +5753,88 @@ class AssistantEngine:
                 )
             )
 
+        engineering_domain = any(
+            marker in normalized
+            for marker in ("engineering", "muhendislik", "muhendis")
+        )
+        learning_semantics = any(
+            marker in normalized
+            for marker in ("ogren", "learning", "ogrenme gecmis", "ogrenme gunlug")
+        )
+        retrieval_semantics = any(
+            word.startswith(("son", "goster", "listele", "kayit", "kalici"))
+            for word in words
+        )
         asks_learning_history = (
+            engineering_domain and learning_semantics and retrieval_semantics
+        ) or (
             any(
                 marker in normalized
                 for marker in (
-                    "engineering ogren",
-                    "muhendislik ogren",
-                    "engineering learning",
                     "learning history",
                     "learning gecmis",
                     "ogrenme gecmis",
                     "ogrenme gunlug",
                 )
             )
-            and any(
-                word.startswith(("son", "goster", "listele", "kayit", "kalici"))
-                for word in words
-            )
+            and retrieval_semantics
         )
         if not asks_learning_history:
             return None
+
+        # Natural "engineering results" recall is stricter than the legacy
+        # learning-history query: it must return validated outcome/closeout
+        # learning only, never raw proposal/validator diagnostics.
+        asks_engineering_results = engineering_domain and any(
+            word.startswith(("sonuc", "result", "outcome")) for word in words
+        )
 
         requested_limit = 3
         number_match = re.search(r"\b(\d{1,2})\b", normalized)
         if number_match is not None:
             requested_limit = max(1, min(10, int(number_match.group(1))))
 
-        engineering_sources = (
+        engineering_kinds = {
             "engineering",
-            "muhendis",
+            "engineering_outcome",
+            "engineering_closeout",
+            "accepted_engineering_learning",
             "own_code",
             "own-code",
-            "patch",
-            "evidence",
-            "closeout",
-            "retest",
-            "research",
-            "runtime",
+            "patch_outcome",
+        }
+        engineering_sources = {
+            "engineering_closeout",
+            "engineering_outcome",
+            "evidence_patch_outcome",
+            "evidence_patch_closeout",
+            "self_repair_closeout",
+            "final_autonomy_closeout",
+            "accepted_engineering_learning",
+        }
+        outcome_sources = {
+            "engineering_closeout",
+            "engineering_outcome",
+            "evidence_patch_outcome",
+            "evidence_patch_closeout",
+            "self_repair_closeout",
+            "final_autonomy_closeout",
+            "accepted_engineering_learning",
+        }
+        outcome_kinds = {
+            "engineering",
+            "engineering_outcome",
+            "engineering_closeout",
+            "accepted_engineering_learning",
+            "patch_outcome",
+        }
+        negative_markers = (
+            "reddedildi",
+            "rejected",
+            "validation failed",
+            "dogrulamada reddedildi",
+            "proposal failed",
+            "taslak dogrulamada",
         )
 
         def field(row, name: str) -> str:
@@ -5804,33 +5849,31 @@ class AssistantEngine:
             source = self.command_key(field(row, "source"))
             kind = self.command_key(field(row, "kind"))
             trigger = field(row, "trigger").strip()
-            trigger_key = self.command_key(trigger)
-            haystack = " ".join((source, kind, trigger_key))
-            if not (
-                any(marker in haystack for marker in engineering_sources)
-                or kind in {"engineering", "own_code", "own-code", "patch_outcome"}
-            ):
-                continue
-
-            created = field(row, "created_at")
             response = field(row, "response").strip()
             action = field(row, "action").strip()
             target = field(row, "target").strip()
             summary = response or action or target or trigger
             if not summary:
                 continue
-            learning_rows.append(
-                (created, source or kind or "learning_memory", summary)
-            )
+
+            if asks_engineering_results:
+                if source not in outcome_sources and kind not in outcome_kinds:
+                    continue
+                haystack = self.command_key(" ".join((trigger, response, action)))
+                if any(marker in haystack for marker in negative_markers):
+                    continue
+            else:
+                if kind not in engineering_kinds and source not in engineering_sources:
+                    continue
+
+            created = field(row, "created_at")
+            learning_rows.append((created, source or kind or "learning_memory", summary))
 
         learning_rows.sort(key=lambda item: item[0])
         selected_learning = learning_rows[-requested_limit:]
         if selected_learning:
             lines = ["KALICI ENGINEERING OGRENMELERI"]
-            for index, (created, source, summary) in enumerate(
-                selected_learning,
-                start=1,
-            ):
+            for index, (created, source, summary) in enumerate(selected_learning, start=1):
                 lines.append(
                     f"{index}. {summary[:1200]} "
                     f"[kaynak={source}; zaman={created or 'bilinmiyor'}]"
@@ -5841,56 +5884,59 @@ class AssistantEngine:
             )
             return "\n".join(lines)
 
-        engineering_event_markers = (
-            "engineering",
-            "muhendis",
-            "patch",
-            "taslak",
-            "oner",
-            "uygula",
-            "dogrula",
-            "test",
-            "rollback",
-            "geri al",
-            "arastir",
-            "kurtar",
-            "redded",
-            "basar",
-            "closeout",
-            "retest",
-            "runtime",
-        )
-        recent = getattr(self.own_code_history, "recent_rows", None)
-        rows = tuple(recent(50) if callable(recent) else ())
-        history_rows = tuple(
-            row
-            for row in rows
-            if any(
-                marker in self.command_key(str(row.get("event", "") or ""))
-                for marker in engineering_event_markers
+        # Raw own-code history is a legacy learning-history fallback only. It
+        # must never answer the stricter natural "engineering results" query.
+        if not asks_engineering_results:
+            engineering_event_markers = (
+                "engineering",
+                "muhendis",
+                "patch",
+                "taslak",
+                "oner",
+                "uygula",
+                "dogrula",
+                "test",
+                "rollback",
+                "geri al",
+                "arastir",
+                "kurtar",
+                "redded",
+                "basar",
+                "closeout",
+                "retest",
+                "runtime",
             )
-        )
-        selected_history = history_rows[-requested_limit:]
-        if selected_history:
-            lines = ["KALICI ENGINEERING OGRENMELERI"]
-            for index, row in enumerate(selected_history, start=1):
-                event = str(row.get("event", "") or "").strip()
-                details = "; ".join(
-                    f"{key}={value}"
-                    for key, value in row.items()
-                    if key not in {"time", "event", "hash", "prev_hash"}
-                    and str(value).strip()
+            recent = getattr(self.own_code_history, "recent_rows", None)
+            rows = tuple(recent(50) if callable(recent) else ())
+            history_rows = tuple(
+                row
+                for row in rows
+                if any(
+                    marker in self.command_key(str(row.get("event", "") or ""))
+                    for marker in engineering_event_markers
                 )
-                summary = event + (f" - {details}" if details else "")
+            )
+            selected_history = history_rows[-requested_limit:]
+            if selected_history:
+                lines = ["KALICI ENGINEERING OGRENMELERI"]
+                for index, row in enumerate(selected_history, start=1):
+                    event = str(row.get("event", "") or "").strip()
+                    details = "; ".join(
+                        f"{key}={value}"
+                        for key, value in row.items()
+                        if key not in {"time", "event", "hash", "prev_hash"}
+                        and str(value).strip()
+                    )
+                    summary = event + (f" - {details}" if details else "")
+                    lines.append(
+                        f"{index}. {summary[:1200]} "
+                        f"[kaynak=own_code_history; zaman={row.get('time', '')}]"
+                    )
                 lines.append(
-                    f"{index}. {summary[:1200]} "
-                    f"[kaynak=own_code_history; zaman={row.get('time', '')}]"
+                    "Kaynak: yalniz kalici learning/history kayitlari okundu; "
+                    "runtime saglik raporu, yeni arastirma, plan veya patch baslatilmadi."
                 )
-            lines.append(
-                "Kaynak: yalniz kalici learning/history kayitlari okundu; "
-                "runtime saglik raporu, yeni arastirma, plan veya patch baslatilmadi."
-            )
-            return "\n".join(lines)
+                return "\n".join(lines)
 
         return (
             "KALICI ENGINEERING OGRENMELERI\n"
@@ -5899,6 +5945,7 @@ class AssistantEngine:
             "Kaynak: yalniz kalici learning/history kayitlari okundu; "
             "runtime saglik raporu, yeni arastirma, plan veya patch baslatilmadi."
         )
+
     def _own_code_history_request(self, text: str) -> str | None:
         normalized = self.command_key(text)
         words = normalized.split()

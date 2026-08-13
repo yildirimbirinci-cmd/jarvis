@@ -135,3 +135,97 @@ def test_own_code_history_recent_rows_is_bounded(tmp_path) -> None:
         "ucuncu",
         "dorduncu",
     ]
+
+
+def test_persistent_engineering_learning_accepts_natural_latest_results_phrase() -> None:
+    engine = object.__new__(AssistantEngine)
+    engine.learning_memory = SimpleNamespace(
+        records=(
+            SimpleNamespace(
+                source="engineering_outcome",
+                kind="engineering",
+                trigger="validated closeout",
+                created_at="2026-08-13T10:00:00+00:00",
+                response="Dogrulanmis engineering sonucu",
+                action="",
+                target="",
+            ),
+        ),
+    )
+    engine.own_code_history = SimpleNamespace(recent_rows=lambda _limit: ())
+
+    result = engine._persistent_engineering_learning_request(
+        "son ogrendigin engineering sonuclarini goster"
+    )
+
+    assert result is not None
+    assert "KALICI ENGINEERING OGRENMELERI" in result
+    assert "Dogrulanmis engineering sonucu" in result
+
+def test_persistent_engineering_learning_excludes_generic_research_and_user_teaching() -> None:
+    engine = object.__new__(AssistantEngine)
+    engine.command_key = lambda text: " ".join(str(text).casefold().split())
+    engine.learning_memory = SimpleNamespace(
+        records=(
+            SimpleNamespace(
+                source="verified internet research v3",
+                kind="verified_fact",
+                trigger="Marie Curie",
+                created_at="2026-08-13T14:19:39",
+                response="Marie Curie radyoaktivite alaninda calismistir.",
+                action="",
+                target="",
+            ),
+            SimpleNamespace(
+                source="explicit user teaching",
+                kind="user_fact",
+                trigger="son ogrendigin engineering sonuclarini goster",
+                created_at="2026-08-13T14:29:50",
+                response="son ogrendigin engineering sonuclarini goster",
+                action="",
+                target="",
+            ),
+            SimpleNamespace(
+                source="engineering_closeout",
+                kind="engineering",
+                trigger="validated closeout",
+                created_at="2026-08-13T14:30:00",
+                response="Gercek engineering sonucu",
+                action="",
+                target="",
+            ),
+        ),
+    )
+    engine.own_code_history = SimpleNamespace(recent_rows=lambda _limit: ())
+
+    result = engine._persistent_engineering_learning_request(
+        "son ogrendigin engineering sonuclarini goster"
+    )
+
+    assert result is not None
+    assert "Gercek engineering sonucu" in result
+    assert "Marie Curie" not in result
+    assert "explicit user teaching" not in result
+    assert "son ogrendigin engineering sonuclarini goster [" not in result
+
+def test_engineering_results_query_does_not_fallback_to_raw_own_code_failures() -> None:
+    engine = _engine()
+    engine.learning_memory = SimpleNamespace(records=())
+    engine.own_code_history = SimpleNamespace(
+        recent_rows=lambda _limit: (
+            {
+                "time": "2026-08-13T10:00:00",
+                "event": "patch dogrulamasi reddedildi",
+                "hata": "DETERMINISTIC TRANSFORMATION REDDI",
+            },
+        )
+    )
+
+    result = engine._persistent_engineering_learning_request(
+        "son ogrendigin engineering sonuclarini goster"
+    )
+
+    assert result is not None
+    assert "DETERMINISTIC TRANSFORMATION REDDI" not in result
+    assert "Kayit bulunamadi" in result
+
