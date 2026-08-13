@@ -294,3 +294,85 @@ def test_unchanged_source_remains_completed(
 
     assert rendered is not None
     assert "uygun" in rendered
+
+def test_new_runtime_evidence_generation_gets_new_retest_approval_id(
+    tmp_path,
+) -> None:
+    source = tmp_path / "core" / "example.py"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_text("VALUE = 1\n", encoding="utf-8")
+
+    first = RetestItem(
+        title="Example failure",
+        path="core/example.py",
+        symbol="Example.run",
+        status=AUTOMATED,
+        finding_ids=("RUN-GENERATION",),
+        primary_test_paths=("tests/test_example.py",),
+        test_paths=("tests/test_example.py",),
+        command=("python", "-m", "pytest", "tests/test_example.py", "-q"),
+        evidence_observed_at="2026-08-13T13:30:00+00:00",
+    )
+    first_plan = RetestPlan((first,))
+    coordinator = _coordinator(tmp_path, first_plan)
+
+    rendered = coordinator.handle("retest planini baslat")
+    assert rendered is not None
+    first_session = coordinator.store.load()
+    assert first_session is not None
+
+    coordinator.handle(f"{first_session.approval_id} onayla")
+    old_id = first_session.approval_id
+
+    second = RetestItem(
+        title="Example failure",
+        path="core/example.py",
+        symbol="Example.run",
+        status=AUTOMATED,
+        finding_ids=("RUN-GENERATION",),
+        primary_test_paths=("tests/test_example.py",),
+        test_paths=("tests/test_example.py",),
+        command=("python", "-m", "pytest", "tests/test_example.py", "-q"),
+        evidence_observed_at="2026-08-13T13:40:00+00:00",
+    )
+    coordinator.plan_provider = lambda: RetestPlan((second,))
+
+    rendered = coordinator.handle("retest planini baslat")
+
+    assert rendered is not None
+    second_session = coordinator.store.load()
+    assert second_session is not None
+    assert second_session.approval_id != old_id
+    assert second_session.symbol == "Example.run"
+
+
+def test_same_runtime_evidence_generation_remains_completed(
+    tmp_path,
+) -> None:
+    source = tmp_path / "core" / "example.py"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_text("VALUE = 1\n", encoding="utf-8")
+
+    item = RetestItem(
+        title="Example failure",
+        path="core/example.py",
+        symbol="Example.run",
+        status=AUTOMATED,
+        finding_ids=("RUN-SAME",),
+        primary_test_paths=("tests/test_example.py",),
+        test_paths=("tests/test_example.py",),
+        command=("python", "-m", "pytest", "tests/test_example.py", "-q"),
+        evidence_observed_at="2026-08-13T13:30:00+00:00",
+    )
+    coordinator = _coordinator(tmp_path, RetestPlan((item,)))
+
+    coordinator.handle("retest planini baslat")
+    session = coordinator.store.load()
+    assert session is not None
+    coordinator.handle(f"{session.approval_id} onayla")
+
+    rendered = coordinator.handle("retest planini baslat")
+
+    assert rendered is not None
+    assert "uygun" in rendered
+

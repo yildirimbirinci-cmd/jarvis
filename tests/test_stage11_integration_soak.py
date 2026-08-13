@@ -45,3 +45,32 @@ def test_stage11_corrupt_state_is_quarantined_without_cross_task_leak(tmp_path: 
     assert started is not None
     orchestrator.finish(first.task_id)
     assert [row.task_id for row in orchestrator.pending] == [second.task_id]
+
+def test_stage11_soak_memory_metric_ignores_unrelated_process_allocations(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    import tracemalloc
+
+    original_snapshot = tracemalloc.take_snapshot
+    unrelated = []
+
+    # Keep unrelated allocations alive while the soak runs. They must not be
+    # charged to Stage 11's retained-memory metric.
+    original_orchestrator = Stage11IntegrationSoak._orchestrator
+
+    def noisy_orchestrator(self, cycle_root):
+        unrelated.append(bytearray(2 * 1024 * 1024))
+        return original_orchestrator(self, cycle_root)
+
+    monkeypatch.setattr(
+        Stage11IntegrationSoak,
+        "_orchestrator",
+        noisy_orchestrator,
+    )
+
+    result = Stage11IntegrationSoak(tmp_path / "soak", cycles=4).run()
+
+    assert result.passed, result.to_dict()
+    assert result.peak_growth_bytes <= 8 * 1024 * 1024
+

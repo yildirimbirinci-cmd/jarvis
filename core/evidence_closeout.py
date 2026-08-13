@@ -118,6 +118,21 @@ def _latest_passed_records(
     return latest
 
 
+def _runtime_evidence_after_completion(
+    finding: EvidenceMaintenanceFinding,
+    record: RetestCompletionRecord,
+) -> bool:
+    completed_at = _parse_timestamp(record.completed_at)
+    observed_at = _parse_timestamp(finding.observed_at)
+
+    if completed_at is None:
+        return True
+    if observed_at is None:
+        return False
+
+    return observed_at > completed_at
+
+
 def _source_changed_after_completion(
     resolver: SourceLifecycleResolver,
     finding: EvidenceMaintenanceFinding,
@@ -171,6 +186,13 @@ def apply_retest_closeout(
 
         if _source_changed_after_completion(
             resolver,
+            finding,
+            record,
+        ):
+            resolved.append(finding)
+            continue
+
+        if _runtime_evidence_after_completion(
             finding,
             record,
         ):

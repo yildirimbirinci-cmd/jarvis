@@ -32,6 +32,7 @@ class EvidenceMaintenanceFinding:
     evidence: str = ""
     repair_candidate: bool = False
     lifecycle: str = ACTIVE
+    observed_at: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -433,6 +434,7 @@ def build_evidence_maintenance_report(
                 ),
                 repair_candidate=repair_candidate,
                 lifecycle=lifecycle,
+                observed_at=finding.last_seen,
             )
         )
 

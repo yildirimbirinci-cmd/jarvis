@@ -15,6 +15,8 @@ from artmach_assistant.core.path_normalizer import normalize_project_root, proje
 from .symbol_reference_parser import SymbolReferenceRecord
 from .stats_mapping import RevisionStats
 
+from .sqlite_runtime import path_lock, transaction
+
 
 class SymbolReferenceDatabase:
     SCHEMA_VERSION = 1
@@ -25,7 +27,7 @@ class SymbolReferenceDatabase:
         digest = hashlib.sha256(normalized).hexdigest()[:24]
         base = self._normalize_directory(directory, DATA_DIR / "symbol_reference_indexes")
         self.path = base / f"{digest}.sqlite3"
-        self._lock = RLock()
+        self._lock = path_lock(self.path)
         self._initialize()
 
     @property
@@ -181,15 +183,8 @@ class SymbolReferenceDatabase:
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
-        connection = sqlite3.connect(self.path, timeout=10.0)
-        try:
+        with transaction(self.path) as connection:
             yield connection
-            connection.commit()
-        except Exception:
-            connection.rollback()
-            raise
-        finally:
-            connection.close()
 
     @staticmethod
     def _rows_for_file(absolute: str, items: tuple[SymbolReferenceRecord, ...]) -> tuple[tuple[object, ...], ...]:

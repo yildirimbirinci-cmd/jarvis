@@ -1,11 +1,13 @@
 """Persistent SQLite storage for the incremental semantic code graph."""
 from __future__ import annotations
 
+import gc
 import hashlib
 import json
 import math
 import os
 import sqlite3
+import time
 from contextlib import contextmanager
 from pathlib import Path
 from threading import RLock
@@ -14,6 +16,8 @@ from typing import Iterable, Iterator
 from artmach_assistant.config import DATA_DIR
 
 from .semantic_graph_builder import SemanticEdge, SemanticNode
+
+from .sqlite_runtime import is_transient_lock_error, path_lock, transaction
 
 
 class SemanticGraphDatabase:
@@ -36,7 +40,7 @@ class SemanticGraphDatabase:
             else DATA_DIR / "semantic_graphs"
         )
         self.path = base / f"{digest}.sqlite3"
-        self._lock = RLock()
+        self._lock = path_lock(self.path)
         self._initialize_with_recovery()
 
     @property
@@ -355,7 +359,9 @@ class SemanticGraphDatabase:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         try:
             self._initialize()
-        except sqlite3.DatabaseError:
+        except sqlite3.DatabaseError as exc:
+            if is_transient_lock_error(exc):
+                raise
             self._quarantine_corrupt_database()
             self._initialize()
 
@@ -406,6 +412,35 @@ class SemanticGraphDatabase:
         }
         return cls.REQUIRED_TABLES.issubset(tables)
 
+    @staticmethod
+    def _replace_with_handle_release_retry(
+        source: Path,
+        destination: Path,
+        *,
+        attempts: int = 20,
+        delay_seconds: float = 0.05,
+    ) -> None:
+        """Rename after SQLite/Windows has released a just-closed file handle.
+
+        This is deliberately bounded. It handles the short finalization window
+        observed after a corrupt SQLite open attempt, but it does not hide a
+        real long-lived lock held by another process.
+        """
+
+        last_error: OSError | None = None
+        for attempt in range(max(1, int(attempts))):
+            try:
+                source.replace(destination)
+                return
+            except PermissionError as exc:
+                last_error = exc
+                if attempt + 1 >= attempts:
+                    break
+                gc.collect()
+                time.sleep(max(0.0, float(delay_seconds)))
+        if last_error is not None:
+            raise last_error
+
     def _quarantine_corrupt_database(self) -> None:
         for candidate in (
             self.path,
@@ -422,7 +457,10 @@ class SemanticGraphDatabase:
                                 self.path.suffix + f".corrupt.{counter}"
                             )
                             counter += 1
-                        candidate.replace(quarantine)
+                        self._replace_with_handle_release_retry(
+                            candidate,
+                            quarantine,
+                        )
                     else:
                         candidate.unlink()
             except OSError:
@@ -437,15 +475,5 @@ class SemanticGraphDatabase:
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
-        connection = sqlite3.connect(self.path, timeout=15.0)
-        try:
-            connection.execute("PRAGMA journal_mode=WAL")
-            connection.execute("PRAGMA synchronous=NORMAL")
-            connection.execute("PRAGMA foreign_keys=ON")
+        with transaction(self.path, foreign_keys=True) as connection:
             yield connection
-            connection.commit()
-        except Exception:
-            connection.rollback()
-            raise
-        finally:
-            connection.close()

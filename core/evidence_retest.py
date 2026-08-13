@@ -34,6 +34,7 @@ class RetestItem:
     command: tuple[str, ...] = ()
     supporting_command: tuple[str, ...] = ()
     reason: str = ""
+    evidence_observed_at: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -457,6 +458,13 @@ def build_retest_plan(
                 if str(finding.finding_id or "").strip()
             )
         )
+        evidence_observed_at = max(
+            (
+                str(getattr(finding, "observed_at", "") or "").strip()
+                for finding in rows
+            ),
+            default="",
+        )
 
         if _hardware_blocked(rows):
             items.append(
@@ -471,6 +479,7 @@ def build_retest_plan(
                         "Fiziksel ses aygiti veya kullanici "
                         "dogrulamasi gerekiyor."
                     ),
+                    evidence_observed_at=evidence_observed_at,
                 )
             )
             continue
@@ -493,6 +502,7 @@ def build_retest_plan(
                         "Dosya ve sembolle guclu bicimde "
                         "eslesen otomatik regresyon testi bulunamadi."
                     ),
+                    evidence_observed_at=evidence_observed_at,
                 )
             )
             continue
@@ -537,6 +547,7 @@ def build_retest_plan(
                     "Primary testler once calistirilmali; "
                     "basarili olursa supporting testlere gecilmeli."
                 ),
+                evidence_observed_at=evidence_observed_at,
             )
         )
 

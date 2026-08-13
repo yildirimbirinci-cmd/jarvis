@@ -63,9 +63,11 @@ class Stage11IntegrationSoak:
         recovered = 0
         pending_preserved = True
 
-        tracemalloc.start()
+        tracing_was_active = tracemalloc.is_tracing()
+        if not tracing_was_active:
+            tracemalloc.start()
         gc.collect()
-        baseline_current, _ = tracemalloc.get_traced_memory()
+        baseline_snapshot = tracemalloc.take_snapshot()
         try:
             for index in range(self.cycles):
                 cycle_root = self.root / f"cycle_{index:04d}"
@@ -111,10 +113,33 @@ class Stage11IntegrationSoak:
             quarantined = len(tuple(corrupt_root.glob("*.corrupt_*.json")))
 
             gc.collect()
-            current, peak = tracemalloc.get_traced_memory()
-            growth = max(0, max(current, peak) - baseline_current)
+            final_snapshot = tracemalloc.take_snapshot()
+
+            # tracemalloc is process-global. During the full repository suite,
+            # unrelated tests/background threads may allocate while this soak
+            # runs. Measuring the global peak therefore creates a false leak.
+            # Count only retained allocations whose traceback belongs to the
+            # Stage 11 soak or TaskOrchestrator implementation.
+            tracked_names = {
+                Path(__file__).name.casefold(),
+                "task_orchestrator.py",
+            }
+            growth = 0
+            for stat in final_snapshot.compare_to(
+                baseline_snapshot,
+                "traceback",
+            ):
+                if stat.size_diff <= 0:
+                    continue
+                filenames = {
+                    Path(frame.filename).name.casefold()
+                    for frame in stat.traceback
+                }
+                if filenames & tracked_names:
+                    growth += int(stat.size_diff)
         finally:
-            tracemalloc.stop()
+            if not tracing_was_active:
+                tracemalloc.stop()
 
         result = Stage11SoakResult(
             cycles=self.cycles,

@@ -32,6 +32,7 @@ def _approval_id(item: RetestItem) -> str:
             item.path,
             item.symbol,
             *item.primary_test_paths,
+            str(getattr(item, "evidence_observed_at", "") or ""),
         )
     )
     digest = hashlib.sha256(

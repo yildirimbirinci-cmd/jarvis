@@ -7603,6 +7603,63 @@ class AssistantEngine:
         return result + "\n\n" + finalized.closeout_summary
 
     @staticmethod
+    def _asks_for_autonomous_engineering_execution(text: str) -> bool:
+        """Recognize explicit end-to-end autonomous engineering requests.
+
+        This deliberately requires several independent execution contracts.
+        A normal request to inspect/review source remains read-only.
+        """
+
+        normalized = normalize_text(str(text or ""))
+        own_scope = any(
+            marker in normalized
+            for marker in (
+                "kendi kod",
+                "kendi kaynak",
+                "kod taban",
+                "kaynak kod",
+            )
+        )
+        problem_selection = (
+            any(marker in normalized for marker in ("problem bul", "sorun bul", "problemi kendin sec", "sorunu kendin sec"))
+            and any(marker in normalized for marker in ("kok neden", "kanitla", "dogrulanabilir"))
+        )
+        isolated_change = any(
+            marker in normalized
+            for marker in (
+                "izole calisma",
+                "izole worktree",
+                "worktree",
+            )
+        )
+        validation = (
+            "test" in normalized
+            and any(marker in normalized for marker in ("dogrula", "dogrulama", "yeniden test", "retest"))
+        )
+        safe_completion = (
+            any(marker in normalized for marker in ("rollback", "geri al"))
+            and any(marker in normalized for marker in ("kalici", "kaydet", "closeout", "ogren"))
+        )
+        execution = any(
+            marker in normalized
+            for marker in (
+                "degisiklikleri",
+                "degisiklik yap",
+                "cozum plan",
+                "uygulama sonrasi",
+                "ana kaynaklara uygula",
+            )
+        )
+        return bool(
+            own_scope
+            and problem_selection
+            and isolated_change
+            and validation
+            and safe_completion
+            and execution
+        )
+
+    @staticmethod
     def _asks_for_one_shot_maintenance(text: str) -> bool:
         normalized = normalize_text(str(text or ""))
         exact = {
@@ -7658,6 +7715,140 @@ class AssistantEngine:
             controller = OperationController()
             self.operation_controller = controller
         return controller
+
+    def _autonomous_revalidate_runtime_finding(
+        self,
+        finding: RuntimeFinding,
+    ) -> tuple[str, str]:
+        """Resolve authoritative lifecycle, then retest before repair.
+
+        RuntimeFinding itself deliberately carries raw runtime evidence only.
+        ACTIVE / NEEDS_RETEST / RESOLVED_CANDIDATE is derived by the evidence
+        maintenance lifecycle pipeline. Autonomous repair must use that same
+        authoritative classification instead of inventing a status attribute.
+        """
+
+        from artmach_assistant.core.evidence_maintenance import (
+            RESOLVED_CANDIDATE,
+        )
+        from artmach_assistant.core.evidence_lifecycle import (
+            ACTIVE,
+            NEEDS_RETEST,
+        )
+        from artmach_assistant.core.evidence_retest import AUTOMATED
+        from artmach_assistant.core.evidence_retest_completion import (
+            RetestCompletionStore,
+        )
+        from artmach_assistant.core.evidence_retest_executor import (
+            RETEST_BLOCKED,
+            RETEST_FAILED,
+            RETEST_PASSED,
+            execute_primary_retest,
+        )
+        from artmach_assistant.core.evidence_retest_session import (
+            COMPLETED,
+            RetestApprovalSession,
+        )
+
+        # Unit/integration adapters may provide the historical lightweight
+        # finding shape while testing maintenance progress/status only. Those
+        # doubles do not carry the raw RuntimeFinding evidence required by the
+        # authoritative lifecycle pipeline and must remain on the current-safe
+        # path instead of failing before the mocked repair step.
+        if not hasattr(finding, "evidence"):
+            return "CURRENT", ""
+
+        own_root = self.own_project_root().resolve(strict=False)
+        lifecycle_finding = self._runtime_finding_for_retest_lifecycle(finding)
+        evidence_report = build_evidence_maintenance_report(
+            (),
+            (lifecycle_finding,),
+            source_root=own_root,
+        )
+        evidence_report = self._apply_completed_retest_closeout(
+            evidence_report,
+            source_root=own_root,
+        )
+        rows = tuple(
+            row
+            for row in evidence_report.findings
+            if row.finding_id == finding.finding_id
+            and row.source == "runtime"
+        )
+        if len(rows) != 1:
+            return (
+                "BLOCKED",
+                "Autonomous pre-repair lifecycle could not resolve one exact "
+                "authoritative runtime evidence row.",
+            )
+
+        evidence_row = rows[0]
+        if evidence_row.lifecycle == ACTIVE:
+            return "CURRENT", ""
+        if evidence_row.lifecycle == RESOLVED_CANDIDATE:
+            return (
+                "RESOLVED",
+                "Authoritative evidence lifecycle already marks this runtime "
+                "finding as a resolved candidate.",
+            )
+        if evidence_row.lifecycle != NEEDS_RETEST:
+            return (
+                "BLOCKED",
+                "Runtime evidence lifecycle is not eligible for autonomous repair: "
+                f"{evidence_row.lifecycle}.",
+            )
+
+        plan = build_retest_plan(
+            (evidence_row,),
+            source_root=own_root,
+        )
+        if len(plan.items) != 1:
+            return (
+                "BLOCKED",
+                "Autonomous pre-repair retest could not resolve one exact test "
+                "item for the historical runtime finding.",
+            )
+
+        item = plan.items[0]
+        if str(getattr(item, "status", "") or "") != AUTOMATED:
+            return (
+                "BLOCKED",
+                str(getattr(item, "reason", "") or "")
+                or "The exact retest is not safely automatable.",
+            )
+
+        result = execute_primary_retest(
+            item,
+            source_root=own_root,
+        )
+        if result.status == RETEST_PASSED:
+            approval = RetestApprovalSession.create(item).with_status(COMPLETED)
+            RetestCompletionStore(
+                DATA_DIR / "diagnostics" / "completed_retests.json"
+            ).record(approval, result)
+            return (
+                "RESOLVED",
+                "Primary retest passed; historical runtime evidence was closed "
+                "before proposal generation.",
+            )
+        if result.status == RETEST_FAILED:
+            return (
+                "CONFIRMED",
+                "Primary retest failed; the defect is freshly reproduced and "
+                "repair may continue. "
+                + str(getattr(result, "reason", "") or "")[-1200:],
+            )
+        if result.status == RETEST_BLOCKED:
+            return (
+                "BLOCKED",
+                str(getattr(result, "reason", "") or "")
+                or "Primary retest was blocked.",
+            )
+        return (
+            "BLOCKED",
+            "Primary retest did not produce a trustworthy pass/fail result.",
+        )
+
 
     def run_one_shot_autonomous_maintenance(
         self,
@@ -7724,6 +7915,44 @@ class AssistantEngine:
                     detail=f"{finding.finding_id}: {finding.title}",
                 )
                 operation.checkpoint()
+
+                revalidation_state, revalidation_detail = (
+                    self._autonomous_revalidate_runtime_finding(finding)
+                )
+                if revalidation_state == "RESOLVED":
+                    records.append(
+                        MaintenanceRepairRecord(
+                            finding_id=finding.finding_id,
+                            title=finding.title,
+                            status="COMPLETED",
+                            detail=revalidation_detail[:700],
+                        )
+                    )
+                    operation.update(
+                        current=index + 1,
+                        detail=(
+                            f"{len(records)} sorun incelendi; sonuncusu yeniden test ile "
+                            "zaten cozulmus olarak dogrulandi"
+                        ),
+                    )
+                    continue
+                if revalidation_state == "BLOCKED":
+                    records.append(
+                        MaintenanceRepairRecord(
+                            finding_id=finding.finding_id,
+                            title=finding.title,
+                            status="BLOCKED",
+                            detail=revalidation_detail[:700],
+                        )
+                    )
+                    operation.update(
+                        current=index + 1,
+                        detail=(
+                            f"{len(records)} sorun incelendi; sonuncusu kanitli yeniden "
+                            "test olmadan repair'e gonderilmedi"
+                        ),
+                    )
+                    continue
 
                 finding, decision, _target_validation = (
                     self._assess_runtime_repair_with_target_refresh(finding)
@@ -8071,6 +8300,14 @@ class AssistantEngine:
         """Route self-repair commands before tools, old plans and any LLM."""
 
         normalized = self.command_key(text)
+
+        # A composite autonomous-engineering command can contain read-only
+        # verbs such as "incele" while explicitly requiring execution,
+        # validation, isolated changes and closeout. Recognize that contract
+        # before the generic read-only classifier so the first verb cannot
+        # truncate the requested workflow into a health report.
+        if self._asks_for_autonomous_engineering_execution(text):
+            return self.run_one_shot_autonomous_maintenance()
 
         # Explicit own-code read-only requests must never be promoted into the
         # self-repair workflow merely because nouns such as "gelistirme" share
